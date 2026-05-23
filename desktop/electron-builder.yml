@@ -1,0 +1,77 @@
+appId: live.buildstack.agentic
+productName: AgentIC
+copyright: Copyright © 2024-2026 AgentIC
+
+directories:
+  buildResources: resources
+  output: dist
+
+files:
+  - out/**/*
+  - "!out/renderer/**/*"
+
+extraResources:
+  - from: out/renderer
+    to: renderer
+
+asar: true
+compression: maximum
+
+mac:
+  category: public.app-category.developer-tools
+  icon: resources/icon.icns
+  darkModeSupport: true
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+
+dmg:
+  artifactName: AgentIC-${version}-${arch}.dmg
+
+win:
+  icon: resources/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+        - arm64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  artifactName: AgentIC-Setup-${version}.exe
+
+linux:
+  icon: resources/icon.png
+  category: Development
+  target:
+    - target: AppImage
+      arch:
+        - x64
+        - arm64
+    - target: deb
+      arch:
+        - x64
+
+appImage:
+  artifactName: AgentIC-${version}-${arch}.AppImage
+
+publish:
+  provider: github
+  owner: Vickyrrrrrr
+  repo: AgentIC
+  releaseType: release
+
+electronDownload:
+  mirror: https://github.com/nicedoc/electron/releases/download/

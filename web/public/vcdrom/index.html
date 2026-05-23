@@ -1,0 +1,35 @@
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 fill=%22grey%22 font-size=%2290%22>🌊</text></svg>">
+    <title>VCDrom AgentIC Plugin</title>
+    <style>
+      @font-face { font-family: 'Iosevka Drom Web'; font-display: swap; font-weight: 400; src: url('./IosevkaDrom-Regular.woff2') format('woff2'); }
+      html, body { overflow: hidden; margin: 0; padding: 0; background: transparent; }
+      #waveform1 { width: 100%; height: 100%; }
+    </style>
+    <script>
+      let vcdContent = null;
+      const _origFetch = window.fetch;
+      window.fetch = async function(url, opts) {
+        if (typeof url === 'string' && url.includes('AGENTIC_VCD')) {
+            return new Response(vcdContent, { status: 200, headers: {'Content-Type': 'text/plain'} });
+        }
+        return _origFetch(url, opts);
+      };
+      
+      window.addEventListener("message", (e) => {
+        if(e.data && e.data.type === "load_vcd") {
+            vcdContent = e.data.vcd;
+            window.history.replaceState({}, "", "?local=AGENTIC_VCD.vcd");
+            window.VCDrom("waveform1");
+        }
+      });
+    </script>
+    <script src="vcdrom.js"></script>
+  </head>
+  <!-- No onload, we trigger manually via postMessage -->
+  <body>
+    <div id="waveform1"></div>
+  </body>
+</html>

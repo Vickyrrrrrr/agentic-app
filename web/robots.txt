@@ -1,0 +1,11 @@
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: https://agentic.buildstack.live/sitemap.xml
+
+# Allow crawling of main pages
+Disallow: /api/
+Disallow: /auth/
+Disallow: /build/
+Disallow: /stream/
