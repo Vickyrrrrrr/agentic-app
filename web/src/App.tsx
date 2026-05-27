@@ -111,7 +111,7 @@ const PAGE_META: Record<PageKey, { title: string; subtitle: string }> = {
   },
   'Workspace Settings': {
     title: 'Workspace Settings',
-    subtitle: 'Manage model keys, plan context, and operator configuration',
+    subtitle: 'Manage model access, account context, and build preferences',
   },
 };
 
@@ -323,7 +323,7 @@ const App = () => {
       <div style={{ position: 'relative' }}>
         <LandingPage onAuthSuccess={() => {}} />
         <button
-          onClick={() => setSession({ user: { email: 'dev@localhost' } } as unknown as Session)}
+          onClick={() => setSession({ user: { email: 'preview@agentic.app' } } as unknown as Session)}
           style={{
             position: 'fixed', bottom: '1rem', right: '1rem',
             background: '#27272A', color: '#71717A',
@@ -339,6 +339,7 @@ const App = () => {
   }
 
   const currentPageMeta = PAGE_META[selectedPage];
+  const isStudioPage = selectedPage === 'Design Studio';
 
   const renderPage = () => {
     switch (selectedPage) {
@@ -377,7 +378,7 @@ const App = () => {
   return (
     <QueryClientProvider client={queryClient}>
       <ErrorBoundary>
-        <div className={`app-shell workspace-shell${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
+        <div className={`app-shell workspace-shell${sidebarCollapsed ? ' sidebar-collapsed' : ''}${isStudioPage ? ' studio-focus' : ''}`}>
           {/* Mobile sidebar overlay */}
           <div
             className={`sidebar-overlay${mobileMenuOpen ? ' active' : ''}`}
@@ -427,10 +428,10 @@ const App = () => {
 
             <div className="app-sidebar-footer">
               <button className="theme-toggle" onClick={() => setShowBillingModal(true)}>
-                Configure BYOK Keys
+                Model Access
               </button>
               <div className="app-version">
-                {profile?.plan ? `Plan: ${profile.plan}` : 'Local Workspace'} · v3.0
+                {profile?.plan ? `Plan: ${profile.plan}` : 'Workspace'} · v3.0
                 {IS_DESKTOP_APP ? ` · Desktop ${BUILD_FLAVOR}` : ''}
               </div>
             </div>
@@ -472,7 +473,7 @@ const App = () => {
                 )}
 
                 <span className="workspace-plan-badge">
-                  {profile?.auth_enabled ? (profile?.plan || 'free') : 'local'}
+                  {profile?.auth_enabled ? (profile?.plan || 'free') : 'preview'}
                 </span>
 
                 <button

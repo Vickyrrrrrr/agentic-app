@@ -11,14 +11,50 @@ type ByokServerGroup = { model?: string; api_key?: string; base_url?: string };
 type ByokConfigPayload = Record<GroupKey, { model: string; api_key: string; base_url: string }>;
 
 type ModalMode = 'agentic' | 'byok';
+type ProviderPreset = {
+  id: string;
+  label: string;
+  model: string;
+  baseUrl: string;
+};
 
 const DEFAULT_BYOK_MODEL = 'gpt-4o';
 const DEFAULT_BYOK_BASE_URL = 'https://api.openai.com/v1';
+
+const PROVIDER_PRESETS: ProviderPreset[] = [
+  { id: 'openai', label: 'OpenAI', model: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
+  { id: 'nvidia', label: 'NVIDIA NIM', model: 'meta/llama-3.3-70b-instruct', baseUrl: 'https://integrate.api.nvidia.com/v1' },
+  { id: 'openrouter', label: 'OpenRouter', model: 'openai/gpt-4o-mini', baseUrl: 'https://openrouter.ai/api/v1' },
+  { id: 'groq', label: 'Groq', model: 'llama-3.3-70b-versatile', baseUrl: 'https://api.groq.com/openai/v1' },
+  { id: 'together', label: 'Together AI', model: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', baseUrl: 'https://api.together.xyz/v1' },
+  { id: 'mistral', label: 'Mistral', model: 'mistral-large-latest', baseUrl: 'https://api.mistral.ai/v1' },
+  { id: 'deepseek', label: 'DeepSeek', model: 'deepseek-chat', baseUrl: 'https://api.deepseek.com/v1' },
+  { id: 'custom', label: 'Custom OpenAI-compatible', model: DEFAULT_BYOK_MODEL, baseUrl: DEFAULT_BYOK_BASE_URL },
+];
 
 const DEFAULT_GROUPS: GroupState = {
   group1: { model: DEFAULT_BYOK_MODEL, apiKey: '', baseUrl: DEFAULT_BYOK_BASE_URL },
   group2: { model: DEFAULT_BYOK_MODEL, apiKey: '', baseUrl: DEFAULT_BYOK_BASE_URL },
   group3: { model: DEFAULT_BYOK_MODEL, apiKey: '', baseUrl: DEFAULT_BYOK_BASE_URL },
+};
+
+const presetFor = (model: string, baseUrl: string) => {
+  const normalizedBase = (baseUrl || '').replace(/\/+$/, '').toLowerCase();
+  const normalizedModel = (model || '').trim().toLowerCase();
+  return PROVIDER_PRESETS.find((preset) => (
+    preset.id !== 'custom'
+    && preset.baseUrl.replace(/\/+$/, '').toLowerCase() === normalizedBase
+    && (!normalizedModel || preset.model.toLowerCase() === normalizedModel)
+  ))?.id || 'custom';
+};
+
+const applyPresetToGroup = (
+  presetId: string,
+  current: { model: string; apiKey: string; baseUrl: string },
+) => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === presetId);
+  if (!preset || preset.id === 'custom') return current;
+  return { ...current, model: preset.model, baseUrl: preset.baseUrl };
 };
 
 const MaskedKey = ({ value }: { value: string }) => {
@@ -39,12 +75,13 @@ const MaskedKey = ({ value }: { value: string }) => {
 };
 
 const ByokGroupCard = ({
-  groupKey, index, group, onUpdate,
+  groupKey, index, group, onUpdate, onPreset,
 }: {
   groupKey: GroupKey;
   index: number;
   group: { model: string; apiKey: string; baseUrl: string };
   onUpdate: (key: GroupKey, field: 'model' | 'apiKey' | 'baseUrl', value: string) => void;
+  onPreset: (key: GroupKey, presetId: string) => void;
 }) => {
   const [open, setOpen] = useState(index === 0 || !!group.apiKey);
   const titles: Record<GroupKey, string> = {
@@ -70,6 +107,18 @@ const ByokGroupCard = ({
       </button>
       {open && (
         <div className="byok-group-body">
+          <div className="byok-field">
+            <label className="byok-field-label">Provider</label>
+            <select
+              className="byok-field-input"
+              value={presetFor(group.model, group.baseUrl)}
+              onChange={(e) => onPreset(groupKey, e.target.value)}
+            >
+              {PROVIDER_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>{preset.label}</option>
+              ))}
+            </select>
+          </div>
           <div className="byok-field-row">
             <div className="byok-field">
               <label className="byok-field-label">Model</label>
@@ -84,7 +133,7 @@ const ByokGroupCard = ({
               <label className="byok-field-label">Base URL <span className="byok-optional">(optional)</span></label>
               <input
                 className="byok-field-input"
-                placeholder="Leave blank for OpenAI-compatible endpoints"
+                placeholder="https://api.openai.com/v1, OpenRouter, Groq, Ollama..."
                 value={group.baseUrl}
                 onChange={(e) => onUpdate(groupKey, 'baseUrl', e.target.value)}
               />
@@ -127,6 +176,8 @@ export const BillingModal = ({
   const [quickModel, setQuickModel] = useState(DEFAULT_BYOK_MODEL);
   const [quickBaseUrl, setQuickBaseUrl] = useState(DEFAULT_BYOK_BASE_URL);
   const [saved, setSaved] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testStatus, setTestStatus] = useState('');
 
   const applyParsed = (parsed: Partial<Record<GroupKey, ByokServerGroup>>) => {
     const nextGroups: GroupState = {
@@ -205,26 +256,73 @@ export const BillingModal = ({
     setGroups((prev) => ({ ...prev, [key]: { ...prev[key], [field]: value } }));
   };
 
-  const handleSaveByok = async () => {
-    if (!hasAnyKey) return;
-    setSaving(true);
-    setError('');
+  const updateGroupPreset = (key: GroupKey, presetId: string) => {
+    setGroups((prev) => ({
+      ...prev,
+      [key]: applyPresetToGroup(presetId, prev[key]),
+    }));
+  };
 
-    let payload: ByokConfigPayload;
+  const updateQuickPreset = (presetId: string) => {
+    const next = applyPresetToGroup(presetId, {
+      model: quickModel,
+      apiKey: quickKey,
+      baseUrl: quickBaseUrl,
+    });
+    setQuickModel(next.model);
+    setQuickBaseUrl(next.baseUrl);
+  };
+
+  const buildPayload = (): ByokConfigPayload => {
     if (quickMode) {
       const common = {
         model: quickModel.trim() || DEFAULT_BYOK_MODEL,
         api_key: quickKey.trim(),
         base_url: quickBaseUrl.trim() || DEFAULT_BYOK_BASE_URL,
       };
-      payload = { group1: { ...common }, group2: { ...common }, group3: { ...common } };
-    } else {
-      payload = {
-        group1: { model: groups.group1.model.trim() || DEFAULT_BYOK_MODEL, api_key: groups.group1.apiKey.trim(), base_url: groups.group1.baseUrl.trim() || DEFAULT_BYOK_BASE_URL },
-        group2: { model: groups.group2.model.trim() || DEFAULT_BYOK_MODEL, api_key: groups.group2.apiKey.trim(), base_url: groups.group2.baseUrl.trim() || DEFAULT_BYOK_BASE_URL },
-        group3: { model: groups.group3.model.trim() || DEFAULT_BYOK_MODEL, api_key: groups.group3.apiKey.trim(), base_url: groups.group3.baseUrl.trim() || DEFAULT_BYOK_BASE_URL },
-      };
+      return { group1: { ...common }, group2: { ...common }, group3: { ...common } };
     }
+    return {
+      group1: { model: groups.group1.model.trim() || DEFAULT_BYOK_MODEL, api_key: groups.group1.apiKey.trim(), base_url: groups.group1.baseUrl.trim() || DEFAULT_BYOK_BASE_URL },
+      group2: { model: groups.group2.model.trim() || DEFAULT_BYOK_MODEL, api_key: groups.group2.apiKey.trim(), base_url: groups.group2.baseUrl.trim() || DEFAULT_BYOK_BASE_URL },
+      group3: { model: groups.group3.model.trim() || DEFAULT_BYOK_MODEL, api_key: groups.group3.apiKey.trim(), base_url: groups.group3.baseUrl.trim() || DEFAULT_BYOK_BASE_URL },
+    };
+  };
+
+  const handleTestByok = async () => {
+    if (!hasAnyKey) return;
+    setTesting(true);
+    setError('');
+    setTestStatus('');
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const resp = await fetch(`${API_BASE}/profile/byok/test`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
+        body: JSON.stringify({ ...buildPayload(), group: quickMode ? 'group2' : 'group1' }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(toUserError(data?.detail || data?.message, 'Model connection failed. Check the model name, base URL, and API key.'));
+      }
+      setTestStatus(data?.message || 'Model connection verified.');
+    } catch (err: unknown) {
+      setError(toUserError(err, 'Model connection failed. Check the model name, base URL, and API key.'));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleSaveByok = async () => {
+    if (!hasAnyKey) return;
+    setSaving(true);
+    setError('');
+
+    const payload = buildPayload();
 
     try {
       localStorage.setItem('agentic_byok_key', JSON.stringify(payload));
@@ -276,7 +374,7 @@ export const BillingModal = ({
             <div>
               <h2 className="byok-title">Model Settings</h2>
               <p className="byok-subtitle">
-                Choose Infinite or connect your own OpenAI-compatible model.
+                Use AgentIC managed models or connect an OpenAI-compatible provider gateway.
               </p>
             </div>
             <button className="byok-close" onClick={onClose} aria-label="Close">
@@ -317,7 +415,7 @@ export const BillingModal = ({
                   <span className="byok-onboarding-icon"><Sparkles size={16} /></span>
                   <div>
                     <strong>Available now</strong>
-                    <p>Uses your server-side Infinity/AgentIC model configuration. Billing can be added later.</p>
+                    <p>Uses managed model access for autonomous chip planning, RTL, repair, and reporting.</p>
                   </div>
                 </div>
               </div>
@@ -327,7 +425,7 @@ export const BillingModal = ({
                   <Check size={16} />
                   <div>
                     <strong>Infinite Ready</strong>
-                    <span>AgentIC will use the hosted Infinity model configured on this server.</span>
+                    <span>AgentIC will use managed model access for this workspace.</span>
                   </div>
                 </div>
                 <button className="byok-agentic-btn" onClick={onClose}>
@@ -345,15 +443,15 @@ export const BillingModal = ({
                 <div className="byok-onboarding-card">
                   <span className="byok-onboarding-icon"><LockKeyhole size={16} /></span>
                   <div>
-                    <strong>Encrypted &amp; synced to your account</strong>
-                    <p>Keys are encrypted server-side and synced to your profile when auth is available.</p>
+                    <strong>Encrypted and synced to your account</strong>
+                    <p>Keys are encrypted before storage and synced to your profile when sign-in is available.</p>
                   </div>
                 </div>
                 <div className="byok-onboarding-card">
                   <span className="byok-onboarding-icon"><KeyRound size={16} /></span>
                   <div>
-                    <strong>Bring your own LLM provider</strong>
-                    <p>Use any OpenAI-compatible API for model calls, or switch back to Infinite for the hosted model.</p>
+                    <strong>Bring your own model provider</strong>
+                    <p>Use OpenAI, OpenRouter, Groq, Together, Mistral, DeepSeek, Ollama gateways, or any OpenAI-compatible endpoint.</p>
                   </div>
                 </div>
               </div>
@@ -380,6 +478,18 @@ export const BillingModal = ({
                   <p className="byok-quick-hint">
                     One model and one API key for all agent roles. Recommended for most users.
                   </p>
+                  <div className="byok-field">
+                    <label className="byok-field-label">Provider</label>
+                    <select
+                      className="byok-field-input"
+                      value={presetFor(quickModel, quickBaseUrl)}
+                      onChange={(e) => updateQuickPreset(e.target.value)}
+                    >
+                      {PROVIDER_PRESETS.map((preset) => (
+                        <option key={preset.id} value={preset.id}>{preset.label}</option>
+                      ))}
+                    </select>
+                  </div>
                   <div className="byok-field-row">
                     <div className="byok-field">
                       <label className="byok-field-label">Model</label>
@@ -394,7 +504,7 @@ export const BillingModal = ({
                       <label className="byok-field-label">Base URL <span className="byok-optional">(optional)</span></label>
                       <input
                         className="byok-field-input"
-                        placeholder="Leave blank for OpenAI-compatible endpoints"
+                        placeholder="https://api.openai.com/v1, OpenRouter, Groq, Ollama..."
                         value={quickBaseUrl}
                         onChange={(e) => setQuickBaseUrl(e.target.value)}
                       />
@@ -414,7 +524,7 @@ export const BillingModal = ({
                   </div>
                   <div className="byok-guidance-callout">
                     <strong>Quick Setup</strong>
-                    <p>Paste one API key and save it. Builds can run with BYOK immediately.</p>
+                    <p>Paste one key and save it. AgentIC routes the same model through all build agents.</p>
                   </div>
                 </div>
               )}
@@ -423,7 +533,7 @@ export const BillingModal = ({
               {!quickMode && (
                 <div className="byok-advanced">
                   <p className="byok-advanced-hint">
-                    Assign different models/keys to each agent group for cost optimization.
+                    Assign different models or keys to agent groups for cost, speed, or capability preferences.
                   </p>
                   {(['group1', 'group2', 'group3'] as GroupKey[]).map((key, index) => (
                     <ByokGroupCard
@@ -432,20 +542,25 @@ export const BillingModal = ({
                       index={index}
                       group={groups[key]}
                       onUpdate={updateGroup}
+                      onPreset={updateGroupPreset}
                     />
                   ))}
                 </div>
               )}
 
+              {testStatus && <div className="byok-guidance-callout"><strong>Connection verified</strong><p>{testStatus}</p></div>}
               {error && <div className="byok-error">{error}</div>}
 
               {/* Actions */}
               <div className="byok-footer">
                 <span className="byok-footer-note">
-                  BYOK saves model credentials for your workspace.
+                  Model credentials are saved for this workspace.
                 </span>
                 <button className="byok-cancel-btn" onClick={onClose} disabled={saving}>
                   Cancel
+                </button>
+                <button className="byok-cancel-btn" onClick={handleTestByok} disabled={saving || testing || !hasAnyKey}>
+                  {testing ? 'Testing...' : 'Test Connection'}
                 </button>
                 <button
                   className={`byok-save-btn${saved ? ' byok-save-btn--done' : ''}`}
@@ -455,7 +570,7 @@ export const BillingModal = ({
                   {saved ? (
                     <><Check size={16} /> Saved</>
                   ) : saving ? (
-                    'Saving…'
+                    'Saving...'
                   ) : (
                     'Save & Continue'
                   )}

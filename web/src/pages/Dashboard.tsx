@@ -68,7 +68,7 @@ export const Dashboard = ({ selectedDesign }: DashboardProps) => {
                     <h2 className="app-hero-title">{selectedDesign || 'No design selected yet'}</h2>
                     <p className="app-hero-subtitle">
                         Review timing, power, signoff confidence, and the latest execution history in one place.
-                        This is the operator-facing summary of how ready the current design is for the next step.
+                        This summary shows how ready the current design is for the next build step.
                     </p>
                 </div>
                 <div className="app-hero-meta">

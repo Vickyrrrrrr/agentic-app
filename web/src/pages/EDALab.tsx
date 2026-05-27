@@ -230,16 +230,16 @@ endmodule
 
     const openGTKWave = async () => {
         if (!vcdData) return;
-        setOutput(prev => prev + '\n\nLaunch command sent to GTKWave locally on server...');
+        setOutput(prev => prev + '\n\nOpening waveform viewer...');
         try {
             const res = await api.post('/lab/gtkwave', { vcd_data: vcdData });
             if (res.data.success) {
                 setOutput(prev => prev + `\n🌊 ${res.data.message}`);
             } else {
-                setOutput(prev => prev + '\n❌ GTKWave failed to launch... Make sure the AgentIC backend is running on a desktop UI.');
+                setOutput(prev => prev + '\n❌ Waveform viewer could not be opened here. Download the VCD or use the browser preview.');
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n❌ API Error: ' + toUserError(e.response?.data?.detail || e.message, 'Unable to launch waveform viewer.'));
+            setOutput(prev => prev + '\n❌ Error: ' + toUserError(e.response?.data?.detail || e.message, 'Unable to launch waveform viewer.'));
         }
     };
 

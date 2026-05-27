@@ -121,7 +121,7 @@ export const AuthPage = ({ onAuth }: { onAuth: () => void }) => {
 
           <div className="auth-onboarding-note">
             <strong>First-run path</strong>
-            <span>Authenticate, save your BYOK key in the workspace, then launch a build. Public deployments do not use a shared backend LLM key.</span>
+            <span>Sign in, connect managed model access or your own provider key, then launch a chip build.</span>
           </div>
 
           <form className="auth-form" onSubmit={handleSubmit}>

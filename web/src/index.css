@@ -13826,3 +13826,147 @@ footer.landing-premium-footer p {
   background: #111111;
   color: #E8E8E8;
 }
+
+/* Focused Codex-style shell for the VLSI chat workspace */
+.workspace-shell.studio-focus {
+  --studio-rail-width: 58px;
+  --studio-drawer-width: 280px;
+  display: block;
+  background: #0f0f0d;
+}
+
+.workspace-shell.studio-focus .sidebar-overlay,
+.workspace-shell.studio-focus .app-topbar {
+  display: none;
+}
+
+.workspace-shell.studio-focus .app-sidebar {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 40;
+  width: var(--studio-rail-width);
+  height: 100dvh;
+  overflow: hidden;
+  display: flex;
+  padding: 0.72rem 0.5rem;
+  border-right: 1px solid rgba(244, 241, 235, 0.08);
+  background: rgba(14, 14, 12, 0.94);
+  backdrop-filter: blur(18px);
+  box-shadow: 12px 0 34px rgba(0, 0, 0, 0);
+  transition:
+    width 220ms ease,
+    box-shadow 220ms ease,
+    border-color 220ms ease,
+    background 220ms ease;
+}
+
+.workspace-shell.studio-focus .app-sidebar:hover,
+.workspace-shell.studio-focus .app-sidebar:focus-within {
+  width: var(--studio-drawer-width);
+  border-color: rgba(244, 241, 235, 0.14);
+  background: rgba(16, 16, 14, 0.985);
+  box-shadow: 18px 0 46px rgba(0, 0, 0, 0.32);
+}
+
+.workspace-shell.studio-focus .app-brand {
+  width: 100%;
+  min-height: 42px;
+  padding: 0.2rem 0;
+  justify-content: center;
+}
+
+.workspace-shell.studio-focus .app-brand-logo {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid rgba(244, 241, 235, 0.12);
+  background: #171714;
+  color: #d7aa73;
+}
+
+.workspace-shell.studio-focus .app-brand > div:not(.app-brand-logo),
+.workspace-shell.studio-focus .app-sidebar-label,
+.workspace-shell.studio-focus .app-nav-btn span,
+.workspace-shell.studio-focus .theme-toggle,
+.workspace-shell.studio-focus .app-version {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 150ms ease 60ms, visibility 150ms ease 60ms;
+}
+
+.workspace-shell.studio-focus .app-brand > div:not(.app-brand-logo),
+.workspace-shell.studio-focus .app-sidebar-label,
+.workspace-shell.studio-focus .app-version {
+  display: block;
+}
+
+.workspace-shell.studio-focus .app-nav-btn span {
+  display: inline;
+}
+
+.workspace-shell.studio-focus .theme-toggle {
+  display: flex;
+}
+
+.workspace-shell.studio-focus .app-sidebar:hover .app-brand > div:not(.app-brand-logo),
+.workspace-shell.studio-focus .app-sidebar:focus-within .app-brand > div:not(.app-brand-logo),
+.workspace-shell.studio-focus .app-sidebar:hover .app-sidebar-label,
+.workspace-shell.studio-focus .app-sidebar:focus-within .app-sidebar-label,
+.workspace-shell.studio-focus .app-sidebar:hover .app-nav-btn span,
+.workspace-shell.studio-focus .app-sidebar:focus-within .app-nav-btn span,
+.workspace-shell.studio-focus .app-sidebar:hover .theme-toggle,
+.workspace-shell.studio-focus .app-sidebar:focus-within .theme-toggle,
+.workspace-shell.studio-focus .app-sidebar:hover .app-version,
+.workspace-shell.studio-focus .app-sidebar:focus-within .app-version {
+  opacity: 1;
+  visibility: visible;
+}
+
+.workspace-shell.studio-focus .app-sidebar-collapse {
+  right: -0.95rem;
+  top: 0.8rem;
+  width: 28px;
+  height: 28px;
+  border-color: rgba(244, 241, 235, 0.12);
+  background: #151513;
+  color: #9d9890;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.32);
+}
+
+.workspace-shell.studio-focus .app-nav-btn {
+  min-width: 42px;
+  height: 42px;
+  justify-content: flex-start;
+  border-radius: 8px;
+  color: #9d9890;
+}
+
+.workspace-shell.studio-focus .app-nav-btn .nav-icon {
+  flex: 0 0 auto;
+}
+
+.workspace-shell.studio-focus .app-nav-btn:hover,
+.workspace-shell.studio-focus .app-nav-btn.active {
+  background: rgba(244, 241, 235, 0.055);
+  color: #f4f1eb;
+}
+
+.workspace-shell.studio-focus .app-sidebar-footer {
+  width: 100%;
+  overflow: hidden;
+}
+
+.workspace-shell.studio-focus .app-main,
+.workspace-shell.studio-focus .app-content {
+  width: 100%;
+  min-width: 0;
+  min-height: 100dvh;
+  margin: 0;
+  padding: 0;
+  background: #0f0f0d;
+}
+
+.workspace-shell.studio-focus .app-main {
+  padding-left: var(--studio-rail-width);
+}

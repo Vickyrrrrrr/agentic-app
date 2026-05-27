@@ -8,6 +8,10 @@ export interface ElectronAPI {
   getVersion: () => Promise<string>
   getPlatform: () => Promise<string>
   onDeepLink: (callback: (path: string) => void) => () => void
+  executeLocalEDA: (
+    command: string,
+    cwd?: string
+  ) => Promise<{ success: boolean; stdout: string; stderr: string; code: number }>
 }
 
 const electronAPI: ElectronAPI = {
@@ -26,7 +30,10 @@ const electronAPI: ElectronAPI = {
     return () => {
       ipcRenderer.removeListener('deep-link', handler)
     }
-  }
+  },
+
+  executeLocalEDA: (command: string, cwd?: string) =>
+    ipcRenderer.invoke('execute-local-eda', command, cwd)
 }
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI)

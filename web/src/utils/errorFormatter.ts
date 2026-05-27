@@ -4,7 +4,7 @@
  */
 
 export const USER_FRIENDLY_ERRORS: Record<string, string> = {
-  ERR_NETWORK: 'Unable to connect to the server. Please check your internet connection and try again.',
+  ERR_NETWORK: 'Unable to connect to AgentIC. Please check your internet connection and try again.',
   ECONNREFUSED: 'The service is currently unavailable. Please try again in a moment.',
   ECONNABORTED: 'The request took too long. Please try again.',
   default: 'Something went wrong. Please try again or contact support if the issue persists.',
@@ -25,7 +25,7 @@ export function toUserError(error: unknown, fallback = USER_FRIENDLY_ERRORS.defa
       return 'Authentication failed. Please check your API key configuration.';
     }
     if (lower.includes('pdk') || lower.includes('install')) {
-      return 'The required chip manufacturing library is not available on this server.';
+      return 'The required chip manufacturing library is not available for this workspace.';
     }
     if (lower.includes('timeout') || lower.includes('timed out')) {
       return 'The operation took too long. Please try again with a simpler design.';

@@ -82,12 +82,7 @@ export function Pricing() {
   const [currentPlan, setCurrentPlan] = useState<string | null>(null);
   const [currentPlanType, setCurrentPlanType] = useState<string | null>(null);
 
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }: { data: { session: Session | null } }) => setSession(data.session));
-    loadBillingStatus();
-  }, []);
-
-  const loadBillingStatus = async () => {
+  async function loadBillingStatus() {
     try {
       const { data } = await api.get('/billing/status', { validateStatus: () => true });
       if (data) {
@@ -98,7 +93,12 @@ export function Pricing() {
     } catch {
       // ignore
     }
-  };
+  }
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }: { data: { session: Session | null } }) => setSession(data.session));
+    loadBillingStatus();
+  }, []);
 
   const handlePurchase = async (planId: string) => {
     if (!session?.user) {
@@ -124,7 +124,7 @@ export function Pricing() {
         // Test mode: activate immediately without real payment
         const { data: result, status: activateStatus } = await api.post('/billing/verify-payment', {
           razorpay_order_id: order.order_id,
-          razorpay_payment_id: `test_payment_${Date.now()}`,
+          razorpay_payment_id: `test_payment_${order.order_id}`,
           razorpay_signature: '0'.repeat(64),
           user_id: session.user.id,
           plan: planId,

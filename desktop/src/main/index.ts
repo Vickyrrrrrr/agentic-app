@@ -146,6 +146,27 @@ function registerIpcHandlers(): void {
   ipcMain.handle('get-platform', () => {
     return process.platform
   })
+
+  ipcMain.handle('execute-local-eda', async (_event, command: string, cwd?: string) => {
+    try {
+      const { exec } = await import('child_process')
+      const { promisify } = await import('util')
+      const execAsync = promisify(exec)
+
+      const wslCwd = cwd ? `cd ${cwd} && ` : ''
+      const fullCommand = `wsl -d Ubuntu-22.04 bash -c "${wslCwd}${command.replace(/"/g, '\\"')}"`
+
+      const { stdout, stderr } = await execAsync(fullCommand)
+      return { success: true, stdout, stderr, code: 0 }
+    } catch (error: any) {
+      return {
+        success: false,
+        stdout: error.stdout || '',
+        stderr: error.stderr || error.message,
+        code: error.code || 1
+      }
+    }
+  })
 }
 
 function registerProtocol(): void {

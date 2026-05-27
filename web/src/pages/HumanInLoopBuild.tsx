@@ -165,7 +165,7 @@ const PDK_MATURITY: Record<string, { label: string; warning: string }> = {
     experimental: { label: "Experimental", warning: "This PDK is not mature for fabrication. Results may be unreliable." },
     research: { label: "Research Only", warning: "This is an academic/research PDK — not suitable for real chip fabrication." },
     proprietary: { label: "Proprietary", warning: "This PDK requires foundry access and manual setup. Not available for open fabrication." },
-    custom: { label: "Custom PDK", warning: "This custom PDK was detected on the server. Confirm foundry collateral and signoff flow before fabrication." },
+    custom: { label: "Custom PDK", warning: "This custom PDK was detected for the workspace. Confirm foundry collateral and signoff flow before fabrication." },
 };
 
 function slugify(text: string): string {
@@ -311,7 +311,7 @@ export const HumanInLoopBuild = () => {
         const effectiveSkipOpenlane = buildMode === 'quick' || skipOpenlane;
         const effectiveSkipCoverage = skipCoverage || skipStages.has('COVERAGE_CHECK');
         if (!effectiveSkipOpenlane && selectedPdk && !selectedPdk.gds_ready) {
-            setError(`${selectedPdk.key} is not ready for GDSII on this VPS. Install the PDK first or choose an installed PDK.`);
+            setError(`${selectedPdk.key} is not ready for GDSII in this workspace. Choose an available PDK or contact support.`);
             return;
         }
         try {
@@ -691,7 +691,7 @@ export const HumanInLoopBuild = () => {
                             <div className="hitl-launch-meta">
                                 <button className="hitl-control-btn" onClick={() => setShowBillingModal(true)}>
                                     <KeyRound size={15} />
-                                    Configure BYOK
+                                    Configure Model Access
                                 </button>
                                 <div className="hitl-meta-pills">
                                     <span className={`hitl-meta-pill ${hasByokReady ? 'is-ready' : 'is-warn'}`}>
@@ -769,7 +769,7 @@ export const HumanInLoopBuild = () => {
                                                 setSkipStages(new Set(BUILD_MODE_SKIPS[mode]));
                                                 if (mode === 'quick') setSkipOpenlane(true);
                                                 if (mode === 'full' && selectedPdk && !selectedPdk.gds_ready) {
-                                                    setError(`${selectedPdk.key} is not ready for GDSII on this VPS. Install the PDK first or choose an installed PDK.`);
+                                                    setError(`${selectedPdk.key} is not ready for GDSII in this workspace. Choose an available PDK or contact support.`);
                                                 }
                                             }}
                                             >
@@ -858,7 +858,7 @@ export const HumanInLoopBuild = () => {
                                                 <em className="hitl-opt-help">
                                                     {selectedPdk
                                                         ? `${selectedPdk.pdk} · ${selectedPdk.std_cell_library || 'standard cells'} · ${selectedPdk.gds_ready ? 'GDSII ready' : selectedPdk.reason}`
-                                                        : 'PDKs are loaded from the VPS runtime.'}
+                                                        : 'PDKs are loaded from the active build environment.'}
                                                 </em>
                                                 {selectedPdk && selectedPdk.maturity && selectedPdk.maturity !== 'production' && (
                                                     <div style={{
@@ -960,7 +960,7 @@ export const HumanInLoopBuild = () => {
                                     </div>
                                     <ul className="hitl-quickstart-list">
                                         <li>critical architectures that need human checkpoints</li>
-                                        <li>debugging pipeline regressions with explicit approvals</li>
+                                        <li>reviewing pipeline issues with explicit approvals</li>
                                         <li>demonstrating trustworthy agent behavior to collaborators</li>
                                     </ul>
                                 </div>

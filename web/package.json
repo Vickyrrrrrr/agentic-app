@@ -4,10 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "node node_modules/vite/bin/vite.js",
-    "build": "node node_modules/typescript/bin/tsc -b && node node_modules/vite/bin/vite.js build",
+    "dev": "vite",
+    "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "node node_modules/vite/bin/vite.js preview"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@microsoft/fetch-event-source": "^2.0.1",
