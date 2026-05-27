@@ -106,6 +106,17 @@ interface PdkOption {
   reason?: string;
 }
 
+interface PendingBuildPlan {
+  plan_token: string;
+  status: string;
+  expires_at?: number;
+  build_plan: Record<string, any>;
+  build_request: Record<string, any>;
+}
+
+const STUDIO_ACTIVE_JOB_KEY = 'agentic_studio_active_job';
+const STUDIO_PENDING_PLAN_KEY = 'agentic_studio_pending_plan';
+
 const FALLBACK_STAGES: StageSchemaItem[] = [
   { state: 'INIT', label: 'Init', icon: '01' },
   { state: 'SPEC', label: 'Spec', icon: '02' },
@@ -146,6 +157,46 @@ function pdkReadinessLabel(pdk?: PdkOption): string {
   if (pdk.readiness_tier?.includes('research')) return 'Research mode';
   if (pdk.can_synthesize) return 'RTL/synthesis';
   return 'RTL only';
+}
+
+function summarizeBuildPlan(plan: Record<string, any>): string {
+  const features = Array.isArray(plan.features_detected) ? plan.features_detected : [];
+  const gates = Array.isArray(plan.gates) ? plan.gates : [];
+  const stages = Array.isArray(plan.stages) ? plan.stages : [];
+  const willMake = Array.isArray(plan.agentic_will_make) ? plan.agentic_will_make : [];
+  return [
+    '**Confirm VLSI Build Plan**',
+    '',
+    `Design: **${plan.design_name || 'agentic_chip'}**`,
+    `PDK: **${plan.pdk_profile || 'selected PDK'}**`,
+    `Flow: **${plan.flow_profile || plan.physical_flow || 'selected flow'}**`,
+    plan.physical_note ? `Physical note: ${plan.physical_note}` : '',
+    '',
+    willMake.length ? '**AgentIC will make:**' : '',
+    ...willMake.slice(0, 5).map((item: string) => `- ${item}`),
+    features.length ? '' : '',
+    features.length ? '**Detected requirements:**' : '',
+    ...features.slice(0, 6).map((item: string) => `- ${item}`),
+    gates.length ? '' : '',
+    gates.length ? '**Fail-closed gates:**' : '',
+    ...gates.slice(0, 6).map((item: string) => `- ${item}`),
+    stages.length ? '' : '',
+    stages.length ? '**Execution stages:**' : '',
+    ...stages.slice(0, 7).map((item: string) => `- ${item}`),
+    '',
+    'Confirm only if this matches what you want. Otherwise revise the prompt and I will regenerate the plan.',
+  ].filter(Boolean).join('\n');
+}
+
+function restorePendingPlan(raw: string | null): PendingBuildPlan | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed?.plan_token && parsed?.build_plan) return parsed;
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function uniqueArtifacts(files: Artifact[]): Artifact[] {
@@ -305,11 +356,23 @@ function advisorReply(text: string, pdkProfile: string, draft?: PromptDraft): st
   }
 
   if (isCasualPrompt(text)) {
-    return 'Tell me the chip or RTL block you want. I will turn it into a VLSI-aware build, run the pipeline, stream the reasoning and tool output, and keep generated files visible as they land.';
+    return 'Hi. Tell me the chip or RTL block you want. I will turn it into a PDK-aware VLSI build plan first, ask you to confirm it, then run the pipeline and stream files, gates, logs, and evidence as they land.';
   }
 
   if (HELP_RE.test(text) || /[?]/.test(text)) {
-    return 'AgentIC is built for synthesizable digital silicon: RTL, testbenches, formal checks, simulation, synthesis, OpenLane-style layout, reports, and packaging. Describe the block, interface, clock/reset, registers or data widths, verification expectation, target PDK, and whether GDSII is required.';
+    return [
+      'AgentIC can help build synthesizable digital silicon through the VLSI pipeline.',
+      '',
+      '**What I can make**',
+      '- RTL/IP blocks: counters, FSMs, ALUs, FIFOs, UART/SPI/I2C, timers, PWM, GPIO, DMA, bus peripherals.',
+      '- Larger digital systems: simple CPUs, RISC-V-style cores, microcontroller subsystems, DSP/control accelerators.',
+      '- Verification collateral: self-checking testbenches, reference models, formal checks, coverage targets, regression evidence.',
+      '- Implementation collateral: constraints, synthesis reports, timing/power/layout evidence, and GDSII when the selected PDK supports hardening.',
+      '',
+      `Current target: **${pdkProfile}**. I will create a build plan first and wait for your confirmation before starting chip generation.`,
+      '',
+      'Best prompt shape: block name, interface, data width, clock/reset, registers/protocol behavior, target PDK, and RTL-only vs GDS hardening.',
+    ].join('\n');
   }
 
   return 'I can help refine that into a buildable chip request. Add the interface, clock/reset, data width, verification expectation, and target PDK.';
@@ -588,6 +651,8 @@ export const DesignStudio = () => {
   const [jobStatus, setJobStatus] = useState<JobStatus>('queued');
   const [thinking, setThinking] = useState('');
   const [isChatting, setIsChatting] = useState(false);
+  const [isPlanning, setIsPlanning] = useState(false);
+  const [pendingPlan, setPendingPlan] = useState<PendingBuildPlan | null>(() => restorePendingPlan(sessionStorage.getItem(STUDIO_PENDING_PLAN_KEY)));
   const [error, setError] = useState('');
   const [result, setResult] = useState<any>(null);
 
@@ -609,7 +674,7 @@ export const DesignStudio = () => {
   const selectedPdkMode = pdkReadinessLabel(selectedPdk);
   const hasByok = Boolean(profile?.has_byok_key) || Boolean(readByokPayload());
   const byokLabel = modelLabel();
-  const isBusy = phase === 'building' || isChatting;
+  const isBusy = phase === 'building' || isChatting || isPlanning;
   const visibleArtifacts = useMemo(() => {
     const priority = ['.v', '.sv', '.sby', '.sdc', '.gds', '.def', '.lef', '.rpt', '.pdf', '.docx', '.json', '.log'];
     return [...artifacts].sort((a, b) => {
@@ -797,6 +862,55 @@ export const DesignStudio = () => {
     setShowBillingModal(true);
   };
 
+  const makePlanPayload = (description: string, nextDesignName?: string) => ({
+    design_name: nextDesignName || (designName.trim() || suggestDesignName(description) || 'agentic_chip').slice(0, 64),
+    description,
+    skip_openlane: skipOpenlane,
+    skip_coverage: false,
+    strict_gates: true,
+    min_coverage: 80.0,
+    pdk_profile: pdkProfile,
+    flow_profile: flowProfile,
+    plan_type: modelChoice === 'infinite' ? 'agentic_paid' : 'byok',
+    api_key: modelChoice === 'byok' ? readByokPayload() : null,
+    human_in_loop: humanInLoop,
+  });
+
+  const makeBuildPayload = (planPayload: Record<string, any>, confirmationToken: string) => ({
+    design_name: planPayload.design_name,
+    description: planPayload.description,
+    skip_openlane: Boolean(planPayload.skip_openlane),
+    skip_coverage: Boolean(planPayload.skip_coverage),
+    show_thinking: true,
+    flow_profile: planPayload.flow_profile || flowProfile,
+    max_retries: 5,
+    min_coverage: Number(planPayload.min_coverage ?? 80.0),
+    pdk_profile: planPayload.pdk_profile || pdkProfile,
+    plan_type: planPayload.plan_type || (modelChoice === 'infinite' ? 'agentic_paid' : 'byok'),
+    api_key: planPayload.api_key ?? (modelChoice === 'byok' ? readByokPayload() : null),
+    human_in_loop: Boolean(planPayload.human_in_loop ?? true),
+    confirmation_token: confirmationToken,
+  });
+
+  const persistPendingPlan = (plan: PendingBuildPlan | null) => {
+    setPendingPlan(plan);
+    if (plan) sessionStorage.setItem(STUDIO_PENDING_PLAN_KEY, JSON.stringify(plan));
+    else sessionStorage.removeItem(STUDIO_PENDING_PLAN_KEY);
+  };
+
+  const persistActiveJob = (activeJobId: string, activeDesignName: string, activePdk?: string) => {
+    sessionStorage.setItem(STUDIO_ACTIVE_JOB_KEY, JSON.stringify({
+      job_id: activeJobId,
+      design_name: activeDesignName,
+      pdk_profile: activePdk || pdkProfile,
+      started_at: Date.now(),
+    }));
+  };
+
+  const clearActiveJob = () => {
+    sessionStorage.removeItem(STUDIO_ACTIVE_JOB_KEY);
+  };
+
   const proposeDraft = (text: string, nextMessages?: ChatMessage[]) => {
     const draft = makeDraftFromPrompt(text, pdkProfile);
     setDraftSpec(draft.spec);
@@ -824,19 +938,46 @@ export const DesignStudio = () => {
         api_key: modelChoice === 'byok' ? readByokPayload() : null,
         pdk_profile: pdkProfile,
       });
-      setMessages((previous) => [...previous, { role: 'assistant', content: res.data?.reply || 'I am ready. Describe the chip block and I will start the VLSI flow.' }]);
+      if (res.data?.build_plan_preview) {
+        const preview = res.data.build_plan_preview;
+        const planPayload = makePlanPayload(String(preview.description || text), preview.design_name);
+        const restored: PendingBuildPlan = {
+          plan_token: '',
+          status: 'preview',
+          build_plan: preview,
+          build_request: planPayload,
+        };
+        persistPendingPlan(restored);
+        setDesignName(preview.design_name || planPayload.design_name);
+        setMessages((previous) => [
+          ...previous,
+          { role: 'assistant', content: `${res.data?.reply || 'I prepared a VLSI build plan.'}\n\n${summarizeBuildPlan(preview)}` },
+        ]);
+        return;
+      }
+      setMessages((previous) => [...previous, { role: 'assistant', content: res.data?.reply || 'I am ready. Describe the chip block and I will prepare a VLSI build plan for confirmation.' }]);
     } catch (err: unknown) {
       const detail = typeof err === 'object' && err !== null && 'response' in err
         ? (err as { response?: { data?: { detail?: unknown } } }).response?.data?.detail
         : undefined;
-      setMessages((previous) => [...previous, { role: 'assistant', tone: 'error', content: toUserError(detail, 'The selected model route did not return a response. Check the provider/model settings or try again.') }]);
+      const fallback = advisorReply(text, pdkProfile);
+      const diagnostic = toUserError(detail, '');
+      setMessages((previous) => [
+        ...previous,
+        {
+          role: 'assistant',
+          content: diagnostic
+            ? `${fallback}\n\n_Note: the selected model route was unavailable, so I answered from the AgentIC pipeline contract._`
+            : fallback,
+        },
+      ]);
     } finally {
       setThinking('');
       setIsChatting(false);
     }
   };
 
-  const launch = async (descriptionOverride?: string, visibleUserPrompt?: string) => {
+  const createBuildPlan = async (descriptionOverride?: string, visibleUserPrompt?: string) => {
     const description = normalizePrompt(descriptionOverride || prompt.trim() || draftSpec.trim() || lastBuildPrompt.trim());
     if (!description || phase === 'building') return;
 
@@ -853,20 +994,67 @@ export const DesignStudio = () => {
     }
 
     const nextDesignName = (designName.trim() || suggestDesignName(description) || 'agentic_chip').slice(0, 64);
-    const byok = modelChoice === 'byok' ? readByokPayload() : null;
     const shouldSkipOpenlane = skipOpenlane;
-    const pdkModeNote = shouldSkipOpenlane
-      ? ` ${pdkProfile} is in ${selectedPdkMode.toLowerCase()}, so hardening stays gated off until the backend exposes a verified physical-flow profile.`
+
+    const planPayload = makePlanPayload(description, nextDesignName);
+    planPayload.skip_openlane = shouldSkipOpenlane;
+
+    setError('');
+    setIsPlanning(true);
+    setThinking('Preparing a PDK-aware VLSI build plan for confirmation.');
+
+    if (visibleUserPrompt) addUser(visibleUserPrompt);
+
+    try {
+      const res = await api.post('/build/plan', planPayload);
+      const nextPlan: PendingBuildPlan = {
+        plan_token: res.data.plan_token,
+        status: res.data.status || 'draft',
+        expires_at: res.data.expires_at,
+        build_plan: res.data.build_plan || {},
+        build_request: planPayload,
+      };
+      persistPendingPlan(nextPlan);
+      setDraftSpec('');
+      setDraftSummary('');
+      setLastBuildPrompt(description);
+      setPrompt('');
+      setDesignName(res.data.build_plan?.design_name || nextDesignName);
+      addAssistant(summarizeBuildPlan(res.data.build_plan || nextPlan.build_plan));
+    } catch (err: unknown) {
+      if (isNetworkError(err)) {
+        setError('Unable to connect to the build service.');
+      } else {
+        const detail = typeof err === 'object' && err !== null && 'response' in err
+          ? (err as { response?: { data?: { detail?: unknown } } }).response?.data?.detail
+          : undefined;
+        const msg = toUserError(detail, 'Build failed to start.');
+        setError(msg);
+        addAssistant(`**Build plan could not be created**\n\n${msg}`, 'error');
+      }
+    } finally {
+      setThinking('');
+      setIsPlanning(false);
+    }
+  };
+
+  const startConfirmedBuild = async (plan: PendingBuildPlan, visibleUserPrompt?: string) => {
+    if (phase === 'building') return;
+    if (modelChoice === 'byok' && !hasByok) {
+      requestByokSetup();
+      return;
+    }
+    let activePlan = plan;
+
+    const byok = activePlan.build_request?.api_key ?? (modelChoice === 'byok' ? readByokPayload() : null);
+    const activeDesignName = activePlan.build_plan?.design_name || activePlan.build_request?.design_name || designName || 'agentic_chip';
+    const pdkModeNote = activePlan.build_request?.skip_openlane
+      ? ` ${activePlan.build_request?.pdk_profile || pdkProfile} is in RTL/synthesis evidence mode for this run.`
       : '';
 
     abortRef.current?.abort();
     userPickedArtifact.current = false;
     artifactFetchAt.current = 0;
-    setDraftSpec('');
-    setDraftSummary('');
-    setLastBuildPrompt(description);
-    setPrompt('');
-    setPhase('building');
     setError('');
     setResult(null);
     setEvents([]);
@@ -875,36 +1063,38 @@ export const DesignStudio = () => {
     setArtifactPreview('');
     setNewArtifactNames(new Set());
     setJobStatus('queued');
-    setThinking('Starting AgentIC build pipeline.');
-
+    setThinking('Confirming the VLSI plan and starting AgentIC build pipeline.');
     if (visibleUserPrompt) addUser(visibleUserPrompt);
-    addAssistant(
-      `Starting **${nextDesignName}**. AgentIC is planning the chip, running the VLSI pipeline, and will summarize each stage as files and evidence arrive.${pdkModeNote}`,
-    );
 
     try {
-      const res = await api.post('/build', {
-        design_name: nextDesignName,
-        description,
-        skip_openlane: shouldSkipOpenlane,
-        skip_coverage: false,
-        show_thinking: true,
-        flow_profile: flowProfile,
-        max_retries: 5,
-        min_coverage: 80.0,
-        pdk_profile: pdkProfile,
-        plan_type: modelChoice === 'infinite' ? 'agentic_paid' : 'byok',
-        api_key: byok,
-        human_in_loop: humanInLoop,
-      });
-
+      if (!activePlan.plan_token) {
+        const planRes = await api.post('/build/plan', activePlan.build_request);
+        activePlan = {
+          plan_token: planRes.data.plan_token,
+          status: planRes.data.status || 'draft',
+          expires_at: planRes.data.expires_at,
+          build_plan: planRes.data.build_plan || activePlan.build_plan,
+          build_request: activePlan.build_request,
+        };
+        persistPendingPlan(activePlan);
+      }
+      const confirm = await api.post(`/build/plan/${activePlan.plan_token}/confirm`);
+      const confirmationToken = confirm.data?.confirmation_token || activePlan.plan_token;
+      const buildPayload = makeBuildPayload(activePlan.build_request, confirmationToken);
+      const res = await api.post('/build', buildPayload);
       const activeJobId = res.data.job_id;
-      const activeDesignName = res.data.design_name || nextDesignName;
+      const backendDesignName = res.data.design_name || activeDesignName;
+      persistPendingPlan(null);
+      persistActiveJob(activeJobId, backendDesignName, buildPayload.pdk_profile);
+      setPhase('building');
       setJobId(activeJobId);
-      setDesignName(activeDesignName);
+      setDesignName(backendDesignName);
       setJobStatus('running');
-      void stream(activeJobId, byok, activeDesignName);
-      void fetchArtifacts(activeDesignName, true);
+      addAssistant(
+        `Confirmed. Starting **${backendDesignName}**. AgentIC will run the VLSI pipeline against the approved plan and summarize each stage as files and evidence arrive.${pdkModeNote}`,
+      );
+      void stream(activeJobId, byok, backendDesignName);
+      void fetchArtifacts(backendDesignName, true);
     } catch (err: unknown) {
       setPhase('idle');
       setThinking('');
@@ -914,7 +1104,7 @@ export const DesignStudio = () => {
         const detail = typeof err === 'object' && err !== null && 'response' in err
           ? (err as { response?: { data?: { detail?: unknown } } }).response?.data?.detail
           : undefined;
-        const msg = toUserError(detail, 'Build failed to start.');
+        const msg = toUserError(detail, 'Confirmed build failed to start.');
         setError(msg);
         addAssistant(`**Build could not start**\n\n${msg}`, 'error');
       }
@@ -999,11 +1189,71 @@ export const DesignStudio = () => {
     });
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    api.get('/workspace/active')
+      .then((res) => {
+        if (cancelled) return;
+        const activeJob = res.data?.active_job;
+        if (activeJob?.job_id && ['queued', 'running', 'cancelling'].includes(activeJob.status) && phase === 'idle') {
+          const activeDesignName = activeJob.design_name || designName || 'agentic_chip';
+          setJobId(activeJob.job_id);
+          setDesignName(activeDesignName);
+          setPhase('building');
+          setJobStatus(activeJob.status);
+          persistActiveJob(activeJob.job_id, activeDesignName, pdkProfile);
+          setEvents((previous) => previous.length ? previous : [{
+            type: 'log',
+            state: activeJob.current_state || 'INIT',
+            message: 'Reattached to active backend build after navigation.',
+            step: 0,
+            total_steps: activeStages.length,
+            timestamp: new Date().toISOString(),
+          }]);
+          addAssistant(`Reattached to active build **${activeDesignName}**. The backend kept the run registered while the page changed.`);
+          void stream(activeJob.job_id, readByokPayload(), activeDesignName);
+          void fetchArtifacts(activeDesignName, true);
+          return;
+        }
+
+        const activePlan = res.data?.active_plan;
+        if (activePlan?.plan_token && activePlan?.build_plan && !pendingPlan && phase === 'idle') {
+          const plan = activePlan.build_plan;
+          const reconstructed: PendingBuildPlan = {
+            plan_token: activePlan.plan_token,
+            status: activePlan.status || 'draft',
+            expires_at: activePlan.expires_at,
+            build_plan: plan,
+            build_request: {
+              ...makePlanPayload(plan.description || '', plan.design_name),
+              description: plan.description || '',
+              design_name: plan.design_name || 'agentic_chip',
+              pdk_profile: plan.pdk_profile || pdkProfile,
+              flow_profile: plan.flow_profile || flowProfile,
+              skip_openlane: plan.physical_flow !== 'rtl_to_gds',
+            },
+          };
+          persistPendingPlan(reconstructed);
+          setDesignName(plan.design_name || '');
+          setPdkProfile(plan.pdk_profile || pdkProfile);
+          addAssistant(`Restored pending build plan for **${plan.design_name || 'agentic_chip'}**. Confirm it when you are ready to start generation.`);
+        }
+      })
+      .catch(() => {
+        const cached = restorePendingPlan(sessionStorage.getItem(STUDIO_PENDING_PLAN_KEY));
+        if (cached && !pendingPlan) persistPendingPlan(cached);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const finish = async (status: string, activeJobId: string, activeDesignName: string) => {
     const finalStatus: JobStatus = status === 'done' ? 'done' : status === 'cancelled' ? 'cancelled' : 'failed';
     setJobStatus(finalStatus);
     setPhase('done');
     setThinking('');
+    clearActiveJob();
     await fetchArtifacts(activeDesignName, true);
 
     try {
@@ -1034,6 +1284,8 @@ export const DesignStudio = () => {
 
   const reset = () => {
     abortRef.current?.abort();
+    persistPendingPlan(null);
+    clearActiveJob();
     userPickedArtifact.current = false;
     setPhase('idle');
     setEvents([]);
@@ -1053,15 +1305,21 @@ export const DesignStudio = () => {
     const text = prompt.trim();
     if (isBusy) return;
 
+    if (isConfirmationPrompt(text) && pendingPlan) {
+      setPrompt('');
+      await startConfirmedBuild(pendingPlan, text);
+      return;
+    }
+
     if (!text && draftSpec.trim()) {
-      await launch(draftSpec, 'build it');
+      await createBuildPlan(draftSpec, 'build it');
       return;
     }
     if (!text) return;
 
     if (isConfirmationPrompt(text) && draftSpec.trim()) {
       setPrompt('');
-      await launch(draftSpec, text);
+      await createBuildPlan(draftSpec, text);
       return;
     }
 
@@ -1070,13 +1328,18 @@ export const DesignStudio = () => {
 
     if (isBuildReadyPrompt(text)) {
       const draft = makeDraftFromPrompt(text, pdkProfile);
-      await launch(draft.spec, text);
+      await createBuildPlan(draft.spec, text);
       return;
     }
 
     if (hasHardwareIntent(text)) {
       const draft = makeDraftFromPrompt(text, pdkProfile);
-      await launch(draft.spec, text);
+      await createBuildPlan(draft.spec, text);
+      return;
+    }
+
+    if (isCasualPrompt(text) || HELP_RE.test(text) || /[?]/.test(text)) {
+      setMessages([...nextMessages, { role: 'assistant', content: advisorReply(text, pdkProfile) }]);
       return;
     }
 
@@ -1160,6 +1423,24 @@ export const DesignStudio = () => {
               <div className="codex-vlsi-draft-label">Draft ready</div>
               <p>{draftSummary}</p>
               <span>Type "build it" to start, or revise the chip request.</span>
+            </div>
+          )}
+          {pendingPlan && phase === 'idle' && (
+            <div className="codex-vlsi-draft codex-vlsi-plan-card">
+              <div className="codex-vlsi-draft-label">Plan waiting for confirmation</div>
+              <p>
+                {pendingPlan.build_plan?.design_name || pendingPlan.build_request?.design_name || 'agentic_chip'} on{' '}
+                {pendingPlan.build_plan?.pdk_profile || pendingPlan.build_request?.pdk_profile || pdkProfile}
+              </p>
+              <span>Confirm to start the chip build, or type a revised request to regenerate the plan.</span>
+              <div className="codex-vlsi-plan-actions">
+                <button type="button" onClick={() => void startConfirmedBuild(pendingPlan, 'confirm plan')}>
+                  Confirm and build
+                </button>
+                <button type="button" onClick={() => persistPendingPlan(null)}>
+                  Discard
+                </button>
+              </div>
             </div>
           )}
           <div className="codex-vlsi-routebar">

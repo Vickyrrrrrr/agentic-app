@@ -160,6 +160,14 @@ interface PdkOption {
     fabrication_ready?: boolean;
 }
 
+interface PendingBuildPlan {
+    plan_token: string;
+    status: string;
+    expires_at?: number;
+    build_plan: Record<string, any>;
+    build_request: Record<string, any>;
+}
+
 const PDK_MATURITY: Record<string, { label: string; warning: string }> = {
     production: { label: "Production Ready", warning: "" },
     experimental: { label: "Experimental", warning: "This PDK is not mature for fabrication. Results may be unreliable." },
@@ -188,13 +196,34 @@ function notifyBuild(title: string, body: string) {
     }
 }
 
-type Phase = 'prompt' | 'building' | 'done';
+type Phase = 'prompt' | 'review' | 'building' | 'done';
 
 // sessionStorage keys for build resume after navigation
 const SS_JOB_ID     = 'hitl_job_id';
 const SS_PHASE      = 'hitl_phase';
 const SS_DESIGN     = 'hitl_design_name';
 const SS_PROMPT     = 'hitl_prompt';
+const SS_PLAN       = 'hitl_pending_plan';
+
+function restorePlan(raw: string | null): PendingBuildPlan | null {
+    if (!raw) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        if (parsed?.plan_token && parsed?.build_plan) return parsed;
+    } catch {
+        return null;
+    }
+    return null;
+}
+
+function summarizePlan(plan: Record<string, any>): string[] {
+    return [
+        `Design: ${plan.design_name || 'agentic_chip'}`,
+        `PDK: ${plan.pdk_profile || 'selected PDK'}`,
+        `Flow: ${plan.flow_profile || plan.physical_flow || 'selected flow'}`,
+        plan.physical_note || '',
+    ].filter(Boolean);
+}
 
 export const HumanInLoopBuild = () => {
     // Restore from sessionStorage if user navigated away mid-build
@@ -212,6 +241,7 @@ export const HumanInLoopBuild = () => {
     const [result, setResult] = useState<any>(null);
     const [error, setError] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [pendingPlan, setPendingPlan] = useState<PendingBuildPlan | null>(() => restorePlan(sessionStorage.getItem(SS_PLAN)));
     const [showBillingModal, setShowBillingModal] = useState(false);
     // SSE abort controller — only aborted on explicit Cancel, never on unmount
     const abortCtrlRef = useRef<AbortController | null>(null);
@@ -269,6 +299,12 @@ export const HumanInLoopBuild = () => {
             .catch(() => setPdkOptions([]));
     }, []);
 
+    const persistPendingPlan = (plan: PendingBuildPlan | null) => {
+        setPendingPlan(plan);
+        if (plan) sessionStorage.setItem(SS_PLAN, JSON.stringify(plan));
+        else sessionStorage.removeItem(SS_PLAN);
+    };
+
     // Persist active build state to sessionStorage so navigation doesn't lose it
     useEffect(() => {
         if (phase === 'building' && jobId) {
@@ -284,6 +320,25 @@ export const HumanInLoopBuild = () => {
         sessionStorage.removeItem(SS_PHASE);
         sessionStorage.removeItem(SS_DESIGN);
         sessionStorage.removeItem(SS_PROMPT);
+        sessionStorage.removeItem(SS_PLAN);
+    };
+
+    const makePlanPayload = () => {
+        const effectiveSkipOpenlane = buildMode === 'quick' || skipOpenlane;
+        const effectiveSkipCoverage = skipCoverage || skipStages.has('COVERAGE_CHECK');
+        const currentByokKey = localStorage.getItem('agentic_byok_key');
+        return {
+            design_name: designName || slugify(prompt),
+            description: prompt,
+            skip_openlane: effectiveSkipOpenlane,
+            skip_coverage: effectiveSkipCoverage,
+            min_coverage: minCoverage,
+            strict_gates: strictGates,
+            pdk_profile: pdkProfile,
+            human_in_loop: true,
+            api_key: currentByokKey || null,
+            plan_type: 'byok',
+        };
     };
 
     const handleLaunch = async () => {
@@ -309,28 +364,61 @@ export const HumanInLoopBuild = () => {
         }
 
         const effectiveSkipOpenlane = buildMode === 'quick' || skipOpenlane;
-        const effectiveSkipCoverage = skipCoverage || skipStages.has('COVERAGE_CHECK');
         if (!effectiveSkipOpenlane && selectedPdk && !selectedPdk.gds_ready) {
             setError(`${selectedPdk.key} is not ready for GDSII in this workspace. Choose an available PDK or contact support.`);
             return;
         }
         try {
+            setIsSubmitting(true);
+            const payload = makePlanPayload();
+            const res = await api.post(`/build/plan`, payload);
+            persistPendingPlan({
+                plan_token: res.data.plan_token,
+                status: res.data.status || 'draft',
+                expires_at: res.data.expires_at,
+                build_plan: res.data.build_plan || {},
+                build_request: payload,
+            });
+            setDesignName(res.data.build_plan?.design_name || payload.design_name);
+            setPhase('review');
+        } catch (e: any) {
+            if (isNetworkError(e)) {
+                setError('Unable to connect to the build service. Please try again later.');
+            } else {
+                setError(toUserError(e?.response?.data?.detail, 'Build plan failed. Please try again or contact support.'));
+            }
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    const startConfirmedBuild = async () => {
+        if (!pendingPlan || isSubmitting) return;
+        setIsSubmitting(true);
+        setError('');
+        try {
+            const confirm = await api.post(`/build/plan/${pendingPlan.plan_token}/confirm`);
+            const confirmationToken = confirm.data?.confirmation_token || pendingPlan.plan_token;
+            const payload = pendingPlan.build_request;
+            const currentByokKey = localStorage.getItem('agentic_byok_key');
             const res = await api.post(`/build`, {
-                design_name: designName || slugify(prompt),
-                description: prompt,
-                skip_openlane: effectiveSkipOpenlane,
-                skip_coverage: effectiveSkipCoverage,
+                design_name: payload.design_name,
+                description: payload.description,
+                skip_openlane: Boolean(payload.skip_openlane),
+                skip_coverage: Boolean(payload.skip_coverage),
                 max_retries: maxRetries,
                 show_thinking: showThinking,
-                min_coverage: minCoverage,
+                min_coverage: Number(payload.min_coverage ?? minCoverage),
                 strict_gates: strictGates,
-                pdk_profile: pdkProfile,
+                pdk_profile: payload.pdk_profile || pdkProfile,
                 human_in_loop: true,
                 skip_stages: Array.from(skipStages),
                 api_key: currentByokKey || null,
                 plan_type: 'byok',
+                confirmation_token: confirmationToken,
             });
             const { job_id, design_name: dn } = res.data;
+            persistPendingPlan(null);
             setJobId(job_id);
             if (dn) setDesignName(dn);
             setJobStatus('running');
@@ -340,8 +428,10 @@ export const HumanInLoopBuild = () => {
             if (isNetworkError(e)) {
                 setError('Unable to connect to the build service. Please try again later.');
             } else {
-                setError(toUserError(e?.response?.data?.detail, 'Build failed. Please try again or contact support.'));
+                setError(toUserError(e?.response?.data?.detail, 'Confirmed build failed. Please try again or contact support.'));
             }
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
@@ -496,7 +586,53 @@ export const HumanInLoopBuild = () => {
     useEffect(() => {
         if (savedPhase === 'building' && savedJobId) {
             void startStreaming(savedJobId);
+            return;
         }
+        api.get('/workspace/active')
+            .then((res) => {
+                const activeJob = res.data?.active_job;
+                if (activeJob?.job_id && ['queued', 'running', 'cancelling'].includes(activeJob.status)) {
+                    setJobId(activeJob.job_id);
+                    setDesignName(activeJob.design_name || savedDesign || 'agentic_chip');
+                    setJobStatus(activeJob.status);
+                    setCurrentStage(activeJob.current_state || 'INIT');
+                    setPhase('building');
+                    void startStreaming(activeJob.job_id);
+                    return;
+                }
+                const activePlan = res.data?.active_plan;
+                if (activePlan?.plan_token && activePlan?.build_plan && !pendingPlan) {
+                    const plan = activePlan.build_plan;
+                    persistPendingPlan({
+                        plan_token: activePlan.plan_token,
+                        status: activePlan.status || 'draft',
+                        expires_at: activePlan.expires_at,
+                        build_plan: plan,
+                        build_request: {
+                            design_name: plan.design_name || 'agentic_chip',
+                            description: plan.description || '',
+                            skip_openlane: plan.physical_flow !== 'rtl_to_gds',
+                            skip_coverage: false,
+                            min_coverage: minCoverage,
+                            strict_gates: strictGates,
+                            pdk_profile: plan.pdk_profile || pdkProfile,
+                            human_in_loop: true,
+                            api_key: localStorage.getItem('agentic_byok_key') || null,
+                            plan_type: 'byok',
+                        },
+                    });
+                    setDesignName(plan.design_name || '');
+                    setPrompt(plan.description || savedPrompt || '');
+                    setPhase('review');
+                }
+            })
+            .catch(() => {
+                const cached = restorePlan(sessionStorage.getItem(SS_PLAN));
+                if (cached && !pendingPlan) {
+                    persistPendingPlan(cached);
+                    setPhase('review');
+                }
+            });
         // IMPORTANT: do not abort on unmount; the backend job runs independently.
         // Only explicit Cancel/Reset should abort the local stream.
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -966,6 +1102,61 @@ export const HumanInLoopBuild = () => {
                                 </div>
                             </aside>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {phase === 'review' && pendingPlan && (
+                <div className="hitl-prompt-screen">
+                    <div className="hitl-launch-shell">
+                        <section className="hitl-prompt-card hitl-prompt-card--premium">
+                            <div className="hitl-section-head">
+                                <div>
+                                    <span className="hitl-section-label">Build Plan</span>
+                                    <h2 className="hitl-section-title">Confirm before AgentIC generates the chip</h2>
+                                </div>
+                                <span className="hitl-section-chip">{pendingPlan.build_plan?.pdk_profile || pdkProfile}</span>
+                            </div>
+                            <div className="hitl-briefing-list">
+                                {summarizePlan(pendingPlan.build_plan).map((line, index) => (
+                                    <div key={`${line}-${index}`} className="hitl-briefing-item">
+                                        <span className="hitl-briefing-index">0{index + 1}</span>
+                                        <div>
+                                            <p>{line}</p>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                            {Array.isArray(pendingPlan.build_plan?.features_detected) && (
+                                <div className="hitl-quickstart-block">
+                                    <div className="hitl-quickstart-head">
+                                        <Waypoints size={16} />
+                                        <span>Detected requirements</span>
+                                    </div>
+                                    <ul className="hitl-quickstart-list">
+                                        {pendingPlan.build_plan.features_detected.slice(0, 6).map((item: string) => (
+                                            <li key={item}>{item}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+                            {error && <div className="hitl-error">{error}</div>}
+                            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                                <button className="hitl-launch-btn" onClick={startConfirmedBuild} disabled={isSubmitting}>
+                                    {isSubmitting ? 'Starting...' : 'Confirm Plan and Build'}
+                                    <ArrowRight size={16} />
+                                </button>
+                                <button
+                                    className="hitl-control-btn"
+                                    onClick={() => {
+                                        setPhase('prompt');
+                                        persistPendingPlan(null);
+                                    }}
+                                >
+                                    Revise Brief
+                                </button>
+                            </div>
+                        </section>
                     </div>
                 </div>
             )}

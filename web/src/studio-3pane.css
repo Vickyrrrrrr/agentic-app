@@ -413,6 +413,39 @@
   font-size: 0.76rem;
 }
 
+.codex-vlsi-plan-card {
+  border-color: rgba(52, 211, 153, 0.36);
+  background: rgba(52, 211, 153, 0.07);
+}
+
+.codex-vlsi-plan-card .codex-vlsi-draft-label {
+  color: #86efac;
+}
+
+.codex-vlsi-plan-actions {
+  display: flex;
+  gap: 0.45rem;
+  margin-top: 0.65rem;
+}
+
+.codex-vlsi-plan-actions button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 0.36rem 0.55rem;
+  cursor: pointer;
+}
+
+.codex-vlsi-plan-actions button:first-child {
+  border-color: rgba(52, 211, 153, 0.45);
+  background: #34d399;
+  color: #052e1b;
+  font-weight: 700;
+}
+
 .codex-vlsi-input-shell {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 38px;
