@@ -92,6 +92,28 @@ export const ApprovalCard: React.FC<Props> = ({ data, designName, jobId, onAppro
                 {data.summary || `${fmtStage(data.stage_name)} completed successfully.`}
             </p>
 
+            {/* Decisions and Warnings */}
+            {(data.decisions?.length > 0 || data.warnings?.length > 0) && (
+                <div className="ac-insights">
+                    {data.decisions?.length > 0 && (
+                        <div className="ac-decisions">
+                            <strong className="ac-insight-title">Key Decisions:</strong>
+                            <ul className="ac-insight-list">
+                                {data.decisions.map((d, i) => <li key={i}>{d}</li>)}
+                            </ul>
+                        </div>
+                    )}
+                    {data.warnings?.length > 0 && (
+                        <div className="ac-warnings">
+                            <strong className="ac-insight-title">Warnings:</strong>
+                            <ul className="ac-insight-list ac-insight-list--warn">
+                                {data.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                            </ul>
+                        </div>
+                    )}
+                </div>
+            )}
+
             {/* Artifact file list */}
             {artifactsExpanded && data.artifacts && data.artifacts.length > 0 && (
                 <div className="ac-artifacts">

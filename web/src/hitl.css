@@ -2589,3 +2589,28 @@
     grid-template-columns: 1fr;
   }
 }
+
+.ac-insights {
+  margin: 12px 0;
+  padding: 12px;
+  background: var(--bg-tertiary, #f8fafc);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+.ac-insight-title {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-primary, #334155);
+}
+.ac-insight-list {
+  margin: 0 0 12px 0;
+  padding-left: 16px;
+  color: var(--text-secondary, #475569);
+}
+.ac-insight-list:last-child {
+  margin-bottom: 0;
+}
+.ac-insight-list--warn {
+  color: var(--text-warn, #b45309);
+}
+

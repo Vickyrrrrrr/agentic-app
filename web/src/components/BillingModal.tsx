@@ -23,6 +23,7 @@ const DEFAULT_BYOK_BASE_URL = 'https://api.openai.com/v1';
 
 const PROVIDER_PRESETS: ProviderPreset[] = [
   { id: 'openai', label: 'OpenAI', model: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
+  { id: 'anthropic', label: 'Anthropic (Claude)', model: 'claude-3-5-sonnet-latest', baseUrl: '' },
   { id: 'nvidia', label: 'NVIDIA NIM', model: 'meta/llama-3.3-70b-instruct', baseUrl: 'https://integrate.api.nvidia.com/v1' },
   { id: 'openrouter', label: 'OpenRouter', model: 'openai/gpt-4o-mini', baseUrl: 'https://openrouter.ai/api/v1' },
   { id: 'groq', label: 'Groq', model: 'llama-3.3-70b-versatile', baseUrl: 'https://api.groq.com/openai/v1' },
@@ -517,7 +518,16 @@ export const BillingModal = ({
                       type="password"
                       placeholder="sk-... or provider-specific key"
                       value={quickKey}
-                      onChange={(e) => setQuickKey(e.target.value)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setQuickKey(val);
+                        if (val.startsWith('sk-ant-')) updateQuickPreset('anthropic');
+                        else if (val.startsWith('gsk_')) updateQuickPreset('groq');
+                        else if (val.startsWith('sk-or-')) updateQuickPreset('openrouter');
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleSaveByok();
+                      }}
                       autoFocus
                     />
                     <MaskedKey value={quickKey} />

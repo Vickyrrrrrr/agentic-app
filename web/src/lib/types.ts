@@ -25,6 +25,18 @@ export interface BuildEvent {
   agent_name?: string;
   thought_type?: string;
   content?: string;
+  
+  // Enriched fields for HUMAN-IN-LOOP stages
+  is_live_waiting?: boolean;
+  stage_name?: string;
+  summary?: string;
+  artifacts?: Array<{ name: string; path: string; description: string; type?: string }>;
+  decisions?: string[];
+  warnings?: string[];
+  next_stage_name?: string;
+  next_stage_preview?: string;
+  options?: Array<{ key: string; label: string; description?: string }>;
+  changes?: unknown[];
 }
 
 export interface BuildResult {

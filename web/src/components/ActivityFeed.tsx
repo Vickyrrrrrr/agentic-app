@@ -150,10 +150,7 @@ export const ActivityFeed: React.FC<Props> = ({ events, thinkingData }) => {
                         const type = evt.thought_type || 'thought';
                         const border = BORDER_COLORS[type] || BORDER_COLORS.thought;
                         const raw = shortenPaths(evt.content || evt.message || '');
-                        const isExp = expanded.has(i);
-                        const { display, isTruncated } = isExp
-                            ? { display: raw, isTruncated: false }
-                            : truncate(raw);
+                        const isReasoning = type === 'reasoning' || evt.type === 'reasoning';
 
                         const ts =
                             typeof evt.timestamp === 'string'
@@ -162,6 +159,37 @@ export const ActivityFeed: React.FC<Props> = ({ events, thinkingData }) => {
                                       hour12: false,
                                   });
                         const stage = evt.state?.replace(/_/g, ' ') || '';
+
+                        if (isReasoning) {
+                            return (
+                                <details
+                                    key={i}
+                                    className="hitl-log-row hitl-log-row--reasoning"
+                                    style={{ borderLeftColor: border, paddingBottom: '4px' }}
+                                >
+                                    <summary style={{ cursor: 'pointer', outline: 'none', opacity: 0.85, fontWeight: 500 }}>
+                                        <span className="hitl-log-ts">{ts}</span>
+                                        <span className="hitl-log-badge" style={{ backgroundColor: 'rgba(0,0,0,0.05)' }}>Thinking Process</span>
+                                        {stage && <span className="hitl-log-badge">{stage}</span>}
+                                    </summary>
+                                    <div className="hitl-log-msg" style={{ 
+                                        marginTop: 8, 
+                                        paddingLeft: 12, 
+                                        borderLeft: '2px solid var(--border-color, #eee)', 
+                                        whiteSpace: 'pre-wrap', 
+                                        opacity: 0.8 
+                                    }}>
+                                        {raw}
+                                    </div>
+                                </details>
+                            );
+                        }
+
+                        const isExp = expanded.has(i);
+                        const { display, isTruncated } = isExp
+                            ? { display: raw, isTruncated: false }
+                            : truncate(raw);
+
                         const changes = evt.type === 'spec_reconciled' ? (evt.changes || []) : [];
 
                         return (
