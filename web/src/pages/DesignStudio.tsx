@@ -21,6 +21,10 @@ import {
   Sparkles,
   Terminal,
   Wrench,
+  ChevronRight,
+  ChevronDown,
+  Folder,
+  FolderOpen,
 } from 'lucide-react';
 import { BillingModal } from '../components/BillingModal';
 import { api, API_BASE, getSseHeaders } from '../api';
@@ -238,8 +242,8 @@ const STAGE_NOTES: Record<string, string> = {
 const CASUAL_RE = /^(hi+|hello+|hey+|yo+|sup|thanks|thank you|ok|okay|test)$/i;
 const CONFIRM_RE = /^(yes|yep|yeah|sure|ok|okay|go ahead|proceed|build it|run it|start it|make it)$/i;
 const HELP_RE = /\b(help|what can you do|capabilit|possible|not possible|can you|how do i|suggest|prompt)\b/i;
-const HARDWARE_RE = /\b(chip|rtl|verilog|systemverilog|vlsi|asic|fpga|pdk|sky130|gf180|gds|layout|synthesis|synthesize|timer|uart|spi|i2c|axi|apb|wishbone|fifo|ram|rom|sram|cpu|risc|risc-v|mcu|microcontroller|alu|dma|pwm|watchdog|aes|sha|trng|gpio|counter|fsm|pll|adc|dac|register|bus|peripheral|accelerator|core)\b/i;
-const BUILD_ACTION_RE = /\b(build|create|design|generate|make|implement|synthesize|harden|layout|verify)\b/i;
+const HARDWARE_RE = /\b(chip|rtl|verilog|systemverilog|vlsi|asic|fpga|pdk|sky130|gf180|gds|layout|synthesis|synthesize|timer|uart|spi|i2c|axi|apb|wishbone|fifo|ram|rom|sram|cpu|risc|risc-v|mcu|microcontroller|alu|dma|pwm|watchdog|aes|sha|trng|gpio|counter|fsm|pll|adc|dac|register|bus|peripheral|accelerator|accelrator|core)\b/i;
+const BUILD_ACTION_RE = /\b(build|create|design|generate|make|implement|synthesize|harden|layout|verify|plan)\b/i;
 const SPEC_DETAIL_RE = /\b(with|using|include|support|clock|reset|register|interrupt|memory[- ]mapped|bit|width|mhz|khz|formal|testbench|coverage|gdsii|openlane)\b/i;
 const ERROR_RE = /(%error|%warning|syntax error|parse error|error:|fatal|failed|traceback|critical|lint|violation|unmapped|pinmissing|pinnotfound)/i;
 const FIX_RE = /(rtl_fix|fixing|repair|retry|re-check|rechecking|auto-fix|applying fix|rerun|regenerat|patch)/i;
@@ -278,9 +282,10 @@ function suggestDesignName(text: string): string {
     .split(/\s+/)
     .filter((word) => word.length > 1 && !stop.has(word) && !/^\d+nm$/.test(word));
   const words = candidates.slice(0, 4);
-  if (words.length >= 2) return slugify(words.join(' '));
-  if (words.length === 1) return slugify(`${words[0]} design`);
-  return 'agentic_chip';
+  const suffix = Math.random().toString(36).substring(2, 6);
+  if (words.length >= 2) return `${slugify(words.join(' '))}_${suffix}`.substring(0, 64);
+  if (words.length === 1) return `${slugify(`${words[0]} design`)}_${suffix}`.substring(0, 64);
+  return `agentic_chip_${suffix}`;
 }
 
 function normalizePrompt(text: string): string {
@@ -411,9 +416,12 @@ function isLogArtifact(name: string): boolean {
 
 function sanitizeOperationalText(text: string): string {
   return text
-    .replace(/\/(?:app|home|opt|usr|tmp|var|workspace|designs)\/[^\s,'")]+/g, '[workspace path]')
-    .replace(/\\\\[^\s,'")]+/g, '[workspace path]')
-    .replace(/\{[^{}\n]*(?:resolved|hint|env|PDK_ROOT|OPENLANE_ROOT)[^{}\n]*\}/gi, '[tool readiness details]')
+    // Replace absolute Unix paths with just the filename
+    .replace(/(?:\/[a-zA-Z0-9_.-]+)+\/([a-zA-Z0-9_.-]+)/g, '$1')
+    // Remove Verilator/Tool prefixes like %Warning-COVERIGN:
+    .replace(/^%?(?:Error|Warning)(?:-[a-zA-Z0-9_]+)?:\s*/i, '')
+    // Simplify dict dumps
+    .replace(/\{[^{}\n]*(?:resolved|hint|env|PDK_ROOT|OPENLANE_ROOT)[^{}\n]*\}/gi, '[tool config]')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -636,6 +644,7 @@ export const DesignStudio = () => {
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
   const [artifactPreview, setArtifactPreview] = useState('');
   const [newArtifactNames, setNewArtifactNames] = useState<Set<string>>(new Set());
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
   const [stageSchema, setStageSchema] = useState<StageSchemaItem[]>([]);
   const [pdkOptions, setPdkOptions] = useState<PdkOption[]>([]);
   const [pdkProfile, setPdkProfile] = useState('sky130');
@@ -706,7 +715,7 @@ export const DesignStudio = () => {
   const exactIssues = useMemo(() => events.filter((event) => classifyEvent(event) === 'error').slice(-5), [events]);
   const liveFeed = useMemo(() => {
     const eventRows = events
-      .filter((event) => event.type !== 'ping')
+      .filter((event) => event.type !== 'ping' && event.type !== 'agent_thinking' && displayEventText(event).trim().length > 0)
       .slice(-120);
     return eventRows;
   }, [events]);
@@ -1140,11 +1149,10 @@ export const DesignStudio = () => {
             return;
           }
 
+          const eventKind = classifyEvent(data);
           if (data.type === 'agent_thinking') {
             setThinking(data.message || data.content || 'Reasoning through the next pipeline action.');
-          } else if (data.type === 'stall_warning') {
-            setThinking('');
-          } else {
+          } else if (data.type === 'stall_warning' || ['tool-call', 'decision', 'stage', 'error'].includes(eventKind)) {
             setThinking('');
           }
 
@@ -1514,7 +1522,7 @@ export const DesignStudio = () => {
               <label>
                 <span>PDK</span>
                 <select value={pdkProfile} onChange={(event) => setPdkProfile(event.target.value)} disabled={phase === 'building'}>
-                  {(pdkOptions.length ? pdkOptions : [{ key: 'sky130', gds_ready: true, can_harden: true }]).map((pdk) => (
+                  {(pdkOptions.filter(p=>p.available).length ? pdkOptions.filter(p=>p.available) : [{ key: 'sky130', gds_ready: true, can_harden: true }]).map((pdk) => (
                     <option key={pdk.key} value={pdk.key}>
                       {pdk.key} - {pdkReadinessLabel(pdk)}
                     </option>
@@ -1577,15 +1585,11 @@ export const DesignStudio = () => {
           </div>
         </header>
 
-        <div className="codex-vlsi-stage-band">
+        <div className="codex-vlsi-stage-band" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', justifyContent: 'center' }}>
           <div className="codex-vlsi-stage-status">
             <span>{currentStageLabel}</span>
             <p>{thinking || STAGE_NOTES[currentStage] || 'Waiting for a chip request.'}</p>
           </div>
-          <div className="codex-vlsi-progress">
-            <div style={{ width: `${progress}%` }} />
-          </div>
-          <span className="codex-vlsi-progress-text">{progress}%</span>
         </div>
 
         <div className="codex-vlsi-body">
@@ -1595,28 +1599,40 @@ export const DesignStudio = () => {
               <small>{visibleArtifacts.length}</small>
             </div>
             <div className="codex-vlsi-file-tree">
-              {groupedArtifacts.map((section) => (
-                <div key={section.label} className="codex-vlsi-file-section">
-                  <div className="codex-vlsi-file-section-label">{section.label}</div>
-                  {section.files.map((artifact) => (
-                    <button
-                      key={artifact.name}
-                      type="button"
-                      className={`codex-vlsi-file ${selectedArtifact?.name === artifact.name ? 'active' : ''} ${newArtifactNames.has(artifact.name) ? 'is-new' : ''}`}
-                      onClick={() => {
-                        userPickedArtifact.current = true;
-                        setArtifactPreview('');
-                        setSelectedArtifact(artifact);
-                      }}
-                      title={artifact.name}
+              {groupedArtifacts.map((section) => {
+                const isExpanded = expandedSections[section.label] !== false;
+                return (
+                  <div key={section.label} className="codex-vlsi-file-section">
+                    <div 
+                      className="codex-vlsi-file-section-label"
+                      onClick={() => setExpandedSections(prev => ({ ...prev, [section.label]: !isExpanded }))}
+                      style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem', userSelect: 'none' }}
                     >
-                      <FileText size={12} />
-                      <span>{artifact.name}</span>
-                      {artifact.size ? <small>{formatBytes(artifact.size)}</small> : null}
-                    </button>
-                  ))}
-                </div>
-              ))}
+                      {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                      {isExpanded ? <FolderOpen size={14} /> : <Folder size={14} />}
+                      <span>{section.label}</span>
+                    </div>
+                    {isExpanded && section.files.map((artifact) => (
+                      <button
+                        key={artifact.name}
+                        type="button"
+                        className={`codex-vlsi-file ${selectedArtifact?.name === artifact.name ? 'active' : ''} ${newArtifactNames.has(artifact.name) ? 'is-new' : ''}`}
+                        onClick={() => {
+                          userPickedArtifact.current = true;
+                          setArtifactPreview('');
+                          setSelectedArtifact(artifact);
+                        }}
+                        title={artifact.name}
+                        style={{ paddingLeft: '1.8rem' }}
+                      >
+                        <FileText size={12} />
+                        <span>{artifact.name}</span>
+                        {artifact.size ? <small>{formatBytes(artifact.size)}</small> : null}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })}
               {!groupedArtifacts.length && (
                 <div className="codex-vlsi-empty-files">
                   Generated RTL, verification, layout, and reports will appear here.

@@ -3,6 +3,7 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import type { Session, AuthChangeEvent } from '@supabase/supabase-js';
 import { supabase } from './supabaseClient';
 import { LandingPage } from './pages/LandingPage';
+import { WaitlistDashboard } from './pages/WaitlistDashboard';
 import { api } from './api';
 import { BillingModal } from './components/BillingModal';
 import { ErrorBoundary, PageErrorBoundary } from './components/ErrorBoundary';
@@ -336,6 +337,20 @@ const App = () => {
         </button>
       </div>
     );
+  }
+
+  if (session) {
+    // Determine the allowed admin emails from environment variables
+    const adminEmails: string[] = [];
+    if (import.meta.env.VITE_WHITELISTED_EMAILS) {
+      adminEmails.push(...import.meta.env.VITE_WHITELISTED_EMAILS.split(',').map((e: string) => e.trim()));
+    }
+    
+    const isAllowed = session.user?.email && adminEmails.includes(session.user.email);
+
+    if (!isAllowed) {
+      return <WaitlistDashboard email={session.user?.email || ''} />;
+    }
   }
 
   const currentPageMeta = PAGE_META[selectedPage];
