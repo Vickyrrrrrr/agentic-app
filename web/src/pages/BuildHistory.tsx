@@ -53,8 +53,8 @@ export const BuildHistory: React.FC<BuildHistoryProps> = ({
           <span className="bh-hero-kicker">OPERATIONS LOG</span>
           <h2 className="bh-hero-title">Track active runs, outcomes, and handoff readiness.</h2>
           <p className="bh-hero-subtitle">
-            Every build is retained as an execution record so you can audit stage flow, revisit design context,
-            and continue from the right workspace surface.
+            Every build is retained as an execution record so you can revisit design context,
+            review artifacts, and continue from the right workspace surface.
           </p>
         </div>
         <div className="bh-hero-actions">
@@ -121,7 +121,7 @@ export const BuildHistory: React.FC<BuildHistoryProps> = ({
                   <th>Job ID</th>
                   <th>Design</th>
                   <th>Status</th>
-                  <th>Stage</th>
+                  <th>Status</th>
                   <th>Events</th>
                   <th>Created</th>
                   <th>Actions</th>

@@ -14,11 +14,11 @@ import {
   Workflow,
 } from 'lucide-react';
 
-const pipelineSteps = [
-  { label: 'Interpret brief', detail: 'Natural language spec to architecture contract' },
-  { label: 'Generate RTL', detail: 'Synthesis-oriented Verilog with review loop' },
-  { label: 'Prove and verify', detail: 'Simulation, formal checks, and repair passes' },
-  { label: 'Prepare layout', detail: 'Fabrication-ready outputs for Sky130 flow' },
+const agentFlow = [
+  { label: 'Explore & Plan', detail: 'Agent reads PDK files, checks tools, presents a plan' },
+  { label: 'Design & Simulate', detail: 'Write RTL, run simulation, fix bugs iteratively' },
+  { label: 'Synthesize & Harden', detail: 'Synthesis, PnR, DRC/LVS — reading PDK files to resolve errors' },
+  { label: 'Verify & Output', detail: 'Clean GDSII with area, timing, power summary' },
 ];
 
 const capabilityCards = [
@@ -27,21 +27,21 @@ const capabilityCards = [
     eyebrow: 'Autonomous Build',
     title: 'Spec to silicon with a tighter loop',
     description:
-      'A single flow that moves from intent to RTL, verification, formal validation, and physical readiness without the usual handoff chaos.',
+      'Agent reads PDK files directly (.lib, .lef, .tcl) to resolve errors — never guesses cell names, layer rules, or timing values.',
   },
   {
     icon: <Shield size={18} />,
-    eyebrow: 'Recovery Logic',
-    title: 'Self-healing when stages fail',
+    eyebrow: 'Self-Healing Debug Loop',
+    title: 'Iterates like an engineer',
     description:
-      'Retries are convergence-aware, failure fingerprints are tracked, and the system adapts instead of repeating the same broken attempt.',
+      'Reads the error → reads the PDK → hypothesizes → fixes → retries. Never gives up after one failure.',
   },
   {
     icon: <Workflow size={18} />,
-    eyebrow: 'Control Surface',
-    title: 'Human review only where it matters',
+    eyebrow: 'Tool Agnostic',
+    title: 'Works with whatever you have',
     description:
-      'Run fully autonomous when speed matters, or stop at key checkpoints for approval, edits, and guided intervention.',
+      'Uses open-source EDA tools (Yosys, Iverilog, OpenROAD) by default. Falls back gracefully if tools are missing.',
   },
 ];
 
@@ -118,9 +118,9 @@ export const HomeComponent = ({
               Open Design Studio
               <ArrowRight size={14} />
             </button>
-            <button className="home-btn-ghost" onClick={() => setSelectedPage('HITL Build')}>
+            <button className="home-btn-ghost" onClick={() => setSelectedPage('Design Studio')}>
               <Workflow size={16} />
-              Review Pipeline
+              Start Building
             </button>
             <button className="home-btn-ghost" onClick={() => setSelectedPage('Documentation')}>
               <BookOpen size={16} />
@@ -132,11 +132,11 @@ export const HomeComponent = ({
         <aside className="home-hero-panel">
           <div className="home-panel-topline">
             <Sparkles size={14} />
-            Pipeline Outline
+            Agent Flow
           </div>
 
           <div className="home-panel-list">
-            {pipelineSteps.map((step, index) => (
+            {agentFlow.map((step, index) => (
               <div key={step.label} className="home-panel-item">
                 <div className="home-panel-index">0{index + 1}</div>
                 <div className="home-panel-body">
@@ -154,7 +154,7 @@ export const HomeComponent = ({
             </div>
             <div className="home-panel-chip">
               <Layers3 size={14} />
-              Sky130 target flow
+              Any PDK, any tools
             </div>
           </div>
         </aside>

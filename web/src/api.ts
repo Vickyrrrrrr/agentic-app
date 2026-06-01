@@ -9,8 +9,8 @@ const desktopApiOverride = typeof window !== 'undefined'
 const base = import.meta.env.VITE_API_BASE_URL
   || desktopApiOverride
   || (isDesktopApp
-    ? (import.meta.env.VITE_DESKTOP_API_BASE_URL || 'https://api.buildstack.live')
-    : (import.meta.env.DEV ? '/api' : ''));
+    ? (import.meta.env.VITE_DESKTOP_API_BASE_URL || 'http://localhost:7860')
+    : (import.meta.env.DEV ? '/api' : 'http://localhost:7860'));
 
 const cleanBase = base.replace(/\/$/, '');
 export const API_BASE = cleanBase || '';

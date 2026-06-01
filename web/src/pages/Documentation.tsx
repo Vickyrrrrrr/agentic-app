@@ -140,7 +140,7 @@ export const Documentation = () => {
 
   const tabs: { key: Tab; label: string }[] = [
     { key: 'overview', label: 'Overview' },
-    { key: 'pipeline', label: 'Pipeline' },
+    { key: 'pipeline', label: 'Agent Flow' },
     { key: 'config', label: 'Configuration' },
     { key: 'docs', label: 'Documents' },
   ];
@@ -153,18 +153,18 @@ export const Documentation = () => {
           <div className="adoc-hero-badge">Technical Reference Manual</div>
           <h1 className="adoc-hero-title">AgentIC Documentation</h1>
           <p className="adoc-hero-sub">
-            Autonomous silicon design platform — architecture, pipeline specification,
-            configuration reference, and operational guides.
+            Autonomous silicon design platform — agent architecture, tool configuration,
+            and operational guides.
           </p>
           <div className="adoc-hero-stats">
-            <span>{stages.length} pipeline stages</span>
+            <span>{stages.length} agent capabilities</span>
             <span className="adoc-hero-dot">·</span>
             <span>{optionGroups.reduce((a, g) => a + g.options.length, 0)} configurable parameters</span>
             <span className="adoc-hero-dot">·</span>
             <span>{docs.length} reference documents</span>
           </div>
           <div className="app-hero-meta adoc-hero-meta-row">
-            <span className="app-hero-pill">Overview, pipeline, config, and source docs</span>
+            <span className="app-hero-pill">Overview, agent flow, config, and source docs</span>
             <span className="app-hero-pill">{selectedDoc}</span>
           </div>
         </div>
@@ -268,15 +268,16 @@ export const Documentation = () => {
       )}
 
       {/* ══════════════════════════════════════════════════ */}
-      {/*  TAB: PIPELINE                                     */}
+      {/*  TAB: AGENT FLOW                                   */}
       {/* ══════════════════════════════════════════════════ */}
       {tab === 'pipeline' && (
         <div className="adoc-section">
           <div className="adoc-paper-card">
-            <h2>Build Pipeline — Stage Reference</h2>
+            <h2>Agent Flow — How the Agent Works</h2>
             <p className="adoc-meta-text">
-              The AgentIC orchestrator executes a deterministic state‑machine pipeline.
-              Each stage has bounded retries, per‑stage exception isolation, and configurable quality gates.
+              The agent uses 6 tools (read, write, edit, bash, grep, glob) to autonomously
+              design, simulate, synthesize, and harden chips. There is no rigid pipeline — the agent
+              iterates like a real engineer: explore, try, fail, read PDK files, fix, retry.
             </p>
             <div className="adoc-pipeline-list">
               {stages.map((stage, idx) => (
@@ -290,7 +291,7 @@ export const Documentation = () => {
                       <code className="adoc-stage-key">{stage.state}</code>
                     </div>
                     <p className="adoc-stage-desc">
-                      {stageDescriptions[stage.state] || 'Pipeline stage.'}
+                      {stageDescriptions[stage.state] || 'Agent capability.'}
                     </p>
                   </div>
                 </div>
@@ -298,21 +299,20 @@ export const Documentation = () => {
             </div>
           </div>
 
-          {/* Flow Diagram */}
+          {/* Debug Loop */}
           <div className="adoc-paper-card">
-            <h2>State Transition Flow</h2>
-            <div className="adoc-flow-diagram">
-              {stages.map((s, i) => (
-                <span key={s.state} className="adoc-flow-node">
-                  <span className="adoc-flow-badge">{String(i + 1).padStart(2, '0')}</span>
-                  <span className="adoc-flow-label">{s.state}</span>
-                  {i < stages.length - 1 && <span className="adoc-flow-arrow">→</span>}
-                </span>
-              ))}
+            <h2>Debug Loop</h2>
+            <div className="adoc-flow-diagram" style={{ flexDirection: 'column', gap: '0.75rem' }}>
+              <span className="adoc-flow-node"><span className="adoc-flow-badge">1</span> Run command → it fails</span>
+              <span className="adoc-flow-node"><span className="adoc-flow-badge">2</span> Read error output (bash/grep)</span>
+              <span className="adoc-flow-node"><span className="adoc-flow-badge">3</span> Read PDK files (.lib, .lef, .tcl) for actual rules</span>
+              <span className="adoc-flow-node"><span className="adoc-flow-badge">4</span> Form hypothesis based on PDK data</span>
+              <span className="adoc-flow-node"><span className="adoc-flow-badge">5</span> Fix (edit Tcl / RTL / constraints)</span>
+              <span className="adoc-flow-node"><span className="adoc-flow-badge">6</span> Re-run. Still failing? Go to step 1.</span>
             </div>
             <p className="adoc-meta-text" style={{ marginTop: '0.75rem' }}>
-              <strong>Convergence loops:</strong> SIGNOFF → ECO_PATCH → HARDENING → CONVERGENCE_REVIEW → SIGNOFF. <br />
-              <strong>Terminal states:</strong> SUCCESS, FAIL.
+              <strong>Key rule:</strong> Never guess. Always read the actual PDK files before deciding on a fix.
+              Anchor every Tcl script and constraint to the user-confirmed plan.
             </p>
           </div>
         </div>

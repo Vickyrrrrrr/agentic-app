@@ -1,0 +1,12 @@
+node_modules/
+.turbo/
+dist/
+out/
+apps/
+packages/
+openhands-backend/
+.env
+.env.*
+*.log
+.DS_Store
+Thumbs.db

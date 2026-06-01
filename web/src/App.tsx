@@ -21,9 +21,10 @@ import {
   PanelLeftOpen,
 } from 'lucide-react';
 
-const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
-const IS_DESKTOP_APP = typeof window !== 'undefined' && 'electronAPI' in window;
-const BUILD_FLAVOR = import.meta.env.DEV ? 'dev' : 'built';
+  const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
+  const IS_LOCAL_MODE = !import.meta.env.VITE_API_BASE_URL && !import.meta.env.VITE_SUPABASE_URL;
+  const IS_DESKTOP_APP = typeof window !== 'undefined' && 'electronAPI' in window;
+  const BUILD_FLAVOR = import.meta.env.DEV ? 'dev' : 'built';
 
 const DesignStudio = lazy(() =>
   import('./pages/DesignStudio').then((m) => ({ default: m.DesignStudio }))
@@ -108,7 +109,7 @@ const PAGE_META: Record<PageKey, { title: string; subtitle: string }> = {
   },
   Documentation: {
     title: 'Technical Documentation',
-    subtitle: 'Architecture references, pipeline specs, and config contracts',
+    subtitle: 'Agent architecture, tool references, and configuration guides',
   },
   'Workspace Settings': {
     title: 'Workspace Settings',
@@ -136,6 +137,11 @@ const App = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   useEffect(() => {
+    if (IS_LOCAL_MODE) {
+      setSession({ user: { email: 'local@agentic.app' } } as unknown as Session);
+      setAuthLoading(false);
+      return;
+    }
     if (!AUTH_ENABLED) {
       return;
     }
@@ -319,7 +325,7 @@ const App = () => {
   }
 
   // Dev mode: landing page preview with skip-to-app button
-  if (!AUTH_ENABLED && !session) {
+  if (!IS_LOCAL_MODE && !AUTH_ENABLED && !session) {
     return (
       <div style={{ position: 'relative' }}>
         <LandingPage onAuthSuccess={() => {}} />
@@ -339,8 +345,7 @@ const App = () => {
     );
   }
 
-  if (session) {
-    // Determine the allowed admin emails from environment variables
+  if (!IS_LOCAL_MODE && session) {
     const adminEmails: string[] = [];
     if (import.meta.env.VITE_WHITELISTED_EMAILS) {
       adminEmails.push(...import.meta.env.VITE_WHITELISTED_EMAILS.split(',').map((e: string) => e.trim()));

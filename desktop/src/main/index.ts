@@ -1,8 +1,10 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, protocol, session } from 'electron'
-import { join, resolve as nodeResolve } from 'path'
+import { join, resolve as nodeResolve, dirname } from 'path'
 import { writeFile } from 'fs/promises'
+import { spawn, execSync } from 'child_process'
 
 let mainWindow: BrowserWindow | null = null
+let backendProcess: import('child_process').ChildProcess | null = null
 const isDev = !app.isPackaged
 
 async function createWindow(): Promise<void> {
@@ -81,6 +83,7 @@ if (!gotTheLock) {
 
     registerIpcHandlers()
     registerProtocol()
+    startBackend()
     void createWindow()
 
     app.on('activate', () => {
@@ -92,6 +95,10 @@ if (!gotTheLock) {
     if (process.platform !== 'darwin') {
       app.quit()
     }
+  })
+
+  app.on('before-quit', () => {
+    stopBackend()
   })
 
   app.on('open-url', (_event, url) => {
@@ -118,6 +125,61 @@ function watchWindowShortcuts(window: BrowserWindow): void {
       event.preventDefault()
     }
   })
+}
+
+function startBackend(): void {
+  const serverDir = join(__dirname, '..', '..', '..', 'server')
+  const serverScript = join(serverDir, 'main.py')
+  const runScript = join(serverDir, 'run.sh')
+  const workspace = join(app.getPath('home'), 'AgentIC-workspace')
+
+  if (process.platform === 'win32') {
+    // Windows: use the Python launcher
+    backendProcess = spawn('python', [serverScript], {
+      cwd: serverDir,
+      env: { ...process.env, AGENTIC_WORKSPACE: workspace },
+      stdio: 'pipe',
+    })
+  } else {
+    // Linux/macOS: use run.sh
+    backendProcess = spawn('bash', [runScript], {
+      cwd: serverDir,
+      env: { ...process.env, AGENTIC_WORKSPACE: workspace },
+      stdio: 'pipe',
+    })
+  }
+
+  if (backendProcess.stdout) {
+    backendProcess.stdout.on('data', (data: Buffer) => {
+      const text = data.toString()
+      // Log server output in dev mode
+      if (isDev) process.stdout.write(`[backend] ${text}`)
+      // Notify renderer when server is ready
+      if (text.includes('Uvicorn running on') || text.includes('localhost:7860')) {
+        mainWindow?.webContents.send('backend-ready')
+      }
+    })
+  }
+
+  if (backendProcess.stderr) {
+    backendProcess.stderr.on('data', (data: Buffer) => {
+      if (isDev) process.stderr.write(`[backend:err] ${data.toString()}`)
+    })
+  }
+
+  backendProcess.on('exit', (code: number | null) => {
+    if (isDev) console.log(`[backend] exited with code ${code}`)
+    backendProcess = null
+  })
+}
+
+function stopBackend(): void {
+  if (backendProcess) {
+    backendProcess.kill('SIGTERM')
+    setTimeout(() => {
+      if (backendProcess) backendProcess.kill('SIGKILL')
+    }, 3000)
+  }
 }
 
 function registerIpcHandlers(): void {
@@ -153,8 +215,13 @@ function registerIpcHandlers(): void {
       const { promisify } = await import('util')
       const execAsync = promisify(exec)
 
-      const wslCwd = cwd ? `cd ${cwd} && ` : ''
-      const fullCommand = `wsl -d Ubuntu-22.04 bash -c "${wslCwd}${command.replace(/"/g, '\\"')}"`
+      let fullCommand: string
+      if (process.platform === 'win32') {
+        const wslCwd = cwd ? `cd ${cwd} && ` : ''
+        fullCommand = `wsl -d Ubuntu-22.04 bash -c "${wslCwd}${command.replace(/"/g, '\\"')}"`
+      } else {
+        fullCommand = cwd ? `cd "${cwd}" && ${command}` : command
+      }
 
       const { stdout, stderr } = await execAsync(fullCommand)
       return { success: true, stdout, stderr, code: 0 }

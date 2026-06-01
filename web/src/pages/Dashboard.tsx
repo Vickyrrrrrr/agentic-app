@@ -159,7 +159,7 @@ export const Dashboard = ({ selectedDesign }: DashboardProps) => {
                                         <tr>
                                             <th>Job ID</th>
                                             <th>Status</th>
-                                            <th>Stage</th>
+                                            <th>Status</th>
                                             <th>Events</th>
                                         </tr>
                                     </thead>

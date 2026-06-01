@@ -8,6 +8,7 @@ export interface ElectronAPI {
   getVersion: () => Promise<string>
   getPlatform: () => Promise<string>
   onDeepLink: (callback: (path: string) => void) => () => void
+  onBackendReady: (callback: () => void) => () => void
   executeLocalEDA: (
     command: string,
     cwd?: string
@@ -29,6 +30,14 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('deep-link', handler)
     return () => {
       ipcRenderer.removeListener('deep-link', handler)
+    }
+  },
+
+  onBackendReady: (callback: () => void) => {
+    const handler = (): void => callback()
+    ipcRenderer.on('backend-ready', handler)
+    return () => {
+      ipcRenderer.removeListener('backend-ready', handler)
     }
   },
 

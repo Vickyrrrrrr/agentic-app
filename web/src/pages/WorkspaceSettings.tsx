@@ -165,7 +165,7 @@ export const WorkspaceSettings: React.FC<WorkspaceSettingsProps> = ({
         </div>
         <ul className="ws-notes-list">
           <li>Long-running builds continue even if the browser reconnects.</li>
-          <li>Approval mode pauses at key checkpoints when you choose to review each stage.</li>
+          <li>The agent iterates autonomously — it explores, fails, reads PDK files, fixes, and retries without manual approval gates.</li>
           <li>Waveform previews and downloadable artifacts are available from build outputs.</li>
           <li>Artifacts and reports are generated per design and remain downloadable from build outputs.</li>
         </ul>

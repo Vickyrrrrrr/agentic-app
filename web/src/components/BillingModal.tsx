@@ -409,7 +409,7 @@ export const BillingModal = ({
                   <span className="byok-onboarding-icon"><Fingerprint size={16} /></span>
                   <div>
                     <strong>Hosted Infinite model</strong>
-                    <p>AgentIC runs the chip pipeline with its tuned RTL generation model. No user key required.</p>
+                    <p>AgentIC runs the chip design flow with its tuned RTL generation model. No user key required.</p>
                   </div>
                 </div>
                 <div className="byok-onboarding-card">

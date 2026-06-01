@@ -9,7 +9,7 @@ export const Benchmarking: React.FC<BenchmarkingProps> = ({ selectedDesign }) =>
         { metric: 'RTL to GDSII Time', agenticVal: '~15 Minutes', tradVal: 'Days/Weeks' },
         { metric: 'Spec Decomposition', agenticVal: 'Automated specification analysis', tradVal: 'Manual architecture review (weeks)' },
         { metric: 'Verification Methodology', agenticVal: 'Intelligent multi-class diagnosis', tradVal: 'Manual waveform debugging' },
-        { metric: 'Agent Collaboration', agenticVal: 'Multi-agent collaborative pipeline', tradVal: 'Siloed engineer teams' },
+        { metric: 'Agent Collaboration', agenticVal: 'Multi-agent collaborative flow', tradVal: 'Siloed engineer teams' },
         { metric: 'Self-Healing', agenticVal: 'Convergence-aware automated recovery', tradVal: 'Manual iteration' },
         { metric: 'Log Triage', agenticVal: 'Automated LLM Parsing', tradVal: 'Manual Grepping' },
         { metric: 'Licensing Cost', agenticVal: 'Open Source + API', tradVal: '$1M+ / seat' },
@@ -19,7 +19,7 @@ export const Benchmarking: React.FC<BenchmarkingProps> = ({ selectedDesign }) =>
     const modules = [
         { name: 'Architect', cap: 'Natural language specification decomposition and structured contract generation' },
         { name: 'Reasoning Agent', cap: 'Iterative reasoning with observation-driven action planning' },
-        { name: 'Self-Healing Pipeline', cap: 'Convergence-aware retry with metric-driven optimization' },
+        { name: 'Self-Healing Agent', cap: 'Convergence-aware retry with metric-driven optimization' },
         { name: 'Deep Debugger', cap: 'Causal failure analysis with multi-perspective reasoning' },
         { name: 'Waveform Analyst', cap: 'Signal-level diagnostic analysis and root cause identification' },
     ];
