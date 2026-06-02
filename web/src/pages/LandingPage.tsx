@@ -119,7 +119,12 @@ export const LandingPage = ({ onAuthSuccess }: { onAuthSuccess: () => void }) =>
     }
     const { error: err } = await supabase.auth.signInWithOAuth({
       provider: 'google',
-      options: { redirectTo: window.location.origin },
+      options: {
+        redirectTo: window.location.origin,
+        queryParams: {
+          prompt: 'select_account'
+        }
+      },
     });
     if (err) {
       setError(err.message);

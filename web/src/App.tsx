@@ -1,13 +1,15 @@
-import { Suspense, lazy, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import type { Session, AuthChangeEvent } from '@supabase/supabase-js';
 import { supabase } from './supabaseClient';
 import { LandingPage } from './pages/LandingPage';
 import { WaitlistDashboard } from './pages/WaitlistDashboard';
+import { AuthPage } from './components/AuthPage';
 import { api } from './api';
 import { BillingModal } from './components/BillingModal';
 import { ErrorBoundary, PageErrorBoundary } from './components/ErrorBoundary';
 import { queryClient } from './lib/query-client';
+import { toUserError } from './utils/errorFormatter';
 import './index.css';
 import type { LucideIcon } from 'lucide-react';
 import {
@@ -76,6 +78,30 @@ type ProfileSummary = {
   email?: string;
 };
 
+type LicenseStatus = {
+  active: boolean;
+  plan?: string;
+  expires_at?: number;
+  checked_at?: number;
+  source?: string;
+  reason?: string;
+  usage_limit?: number | null;
+  used_builds?: number;
+};
+
+type ToolStatus = {
+  capability_tier?: string;
+  capabilities?: Record<string, boolean>;
+  missing?: Array<{ capability: string; tools: string[] }>;
+  tools?: Record<string, boolean>;
+};
+
+type AgenticElectronWindow = Window & {
+  electronAPI?: {
+    onDeepLink?: (callback: (path: string) => void) => () => void;
+  };
+};
+
 type NavGroup = {
   label: string;
   items: Array<{ page: PageKey; label: string; icon: LucideIcon }>;
@@ -128,13 +154,46 @@ const App = () => {
   const [selectedDesign, setSelectedDesign] = useState<string>('');
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [profile, setProfile] = useState<ProfileSummary | null>(null);
+  const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null);
+  const [licenseLoading, setLicenseLoading] = useState(true);
+  const [toolsStatus, setToolsStatus] = useState<ToolStatus | null>(null);
   const [showBillingModal, setShowBillingModal] = useState(false);
+  const licenseRequestSeq = useRef(0);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('agentic-theme');
     return saved === 'light' || saved === 'dark' ? saved : 'dark';
   });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  const refreshLicenseContext = useCallback(async () => {
+    const requestSeq = ++licenseRequestSeq.current;
+    setLicenseLoading((loading) => loading || !licenseStatus?.active);
+    const [licenseRes, profileRes, toolsRes] = await Promise.allSettled([
+      api.get('/license/status'),
+      api.get('/profile'),
+      api.get('/tools/status'),
+    ]);
+    if (requestSeq !== licenseRequestSeq.current) return;
+
+    setLicenseStatus(
+      licenseRes.status === 'fulfilled'
+        ? licenseRes.value.data || null
+        : {
+            active: false,
+            plan: 'unlicensed',
+            reason: 'Unable to verify license.',
+            source: 'unavailable',
+          }
+    );
+    if (profileRes.status === 'fulfilled') {
+      setProfile(profileRes.value.data || null);
+    }
+    if (toolsRes.status === 'fulfilled') {
+      setToolsStatus(toolsRes.value.data || null);
+    }
+    setLicenseLoading(false);
+  }, [licenseStatus?.active]);
 
   useEffect(() => {
     if (IS_LOCAL_MODE) {
@@ -159,6 +218,49 @@ const App = () => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('agentic-theme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    const onDeepLink = (window as AgenticElectronWindow).electronAPI?.onDeepLink;
+    if (!onDeepLink) return;
+
+    return onDeepLink((path) => {
+      const route = path || '/';
+      if (route.startsWith('/license/success') || route.startsWith('/checkout/success')) {
+        setShowPricing(false);
+        window.history.replaceState({}, '', '/');
+        refreshLicenseContext().catch(() => {
+          setLicenseStatus({
+            active: false,
+            plan: 'unlicensed',
+            reason: 'Unable to verify license.',
+            source: 'unavailable',
+          });
+          setLicenseLoading(false);
+        });
+        return;
+      }
+
+      if (route.startsWith('/auth-callback')) {
+        const fragment = route.split('#')[1] || '';
+        const params = new URLSearchParams(fragment);
+        const accessToken = params.get('access_token');
+        const refreshToken = params.get('refresh_token');
+
+        if (accessToken && refreshToken) {
+          supabase.auth
+            .setSession({ access_token: accessToken, refresh_token: refreshToken })
+            .then(({ data }: { data: { session: Session | null } }) => setSession(data.session))
+            .catch(() => undefined);
+          return;
+        }
+
+        supabase.auth
+          .getSession()
+          .then(({ data: { session: s } }: { data: { session: Session | null } }) => setSession(s))
+          .catch(() => undefined);
+      }
+    });
+  }, [refreshLicenseContext]);
 
   // Capture prompt from landing page on successful session
   useEffect(() => {
@@ -217,22 +319,50 @@ const App = () => {
     let cancelled = false;
 
     const loadWorkspaceData = async () => {
-      const [designRes, jobsRes, profileRes] = await Promise.allSettled([
-        api.get('/designs'),
+      const requestSeq = ++licenseRequestSeq.current;
+      const [jobsRes, profileRes, licenseRes, toolsRes] = await Promise.allSettled([
         api.get('/jobs'),
         api.get('/profile'),
+        api.get('/license/status'),
+        api.get('/tools/status'),
       ]);
       if (cancelled) return;
 
-      const rawDesigns: DesignOption[] =
-        designRes.status === 'fulfilled' ? designRes.value.data?.designs || [] : [];
       const rawJobs: JobSummary[] =
         jobsRes.status === 'fulfilled' ? jobsRes.value.data?.jobs || [] : [];
       const nextProfile: ProfileSummary | null =
         profileRes.status === 'fulfilled' ? profileRes.value.data || null : null;
+      const nextLicense: LicenseStatus | null =
+        licenseRes.status === 'fulfilled' ? licenseRes.value.data || null : {
+          active: false,
+          plan: 'unlicensed',
+          reason: 'Unable to verify license.',
+          source: 'unavailable',
+        };
+      const nextTools: ToolStatus | null =
+        toolsRes.status === 'fulfilled' ? toolsRes.value.data || null : null;
+
+      let rawDesigns: DesignOption[] = [];
+      let activeDesignName = '';
+      if (nextLicense?.active) {
+        const [designRes, activeRes] = await Promise.allSettled([
+          api.get('/designs'),
+          api.get('/workspace/active'),
+        ]);
+        if (cancelled || requestSeq !== licenseRequestSeq.current) return;
+        rawDesigns = designRes.status === 'fulfilled' ? designRes.value.data?.designs || [] : [];
+        activeDesignName = activeRes.status === 'fulfilled' ? activeRes.value.data?.active?.name || '' : '';
+      }
 
       setJobs(rawJobs);
       setProfile(nextProfile);
+      if (requestSeq === licenseRequestSeq.current) {
+        setLicenseStatus(nextLicense);
+      }
+      setToolsStatus(nextTools);
+      if (requestSeq === licenseRequestSeq.current) {
+        setLicenseLoading(false);
+      }
 
       const designMap = new Map<string, DesignOption>();
       for (const design of rawDesigns) {
@@ -253,6 +383,7 @@ const App = () => {
       setDesigns(mergedDesigns);
       setSelectedDesign((prev) => {
         if (prev && mergedDesigns.some((d) => d.name === prev)) return prev;
+        if (activeDesignName && mergedDesigns.some((d) => d.name === activeDesignName)) return activeDesignName;
         if (mergedDesigns.length === 0) return '';
         const withGds = mergedDesigns.find((d) => d.has_gds);
         return withGds ? withGds.name : mergedDesigns[0].name;
@@ -265,6 +396,13 @@ const App = () => {
       setDesigns([]);
       setJobs([]);
       setProfile(null);
+      setLicenseStatus({
+        active: false,
+        plan: 'unlicensed',
+        reason: 'Unable to verify license.',
+        source: 'unavailable',
+      });
+      setLicenseLoading(false);
       setSelectedDesign('');
     });
 
@@ -313,6 +451,17 @@ const App = () => {
   }
 
   if (AUTH_ENABLED && !session) {
+    if (IS_DESKTOP_APP) {
+      return (
+        <AuthPage
+          onAuth={() =>
+            supabase.auth
+              .getSession()
+              .then(({ data: { session: s } }: { data: { session: Session | null } }) => setSession(s))
+          }
+        />
+      );
+    }
     return (
       <LandingPage
         onAuthSuccess={() =>
@@ -345,7 +494,7 @@ const App = () => {
     );
   }
 
-  if (!IS_LOCAL_MODE && session) {
+  if (!IS_LOCAL_MODE && !IS_DESKTOP_APP && session) {
     const adminEmails: string[] = [];
     if (import.meta.env.VITE_WHITELISTED_EMAILS) {
       adminEmails.push(...import.meta.env.VITE_WHITELISTED_EMAILS.split(',').map((e: string) => e.trim()));
@@ -358,13 +507,96 @@ const App = () => {
     }
   }
 
+  if (showPricing) {
+    return (
+      <QueryClientProvider client={queryClient}>
+        <Suspense
+          fallback={
+            <div className="workspace-page-loader">
+              <div className="premium-loader">
+                <span className="premium-loader-dot" />
+                <span className="premium-loader-dot" />
+                <span className="premium-loader-dot" />
+              </div>
+              <span>Loading pricing...</span>
+            </div>
+          }
+        >
+          <Pricing onBack={() => {
+            setShowPricing(false);
+            window.history.pushState({}, '', '/');
+          }} />
+        </Suspense>
+      </QueryClientProvider>
+    );
+  }
+
+  if (licenseLoading) {
+    return (
+      <div className="workspace-page-loader">
+        <div className="premium-loader">
+          <span className="premium-loader-dot" />
+          <span className="premium-loader-dot" />
+          <span className="premium-loader-dot" />
+        </div>
+        <span>Verifying AgentIC license...</span>
+      </div>
+    );
+  }
+
+  if (!licenseStatus?.active) {
+    const needsFreshSignIn = licenseStatus?.source === 'cloud_unauthorized';
+    const licenseReason = toUserError(
+      licenseStatus?.reason,
+      needsFreshSignIn
+        ? 'Please sign in again to continue.'
+        : 'No active paid license was found for this account.'
+    );
+    return (
+      <div className="workspace-page-loader license-lock">
+        <div className="license-lock-panel">
+          <div className="app-brand-logo license-lock-logo">A</div>
+          <h1>{needsFreshSignIn ? 'Sign in again' : 'AgentIC license required'}</h1>
+          <p>
+            {needsFreshSignIn
+              ? 'Your desktop session did not reach the license server. Sign in again, then continue to checkout if your account is not active yet.'
+              : 'This desktop build runs chip design locally, but requires an active purchased account before the agent, EDA tooling, and workspace execution unlock.'}
+          </p>
+          <div className="workspace-plan-badge license-lock-reason">
+            {licenseReason}
+          </div>
+          <div className="license-lock-actions">
+            <button className="top-nav-btn" onClick={() => window.location.reload()}>
+              Recheck License
+            </button>
+            <button className="top-nav-btn" onClick={() => setShowPricing(true)}>
+              View Pricing
+            </button>
+            {session && (
+              <button className="top-nav-btn" onClick={handleLogout}>
+                {needsFreshSignIn ? 'Sign In Again' : 'Sign Out'}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const currentPageMeta = PAGE_META[selectedPage];
   const isStudioPage = selectedPage === 'Design Studio';
 
   const renderPage = () => {
     switch (selectedPage) {
       case 'Design Studio':
-        return <DesignStudio />;
+        return (
+          <DesignStudio
+            licenseStatus={licenseStatus}
+            toolStatus={toolsStatus}
+            selectedDesign={selectedDesign}
+            onActiveDesignChange={setSelectedDesign}
+          />
+        );
       case 'Manual EDA Lab':
         return <EDALab />;
       case 'Documentation':
@@ -388,6 +620,8 @@ const App = () => {
             profile={profile}
             sessionEmail={session?.user.email || ''}
             onOpenByok={() => setShowBillingModal(true)}
+            licenseStatus={licenseStatus}
+            toolStatus={toolsStatus}
           />
         );
       default:
@@ -493,7 +727,7 @@ const App = () => {
                 )}
 
                 <span className="workspace-plan-badge">
-                  {profile?.auth_enabled ? (profile?.plan || 'free') : 'preview'}
+                  {licenseStatus?.active ? `License: ${licenseStatus.plan || 'active'}` : 'License required'}
                 </span>
 
                 <button
@@ -561,7 +795,10 @@ const App = () => {
                   </div>
                 }
               >
-                <Pricing />
+                <Pricing onBack={() => {
+                  setShowPricing(false);
+                  window.history.pushState({}, '', '/');
+                }} />
               </Suspense>
             </div>
           )}

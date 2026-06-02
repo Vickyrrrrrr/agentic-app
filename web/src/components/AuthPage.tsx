@@ -4,6 +4,9 @@ import { supabase } from '../supabaseClient';
 type AuthMode = 'login' | 'signup';
 
 export const AuthPage = ({ onAuth }: { onAuth: () => void }) => {
+  const isDesktopApp =
+    typeof window !== 'undefined' &&
+    ('electronAPI' in window || window.location.protocol === 'file:' || window.location.protocol.startsWith('agentic'));
   const [mode, setMode] = useState<AuthMode>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -41,10 +44,17 @@ export const AuthPage = ({ onAuth }: { onAuth: () => void }) => {
 
   const handleGoogleLogin = async () => {
     setError('');
+    const redirectTo = isDesktopApp 
+      ? 'agentic://auth-callback' 
+      : window.location.origin;
+
     const { error: err } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: window.location.origin
+        redirectTo: redirectTo,
+        queryParams: {
+          prompt: 'select_account'
+        }
       }
     });
     if (err) setError(err.message || 'Google sign in failed');
@@ -72,31 +82,30 @@ export const AuthPage = ({ onAuth }: { onAuth: () => void }) => {
           </h1>
 
           <p className="auth-value-prop">
-            Describe any digital chip in plain English. Our multi-agent AI system writes RTL, 
-            verifies logic, runs formal proofs, and prepares honest OSS layout evidence with
-            commercial signoff blockers called out.
+            Sign in to verify your AgentIC license. Chip source, prompts, logs, PDK files, and
+            generated artifacts stay local on this machine.
           </p>
 
           <div className="auth-features">
             <div className="auth-feature">
-              <div className="auth-feature-icon">⚡</div>
+              <div className="auth-feature-icon">A</div>
               <div>
-                <div className="auth-feature-title">15-Stage Pipeline</div>
-                <div className="auth-feature-desc">From spec to silicon in one command</div>
+                <div className="auth-feature-title">Local Workspace</div>
+                <div className="auth-feature-desc">Design files remain under AgentIC-workspace</div>
               </div>
             </div>
             <div className="auth-feature">
-              <div className="auth-feature-icon">🧠</div>
+              <div className="auth-feature-icon">B</div>
               <div>
-                <div className="auth-feature-title">Self-Healing AI</div>
-                <div className="auth-feature-desc">Auto-fixes bugs across verification loops</div>
+                <div className="auth-feature-title">BYOK Model Access</div>
+                <div className="auth-feature-desc">Use your configured OpenAI-compatible provider</div>
               </div>
             </div>
             <div className="auth-feature">
-              <div className="auth-feature-icon">🔬</div>
+              <div className="auth-feature-icon">C</div>
               <div>
-                <div className="auth-feature-title">Sky130 PDK</div>
-                <div className="auth-feature-desc">Open-source layout candidate output</div>
+                <div className="auth-feature-title">Cloud License Only</div>
+                <div className="auth-feature-desc">Account status and usage counts only</div>
               </div>
             </div>
           </div>
@@ -115,13 +124,13 @@ export const AuthPage = ({ onAuth }: { onAuth: () => void }) => {
           </h2>
           <p className="auth-form-sub">
             {mode === 'login'
-              ? 'Sign in to your workspace and continue to BYOK setup'
-              : 'Create your account, configure BYOK, and start building'}
+              ? 'Sign in to verify your license and continue to local setup'
+              : 'Create your account, then complete checkout to unlock AgentIC'}
           </p>
 
           <div className="auth-onboarding-note">
-            <strong>First-run path</strong>
-            <span>Sign in, connect managed model access or your own provider key, then launch a chip build.</span>
+            <strong>Local-first license check</strong>
+            <span>AgentIC cloud verifies payment only. The silicon workspace stays on your machine.</span>
           </div>
 
           <form className="auth-form" onSubmit={handleSubmit}>

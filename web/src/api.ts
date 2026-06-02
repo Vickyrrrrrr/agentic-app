@@ -1,8 +1,14 @@
 import axios, { AxiosError } from 'axios';
 import { supabase } from './supabaseClient';
 import type { ApiError } from './lib/types';
+import { toUserError } from './utils/errorFormatter';
 
-const isDesktopApp = typeof window !== 'undefined' && ('electronAPI' in window || window.location.protocol === 'file:' || window.location.protocol.startsWith('agentic'));
+const isDesktopApp = typeof window !== 'undefined' && (
+  'electronAPI' in window || 
+  window.location.protocol === 'file:' || 
+  window.location.protocol.startsWith('agentic') ||
+  (typeof navigator !== 'undefined' && navigator.userAgent.includes('Electron'))
+);
 const desktopApiOverride = typeof window !== 'undefined'
   ? localStorage.getItem('agentic_api_base_url') || ''
   : '';
@@ -72,10 +78,10 @@ api.interceptors.response.use(
     if (error.response) {
       const data = error.response.data;
       if (data?.detail) {
-        return Promise.reject(Object.assign(new Error(String(data.detail)), error));
+        return Promise.reject(Object.assign(new Error(toUserError(data)), error));
       }
       if (data?.message) {
-        return Promise.reject(Object.assign(new Error(String(data.message)), error));
+        return Promise.reject(Object.assign(new Error(toUserError(data)), error));
       }
     }
     return Promise.reject(error);

@@ -14,7 +14,36 @@ export function toUserError(error: unknown, fallback = USER_FRIENDLY_ERRORS.defa
   if (!error) return fallback;
 
   if (typeof error === 'string') {
+    const trimmed = error.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        return toUserError(parsed, fallback);
+      } catch {
+        return fallback;
+      }
+    }
     const lower = error.toLowerCase();
+    if (
+      lower.includes('stdout') ||
+      lower.includes('stderr') ||
+      lower.includes('tool-call') ||
+      lower.includes('tool-result') ||
+      lower.includes('bash(') ||
+      lower.includes('"command"') ||
+      lower.includes("'command'")
+    ) {
+      return 'The local tool action could not be completed. Please try again.';
+    }
+    if (lower.includes('signed entitlement') || lower.includes('entitlement')) {
+      return 'We could not verify your license securely. Please try again in a moment.';
+    }
+    if (lower.includes('supabase') || lower.includes('database') || lower.includes('read failed') || lower.includes('write failed')) {
+      return 'We could not verify your account right now. Please try again in a moment.';
+    }
+    if (lower.includes('traceback') || lower.includes('internal server error') || lower.includes('exception')) {
+      return 'The service is temporarily unavailable. Please try again in a moment.';
+    }
     if (lower.includes('uvicorn') || lower.includes('server with:') || lower.includes('backend logs')) {
       return 'The build service is currently unavailable. Please try again later.';
     }

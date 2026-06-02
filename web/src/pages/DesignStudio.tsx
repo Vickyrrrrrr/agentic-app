@@ -22,7 +22,8 @@ import {
   FolderOpen,
 } from 'lucide-react';
 import { BillingModal } from '../components/BillingModal';
-import { api, API_BASE } from '../api';
+import { api, API_BASE, getSseHeaders } from '../api';
+import { toUserError } from '../utils/errorFormatter';
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -51,6 +52,49 @@ interface PdkOption {
   flow_backend?: string;
   recommended_flow_profile?: string;
   reason?: string;
+}
+
+interface LicenseStatus {
+  active?: boolean;
+  plan?: string;
+  reason?: string;
+}
+
+interface ToolStatus {
+  capability_tier?: string;
+  capabilities?: Record<string, boolean>;
+  missing?: Array<{ capability: string; tools: string[] }>;
+  tools?: Record<string, boolean>;
+  adapters?: Record<string, { env: string; tools: string[]; available: string[] }>;
+  license_env?: Record<string, boolean>;
+}
+
+interface InstallPlan {
+  capability: string;
+  tool: string;
+  strategy: string;
+  command: string;
+  target: string;
+  requires_admin: boolean;
+  purpose: string;
+  options?: Array<{ key: string; label: string; description?: string }>;
+}
+
+interface RunEvent {
+  run_id?: string;
+  timestamp?: number;
+  type?: string;
+  label?: string;
+  stage?: string;
+  status?: string;
+  design_name?: string;
+}
+
+interface DesignStudioProps {
+  licenseStatus?: LicenseStatus | null;
+  toolStatus?: ToolStatus | null;
+  selectedDesign?: string;
+  onActiveDesignChange?: (designName: string) => void;
 }
 
 const HELP_RE = /\b(help|what can you do|capabilit|possible|not possible|can you|how do i|suggest|prompt)\b/i;
@@ -173,6 +217,21 @@ function isCasualPrompt(text: string): boolean {
   return CASUAL_RE.test(text.trim());
 }
 
+function cleanUserFacingAgentText(text: string): string {
+  return (text || '')
+    .replace(/^\s*NEEDS_INPUT:\s*/i, '')
+    .replace(/\b(read|write|edit|bash|grep|glob)\s*\([^)]*\)/gis, 'a local workspace step')
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('$ ')) return false;
+      if (/[{}]/.test(trimmed) && /\b(command|stdout|stderr|tool-call|tool-result)\b/i.test(trimmed)) return false;
+      return true;
+    })
+    .join('\n')
+    .trim();
+}
+
 function advisorReply(text: string, _pdkProfile: string): string {
   if (isCasualPrompt(text)) {
     return 'Hi. Tell me the chip or RTL block you want. I will explore the system, tools, and PDK, present a plan, then build and iterate until it works.';
@@ -198,7 +257,7 @@ function pdkReadinessLabel(pdk?: PdkOption): string {
   return 'RTL only';
 }
 
-export const DesignStudio = () => {
+export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', onActiveDesignChange }: DesignStudioProps = {}) => {
   const [prompt, setPrompt] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -213,6 +272,11 @@ export const DesignStudio = () => {
   const [designName, setDesignName] = useState('');
   const [thinking, setThinking] = useState('');
   const [isChatting, setIsChatting] = useState(false);
+  const [localToolStatus, setLocalToolStatus] = useState<ToolStatus | null>(toolStatus || null);
+  const [installPlan, setInstallPlan] = useState<InstallPlan | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [installMessage, setInstallMessage] = useState('');
+  const [runEvents, setRunEvents] = useState<RunEvent[]>([]);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -225,6 +289,10 @@ export const DesignStudio = () => {
   const selectedPdkMode = pdkReadinessLabel(selectedPdk);
   const hasByok = Boolean(profile?.has_byok_key) || Boolean(readByokPayload());
   const isBusy = isChatting;
+  const effectiveToolStatus = localToolStatus || toolStatus;
+  const missingTools = effectiveToolStatus?.missing || [];
+  const toolTier = effectiveToolStatus?.capability_tier || 'checking';
+  const licenseActive = licenseStatus?.active !== false;
 
   const visibleArtifacts = useMemo(() => {
     const priority = ['.v', '.sv', '.sby', '.sdc', '.gds', '.def', '.lef', '.rpt', '.json', '.tcl', '.lib', '.ys', '.cfg'];
@@ -270,6 +338,18 @@ export const DesignStudio = () => {
   }, [designName]);
 
   const sendChatMessage = async (text: string, nextMessages: ChatMessage[]) => {
+    if (!licenseActive) {
+      setMessages((prev) => [...prev, {
+        role: 'assistant',
+        tone: 'error',
+        content: toUserError(
+          licenseStatus?.reason,
+          'AgentIC requires an active purchased license before local agent execution.'
+        ),
+      }]);
+      return;
+    }
+
     const byokConfig = readByokConfig();
     if (!byokConfig) {
       setShowBillingModal(true);
@@ -282,14 +362,16 @@ export const DesignStudio = () => {
 
     let assistantContent = '';
     let done = false;
+    let failed = false;
 
     try {
       const ctrl = new AbortController();
       abortRef.current = ctrl;
+      const headers = await getSseHeaders({ 'Content-Type': 'application/json' });
 
       await fetchEventSource(`${API_BASE}/chat/converse`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           messages: nextMessages.map((m) => ({ role: m.role, content: m.content })),
           plan_type: 'byok',
@@ -304,14 +386,35 @@ export const DesignStudio = () => {
           try {
             const data = JSON.parse(event.data);
             const eventType = data.type || '';
-            const content = data.content || data.message || '';
+            const content = cleanUserFacingAgentText(data.label || data.content || data.message || '');
 
-            if (eventType === 'reasoning') {
-              setThinking(content);
-            } else if (eventType === 'tool-call') {
-              setThinking(`⚡ ${content}`);
+            if (eventType === 'progress') {
+              setThinking(content || 'Agent is working...');
+              addRunEvent({
+                run_id: data.run_id,
+                type: eventType,
+                label: content,
+                stage: data.stage,
+                status: data.status,
+                design_name: data.design_name,
+                timestamp: data.timestamp,
+              });
+            } else if (eventType === 'reasoning' || eventType === 'tool-call' || eventType === 'tool-result') {
+              // Raw internals are intentionally hidden from normal users.
+              if (import.meta.env.VITE_AGENTIC_DEBUG_EVENTS === 'true') {
+                console.debug('[agentic:event]', data);
+              }
             } else if (eventType === 'needs_input') {
               assistantContent = content;
+              addRunEvent({
+                run_id: data.run_id,
+                type: eventType,
+                label: content,
+                stage: data.stage,
+                status: 'needs_input',
+                design_name: data.design_name,
+                timestamp: data.timestamp,
+              });
               setMessages((prev) => {
                 const last = prev[prev.length - 1];
                 if (last?.role === 'assistant') {
@@ -321,6 +424,15 @@ export const DesignStudio = () => {
               });
             } else if (eventType === 'response') {
               assistantContent = content;
+              addRunEvent({
+                run_id: data.run_id,
+                type: eventType,
+                label: 'Build summary ready',
+                stage: data.stage,
+                status: 'completed',
+                design_name: data.design_name,
+                timestamp: data.timestamp,
+              });
               setMessages((prev) => {
                 const last = prev[prev.length - 1];
                 if (last?.role === 'assistant') {
@@ -330,9 +442,28 @@ export const DesignStudio = () => {
               });
             } else if (eventType === 'stream_end') {
               done = true;
+              addRunEvent({
+                run_id: data.run_id,
+                type: eventType,
+                label: 'Run complete',
+                stage: data.stage,
+                status: 'completed',
+                design_name: data.design_name,
+                timestamp: data.timestamp,
+              });
             } else if (eventType === 'error') {
-              assistantContent = `Error: ${content}`;
-              setMessages((prev) => [...prev, { role: 'assistant', content: `Error: ${content}` }]);
+              failed = true;
+              assistantContent = 'The agent hit an issue while working locally. Please check your model key, license, and local EDA setup, then try again.';
+              addRunEvent({
+                run_id: data.run_id,
+                type: eventType,
+                label: assistantContent,
+                stage: data.stage,
+                status: 'failed',
+                design_name: data.design_name,
+                timestamp: data.timestamp,
+              });
+              setMessages((prev) => [...prev, { role: 'assistant', tone: 'error', content: assistantContent }]);
             }
           } catch {
             // ignore parse errors
@@ -342,6 +473,7 @@ export const DesignStudio = () => {
           done = true;
         },
         onerror(_err) {
+          failed = true;
           done = true;
           if (!assistantContent) {
             const fallback = advisorReply(text, pdkProfile);
@@ -355,6 +487,14 @@ export const DesignStudio = () => {
       setThinking('');
       setIsChatting(false);
       abortRef.current = null;
+      api.post('/usage/build', {
+        status: failed ? 'failed' : 'done',
+        capability_tier: toolTier,
+        successful_builds: failed ? 0 : 1,
+        total_builds: 1,
+      }).catch(() => {});
+      void refreshRunEvents();
+      void refreshActiveDesign();
       void fetchArtifacts(designName, true);
     }
   };
@@ -376,8 +516,84 @@ export const DesignStudio = () => {
 
   const requestByokSetup = () => setShowBillingModal(true);
 
+  const refreshToolStatus = useCallback(async () => {
+    try {
+      const res = await api.get('/tools/status');
+      setLocalToolStatus(res.data || null);
+    } catch {
+      // keep last known state
+    }
+  }, []);
+
+  const refreshRunEvents = useCallback(async () => {
+    try {
+      const res = await api.get('/runs/events?limit=80');
+      setRunEvents(Array.isArray(res.data?.events) ? res.data.events : []);
+    } catch {
+      // timeline is helpful, not required for the chat loop
+    }
+  }, []);
+
+  const refreshActiveDesign = useCallback(async () => {
+    try {
+      const res = await api.get('/workspace/active');
+      const activeName = res.data?.active?.name;
+      if (activeName) {
+        setDesignName(activeName);
+        onActiveDesignChange?.(activeName);
+        void fetchArtifacts(activeName, true);
+      }
+    } catch {
+      // keep current design
+    }
+  }, [fetchArtifacts, onActiveDesignChange]);
+
+  const addRunEvent = useCallback((event: RunEvent) => {
+    const safeEvent = {
+      ...event,
+      label: cleanUserFacingAgentText(event.label || ''),
+    };
+    if (safeEvent.design_name) {
+      setDesignName(safeEvent.design_name);
+      onActiveDesignChange?.(safeEvent.design_name);
+      void fetchArtifacts(safeEvent.design_name, true);
+    }
+    setRunEvents((previous) => [...previous.slice(-79), safeEvent].filter((item) => item.label || item.type === 'stream_end'));
+  }, [fetchArtifacts, onActiveDesignChange]);
+
+  const requestInstallPlan = async (capability = missingTools[0]?.capability || 'pnr') => {
+    setInstallMessage('');
+    try {
+      const res = await api.post('/tools/install-plan', { capability });
+      setInstallPlan(res.data);
+    } catch (err: any) {
+      setInstallMessage(err?.message || 'Unable to create install plan.');
+    }
+  };
+
+  const approveInstallPlan = async () => {
+    if (!installPlan) return;
+    setInstalling(true);
+    setInstallMessage(`Installing ${installPlan.tool}...`);
+    try {
+      const res = await api.post('/tools/install', {
+        capability: installPlan.capability,
+        command: installPlan.command,
+        approved: true,
+      });
+      setInstallMessage(res.data?.success ? 'Install completed. Tool status refreshed.' : 'Install could not be completed. Please review the install plan and try again.');
+      setInstallPlan(null);
+      await refreshToolStatus();
+    } catch (err: any) {
+      setInstallMessage(toUserError(err, 'Install could not be completed. Please try again.'));
+    } finally {
+      setInstalling(false);
+    }
+  };
+
   useEffect(() => {
-    setDesignName('');
+    setDesignName(selectedDesign || '');
+    if (selectedDesign) void fetchArtifacts(selectedDesign, true);
     api.get('/pdks').then((res) => {
       const data = res.data || {};
       const options: PdkOption[] = [];
@@ -399,6 +615,24 @@ export const DesignStudio = () => {
       }
     }).catch(() => {});
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (selectedDesign && selectedDesign !== designName) {
+      setDesignName(selectedDesign);
+      setArtifacts([]);
+      setSelectedArtifact(null);
+      void fetchArtifacts(selectedDesign, true);
+    }
+  }, [selectedDesign]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    void refreshRunEvents();
+    void refreshActiveDesign();
+  }, [refreshRunEvents, refreshActiveDesign]);
+
+  useEffect(() => {
+    if (toolStatus) setLocalToolStatus(toolStatus);
+  }, [toolStatus]);
 
   useEffect(() => {
     if (selectedArtifact && designName) {
@@ -460,6 +694,10 @@ export const DesignStudio = () => {
             >
               {hasByok ? 'Configured' : 'Configure API key'}
             </button>
+            <div className="codex-vlsi-route-label">License</div>
+            <span className={`codex-vlsi-model-chip ${licenseActive ? 'is-byok' : ''}`}>
+              {licenseActive ? 'Active' : 'Required'}
+            </span>
           </div>
           <div className="codex-vlsi-input-shell">
             <textarea
@@ -487,6 +725,7 @@ export const DesignStudio = () => {
           </div>
           <div className="codex-vlsi-composer-meta">
             {hasByok && <span className="is-auto">Autonomous agent</span>}
+            <span>{toolTier}</span>
             <button type="button" onClick={requestByokSetup} title="Configure API key">
               <Settings2 size={13} />
             </button>
@@ -621,6 +860,131 @@ export const DesignStudio = () => {
               <span>{thinking || 'Describe the chip block you want to build.'}</span>
             </div>
           </div>
+        </div>
+
+        <div className="codex-vlsi-inspector-section">
+          <div className="codex-vlsi-inspector-title">Run timeline</div>
+          <div className="codex-vlsi-stage-list">
+            {runEvents.slice(-6).map((event, index) => (
+              <div className={`codex-vlsi-stage-row ${index === runEvents.slice(-6).length - 1 ? 'active' : ''}`} key={`${event.run_id || 'run'}-${event.timestamp || index}-${index}`}>
+                <span>{event.stage || event.type || 'step'}</span>
+                <div>
+                  <strong>{event.label || 'Working'}</strong>
+                  <small>{event.status || 'running'}</small>
+                </div>
+              </div>
+            ))}
+            {!runEvents.length && (
+              <div className="codex-vlsi-signal">
+                <Activity size={14} />
+                <div>
+                  <strong>No run yet</strong>
+                  <span>Sanitized progress will appear here.</span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="codex-vlsi-inspector-section">
+          <div className="codex-vlsi-inspector-title">Local EDA</div>
+          <div className="codex-vlsi-signal">
+            {missingTools.length ? <AlertTriangle size={14} /> : <CheckCircle2 size={14} />}
+            <div>
+              <strong>{toolTier}</strong>
+              <span>
+                {missingTools.length
+                  ? `${missingTools.length} capability gap${missingTools.length > 1 ? 's' : ''}`
+                  : 'Ready for local execution'}
+              </span>
+            </div>
+          </div>
+          {missingTools.length > 0 && (
+            <div className="codex-vlsi-stage-list" style={{ marginTop: '0.75rem' }}>
+              {missingTools.slice(0, 3).map((item) => (
+                <div className="codex-vlsi-stage-row" key={item.capability}>
+                  <span>{item.capability}</span>
+                  <div>
+                    <strong>{item.tools.join(' or ')}</strong>
+                    <small>Missing local capability</small>
+                  </div>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="codex-vlsi-model-chip is-byok"
+                onClick={() => void requestInstallPlan()}
+                disabled={installing}
+                style={{ width: '100%', marginTop: '0.65rem' }}
+              >
+                Plan Install
+              </button>
+            </div>
+          )}
+          {installPlan && (
+            <div className="codex-vlsi-signal" style={{ marginTop: '0.75rem', alignItems: 'flex-start' }}>
+              <Terminal size={14} />
+              <div>
+                <strong>{installPlan.tool}</strong>
+                <span>{installPlan.purpose}</span>
+                {installPlan.command ? (
+                  <code style={{ display: 'block', marginTop: '0.5rem', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {installPlan.command}
+                  </code>
+                ) : (
+                  <span style={{ display: 'block', marginTop: '0.5rem' }}>
+                    Configure a tool path or Docker image first, then AgentIC can ask for approval to install.
+                  </span>
+                )}
+                {installPlan.options?.length ? (
+                  <div style={{ display: 'grid', gap: '0.4rem', marginTop: '0.65rem' }}>
+                    {installPlan.options.map((option) => (
+                      <button
+                        type="button"
+                        key={option.key}
+                        className="codex-vlsi-model-chip"
+                        onClick={() => {
+                          if (option.key === 'install' || option.key === 'docker') {
+                            setInstallMessage(installPlan.command
+                              ? 'Review the install action, then approve it.'
+                              : option.description || 'Configure the install source first.');
+                            return;
+                          }
+                          if (option.key === 'skip') {
+                            setInstallMessage('AgentIC will continue with available local stages and skip this capability.');
+                            setInstallPlan(null);
+                            return;
+                          }
+                          setInstallMessage(option.description || 'Configure this capability in your local environment, then refresh tool status.');
+                        }}
+                        title={option.description}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  className="codex-vlsi-model-chip is-byok"
+                  onClick={() => void approveInstallPlan()}
+                  disabled={installing || !installPlan.command}
+                  style={{ marginTop: '0.5rem' }}
+                >
+                  {installing ? 'Installing...' : installPlan.command ? 'Approve Install' : 'Needs Configuration'}
+                </button>
+              </div>
+            </div>
+          )}
+          {installMessage && (
+            <div className="codex-vlsi-signal" style={{ marginTop: '0.75rem' }}>
+              <Activity size={14} />
+              <div>
+                <strong>Install status</strong>
+                <span>{installMessage}</span>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="codex-vlsi-inspector-section">

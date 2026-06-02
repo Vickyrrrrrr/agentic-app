@@ -1,25 +1,30 @@
 import os
 import re
-import subprocess
+import urllib.request
+import urllib.parse
 import glob as glob_mod
+from html.parser import HTMLParser
+
+from local_tools import run_bash
 
 
-def run_bash(command: str, workspace_root: str = ".", timeout: int = 300) -> dict:
-    try:
-        result = subprocess.run(
-            command, shell=True, capture_output=True, text=True,
-            timeout=timeout, cwd=workspace_root
-        )
-        return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout.strip(),
-            "stderr": result.stderr.strip(),
-            "code": result.returncode,
-        }
-    except subprocess.TimeoutExpired:
-        return {"success": False, "stdout": "", "stderr": "Command timed out", "code": -1}
-    except Exception as e:
-        return {"success": False, "stdout": "", "stderr": str(e), "code": -1}
+class _DDGResultParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.results = []
+        self._capture = False
+        self._link = ""
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        if tag == "a" and attrs_dict.get("class") == "result-link":
+            self._capture = True
+            self._link = attrs_dict.get("href", "")
+    def handle_data(self, data):
+        if self._capture:
+            text = data.strip()
+            if text:
+                self.results.append(f"{text} — {self._link}")
+            self._capture = False
 
 
 ALLOWED_READ_EXTENSIONS = {
@@ -132,6 +137,20 @@ def glob_tool(pattern: str, workspace_root: str) -> str:
         return f"Error globbing: {e}"
 
 
+def web_search(query: str, max_results: int = 5) -> str:
+    url = f"https://lite.duckduckgo.com/lite/?q={urllib.parse.quote_plus(query)}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "AgentIC/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        parser = _DDGResultParser()
+        parser.feed(html)
+        results = parser.results[:max_results]
+        return "\n".join(results) if results else "(no results)"
+    except Exception as e:
+        return f"Web search error: {e}"
+
+
 def dispatch_tool(name: str, args: dict, workspace_root: str) -> str:
     if name == "read":
         return read_file(args["path"], workspace_root)
@@ -147,5 +166,7 @@ def dispatch_tool(name: str, args: dict, workspace_root: str) -> str:
         return grep_tool(args["pattern"], path, workspace_root)
     elif name == "glob":
         return glob_tool(args["pattern"], workspace_root)
+    elif name == "web_search":
+        return web_search(args["query"], args.get("max_results", 5))
     else:
         return f"Error: unknown tool '{name}'"

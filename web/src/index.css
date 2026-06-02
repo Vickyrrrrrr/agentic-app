@@ -141,7 +141,7 @@ body {
   background: var(--bg);
   color: var(--text);
   line-height: 1.6;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 
 /* ── Scrollbar ──────────────────────────────────────────────────── */
@@ -9187,21 +9187,56 @@ details[open] .pricing-faq-item summary::after {
   pointer-events: none;
 }
 
-.workspace-page-loader::after {
-  content: '';
-  position: absolute;
-  width: 500px;
-  height: 500px;
-  border-radius: 50%;
-  background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
-  animation: loader-glow-pulse 4s ease-in-out infinite;
-  pointer-events: none;
-  opacity: 0.5;
-}
-
 .workspace-page-loader>* {
   position: relative;
   z-index: 1;
+}
+
+.license-lock {
+  padding: 2rem;
+  text-align: center;
+}
+
+.license-lock-panel {
+  width: min(100%, 560px);
+  display: grid;
+  gap: 1rem;
+  justify-items: center;
+  padding: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-card) 94%, transparent);
+  box-shadow: var(--shadow-lg);
+}
+
+.license-lock-logo {
+  margin: 0 auto;
+}
+
+.license-lock h1 {
+  margin: 0;
+  font-size: clamp(1.5rem, 4vw, 2.1rem);
+  letter-spacing: 0;
+}
+
+.license-lock p {
+  margin: 0;
+  max-width: 46ch;
+  color: var(--text-mid);
+}
+
+.license-lock-reason {
+  justify-self: center;
+  max-width: 100%;
+  white-space: normal;
+  text-align: center;
+}
+
+.license-lock-actions {
+  display: flex;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .premium-loader {
@@ -12213,6 +12248,47 @@ select option:disabled {
   color: var(--fail);
 }
 
+.pricing-checkout-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 0 1.6rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-card) 92%, transparent);
+  color: var(--text-mid);
+}
+
+.pricing-checkout-fallback strong {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: var(--text);
+}
+
+.pricing-checkout-fallback p {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.pricing-checkout-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.6rem;
+}
+
+.pricing-checkout-btn {
+  min-width: 9rem;
+  padding: 0.8rem 1rem;
+}
+
+.pricing-checkout-btn--ghost {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--border);
+}
+
 .pricing-cards {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.9rem;
@@ -12663,6 +12739,12 @@ select option:disabled {
 
   .pricing-title {
     font-size: clamp(2.1rem, 12vw, 3.4rem);
+  }
+
+  .pricing-checkout-fallback,
+  .pricing-checkout-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .pricing-compare-vs {

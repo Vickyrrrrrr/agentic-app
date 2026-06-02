@@ -1,7 +1,8 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, protocol, session } from 'electron'
-import { join, resolve as nodeResolve, dirname } from 'path'
+import { join, resolve as nodeResolve } from 'path'
+import { readFileSync } from 'fs'
 import { writeFile } from 'fs/promises'
-import { spawn, execSync } from 'child_process'
+import { execFile, spawn } from 'child_process'
 
 let mainWindow: BrowserWindow | null = null
 let backendProcess: import('child_process').ChildProcess | null = null
@@ -132,19 +133,20 @@ function startBackend(): void {
   const serverScript = join(serverDir, 'main.py')
   const runScript = join(serverDir, 'run.sh')
   const workspace = join(app.getPath('home'), 'AgentIC-workspace')
+  const env = backendEnvironment(workspace)
 
   if (process.platform === 'win32') {
     // Windows: use the Python launcher
     backendProcess = spawn('python', [serverScript], {
       cwd: serverDir,
-      env: { ...process.env, AGENTIC_WORKSPACE: workspace },
+      env,
       stdio: 'pipe',
     })
   } else {
     // Linux/macOS: use run.sh
     backendProcess = spawn('bash', [runScript], {
       cwd: serverDir,
-      env: { ...process.env, AGENTIC_WORKSPACE: workspace },
+      env,
       stdio: 'pipe',
     })
   }
@@ -171,6 +173,79 @@ function startBackend(): void {
     if (isDev) console.log(`[backend] exited with code ${code}`)
     backendProcess = null
   })
+}
+
+function backendEnvironment(workspace: string): NodeJS.ProcessEnv {
+  const licenseConfig = readLicenseConfig()
+  const licenseServerUrl = (
+    process.env['AGENTIC_LICENSE_SERVER_URL'] ||
+    process.env['VITE_AGENTIC_LICENSE_SERVER_URL'] ||
+    licenseConfig.license_server_url ||
+    'https://api.buildstack.live'
+  ).replace(/\/$/, '')
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    AGENTIC_WORKSPACE: workspace,
+    AGENTIC_LICENSE_SERVER_URL: licenseServerUrl,
+    AGENTIC_LICENSE_STATUS_URL: process.env['AGENTIC_LICENSE_STATUS_URL'] || `${licenseServerUrl}/license/status`,
+    AGENTIC_CHECKOUT_URL: process.env['AGENTIC_CHECKOUT_URL'] || `${licenseServerUrl}/checkout/create`,
+    AGENTIC_USAGE_URL: process.env['AGENTIC_USAGE_URL'] || `${licenseServerUrl}/usage/build`,
+    AGENTIC_ENTITLEMENT_PUBLIC_KEY:
+      process.env['AGENTIC_ENTITLEMENT_PUBLIC_KEY'] ||
+      licenseConfig.entitlement_public_key ||
+      '',
+    AGENTIC_REQUIRE_SIGNED_ENTITLEMENT: process.env['AGENTIC_REQUIRE_SIGNED_ENTITLEMENT'] || 'true'
+  }
+
+  stripCloudOnlySecrets(env)
+
+  if (app.isPackaged) {
+    delete env['AGENTIC_LICENSE_BYPASS']
+    delete env['AGENTIC_ALLOW_HS256_ENTITLEMENTS']
+    delete env['AGENTIC_ENTITLEMENT_SECRET']
+  }
+
+  return env
+}
+
+function stripCloudOnlySecrets(env: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(env)) {
+    const upper = key.toUpperCase()
+    if (
+      upper.startsWith('LEMON_SQUEEZY_') ||
+      upper === 'SUPABASE_SERVICE_ROLE_KEY' ||
+      upper === 'SUPABASE_JWT_SECRET' ||
+      upper === 'DATABASE_URL' ||
+      upper === 'POSTGRES_URL' ||
+      upper === 'POSTGRES_PRISMA_URL' ||
+      upper === 'POSTGRES_URL_NON_POOLING' ||
+      upper === 'ENTITLEMENT_JWT_PRIVATE_KEY' ||
+      upper === 'ENTITLEMENT_JWT_PRIVATE_KEY_FILE' ||
+      upper === 'ENTITLEMENT_JWT_SECRET'
+    ) {
+      delete env[key]
+    }
+  }
+}
+
+function readLicenseConfig(): { license_server_url?: string; entitlement_public_key?: string } {
+  const candidates = isDev
+    ? [join(__dirname, '..', '..', 'resources', 'license.json')]
+    : [join(process.resourcesPath, 'license.json')]
+
+  for (const filePath of candidates) {
+    try {
+      const parsed = JSON.parse(readFileSync(filePath, 'utf-8'))
+      return {
+        license_server_url: typeof parsed.license_server_url === 'string' ? parsed.license_server_url : undefined,
+        entitlement_public_key: typeof parsed.entitlement_public_key === 'string' ? parsed.entitlement_public_key : undefined
+      }
+    } catch {
+      // The app can still run with environment-provided config in development.
+    }
+  }
+  return {}
 }
 
 function stopBackend(): void {
@@ -209,6 +284,18 @@ function registerIpcHandlers(): void {
     return process.platform
   })
 
+  ipcMain.handle('open-external', async (_event, url: string) => {
+    try {
+      const parsed = new URL(url)
+      if (!['https:', 'http:'].includes(parsed.protocol)) {
+        return { success: false }
+      }
+      return { success: await openExternalUrl(parsed.toString()) }
+    } catch {
+      return { success: false }
+    }
+  })
+
   ipcMain.handle('execute-local-eda', async (_event, command: string, cwd?: string) => {
     try {
       const { exec } = await import('child_process')
@@ -236,6 +323,44 @@ function registerIpcHandlers(): void {
   })
 }
 
+async function openExternalUrl(url: string): Promise<boolean> {
+  if (isWslRuntime()) {
+    try {
+      const escaped = url.replace(/'/g, "''")
+      await execFileAsync('powershell.exe', ['-NoProfile', '-Command', `Start-Process '${escaped}'`])
+      return true
+    } catch {
+      // Fall through to Electron's normal opener.
+    }
+  }
+
+  try {
+    await shell.openExternal(url)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function isWslRuntime(): boolean {
+  if (process.platform !== 'linux') return false
+  if (process.env['WSL_DISTRO_NAME'] || process.env['WSL_INTEROP']) return true
+  try {
+    return readFileSync('/proc/version', 'utf-8').toLowerCase().includes('microsoft')
+  } catch {
+    return false
+  }
+}
+
+function execFileAsync(command: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, (error) => {
+      if (error) reject(error)
+      else resolve()
+    })
+  })
+}
+
 function registerProtocol(): void {
   if (process.defaultApp) {
     if (process.argv.length >= 2) {
@@ -248,8 +373,7 @@ function registerProtocol(): void {
   }
 
   protocol.handle('agentic', (request) => {
-    const url = new URL(request.url)
-    mainWindow?.webContents.send('deep-link', url.pathname + url.search)
+    mainWindow?.webContents.send('deep-link', toDeepLinkPath(request.url))
     return new Response('', { status: 200 })
   })
 }
@@ -257,9 +381,16 @@ function registerProtocol(): void {
 function handleDeepLink(args: string[]): void {
   const deepLinkUrl = args.find((arg) => arg.startsWith('agentic://'))
   if (deepLinkUrl && mainWindow) {
-    const url = new URL(deepLinkUrl)
-    mainWindow.webContents.send('deep-link', url.pathname + url.search)
+    mainWindow.webContents.send('deep-link', toDeepLinkPath(deepLinkUrl))
   }
+}
+
+function toDeepLinkPath(rawUrl: string): string {
+  const url = new URL(rawUrl)
+  const route = [url.hostname, url.pathname.replace(/^\/+/, '')]
+    .filter(Boolean)
+    .join('/')
+  return `/${route}${url.search}${url.hash}`
 }
 
 function resolve(path: string): string {

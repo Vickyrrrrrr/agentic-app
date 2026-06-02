@@ -4,6 +4,13 @@ import { Check, Zap, Infinity as InfinityIcon, ArrowLeft, Cpu, KeyRound, AlertCi
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from '../supabaseClient';
 import { api } from '../api';
+import { toUserError } from '../utils/errorFormatter';
+
+type AgenticElectronWindow = Window & {
+  electronAPI?: {
+    openExternal?: (url: string) => Promise<{ success: boolean }>;
+  };
+};
 
 type Plan = {
   id: string;
@@ -14,30 +21,6 @@ type Plan = {
   features: string[];
   popular?: boolean;
 };
-
-type RazorpayPaymentResponse = {
-  razorpay_order_id: string;
-  razorpay_payment_id: string;
-  razorpay_signature: string;
-};
-
-type RazorpayCheckoutOptions = {
-  key: string;
-  order_id: string;
-  name: string;
-  description: string;
-  handler: (response: RazorpayPaymentResponse) => Promise<void>;
-  theme?: { color?: string; overlay_close?: boolean };
-  modal?: { ondismiss?: () => void };
-};
-
-type RazorpayConstructor = new (options: RazorpayCheckoutOptions) => { open: () => void };
-
-declare global {
-  interface Window {
-    Razorpay?: RazorpayConstructor;
-  }
-}
 
 const PLANS: Plan[] = [
   {
@@ -74,21 +57,21 @@ const PLANS: Plan[] = [
   },
 ];
 
-export function Pricing() {
+export function Pricing({ onBack }: { onBack?: () => void }) {
   const [loading, setLoading] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [session, setSession] = useState<Session | null>(null);
-  const [testMode, setTestMode] = useState(false);
   const [currentPlan, setCurrentPlan] = useState<string | null>(null);
-  const [currentPlanType, setCurrentPlanType] = useState<string | null>(null);
+  const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null);
 
   async function loadBillingStatus() {
     try {
-      const { data } = await api.get('/billing/status', { validateStatus: () => true });
-      if (data) {
-        setCurrentPlan(data.plan);
-        setCurrentPlanType(data.plan_type);
-        setTestMode(data.test_mode || false);
+      const { data } = await api.get('/license/status', { validateStatus: () => true });
+      if (data?.active) {
+        const normalizedPlan = String(data.plan || 'pro').toLowerCase().includes('starter') ? 'starter' : 'pro';
+        setCurrentPlan(normalizedPlan);
+      } else {
+        setCurrentPlan(null);
       }
     } catch {
       // ignore
@@ -100,6 +83,17 @@ export function Pricing() {
     loadBillingStatus();
   }, []);
 
+  const openCheckoutUrl = async (url: string) => {
+    const desktopOpen = (window as AgenticElectronWindow).electronAPI?.openExternal;
+    const result = desktopOpen ? await desktopOpen(url) : null;
+    if (!result?.success) {
+      const opened = window.open(url, '_blank', 'noopener,noreferrer');
+      if (!opened) {
+        window.location.href = url;
+      }
+    }
+  };
+
   const handlePurchase = async (planId: string) => {
     if (!session?.user) {
       setMessage({ type: 'error', text: 'Please sign in first to purchase a plan.' });
@@ -108,98 +102,21 @@ export function Pricing() {
 
     setLoading(planId);
     setMessage(null);
+    setCheckoutUrl(null);
 
     try {
-      // Step 1: Create order
-      const { data: order, status: orderStatus } = await api.post('/billing/create-order', {
+      const { data, status } = await api.post('/checkout/create', {
         plan: planId,
-        user_id: session.user.id,
       }, { validateStatus: () => true });
 
-      if (orderStatus < 200 || orderStatus >= 300) {
-        throw new Error(order?.detail || 'Failed to create order');
+      if (status < 200 || status >= 300 || !data?.checkout_url) {
+        throw new Error(toUserError(data, 'Unable to start checkout. Please try again in a moment.'));
       }
-
-      if (testMode || order.test_mode) {
-        // Test mode: activate immediately without real payment
-        const { data: result, status: activateStatus } = await api.post('/billing/verify-payment', {
-          razorpay_order_id: order.order_id,
-          razorpay_payment_id: `test_payment_${order.order_id}`,
-          razorpay_signature: '0'.repeat(64),
-          user_id: session.user.id,
-          plan: planId,
-        }, { validateStatus: () => true });
-
-        if (activateStatus < 200 || activateStatus >= 300) {
-          throw new Error(result?.detail || 'Failed to activate plan');
-        }
-        setMessage({
-          type: 'success',
-          text: `✅ ${result.plan_name || PLANS.find(p => p.id === planId)?.name} plan activated! (Test mode — no payment taken)`,
-        });
-        setCurrentPlan(planId);
-        setCurrentPlanType('agentic_paid');
-      } else {
-        // Production mode: open Razorpay checkout
-        const Razorpay = window.Razorpay;
-        if (!Razorpay) {
-          setMessage({ type: 'error', text: 'Payment SDK not loaded. Please refresh the page or use test mode.' });
-          setLoading(null);
-          return;
-        }
-        const rzp = new Razorpay({
-          key: order.key_id,
-          order_id: order.order_id,
-          name: 'AgentIC',
-          description: `${order.plan_name} — ${order.amount_display}`,
-          handler: async (response: RazorpayPaymentResponse) => {
-            const { status: verifyStatus } = await api.post('/billing/verify-payment', {
-              razorpay_order_id: response.razorpay_order_id,
-              razorpay_payment_id: response.razorpay_payment_id,
-              razorpay_signature: response.razorpay_signature,
-              user_id: session.user.id,
-              plan: planId,
-            }, { validateStatus: () => true });
-            if (verifyStatus >= 200 && verifyStatus < 300) {
-              setMessage({ type: 'success', text: '✅ Plan activated! Start building your chips.' });
-              setCurrentPlan(planId);
-              setCurrentPlanType('agentic_paid');
-            }
-          },
-          theme: { color: '#C9643E', overlay_close: true },
-          modal: {
-            ondismiss: () => setLoading(null),
-          },
-        });
-        rzp.open();
-      }
+      setCheckoutUrl(data.checkout_url);
+      await openCheckoutUrl(data.checkout_url);
+      setMessage({ type: 'success', text: 'Checkout is ready. If your browser did not open, use the checkout button below.' });
     } catch (err: unknown) {
-      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Something went wrong. Please try again.' });
-    } finally {
-      setLoading(null);
-    }
-  };
-
-  const handleTestActivate = async (planId: string) => {
-    if (!session?.user) {
-      setMessage({ type: 'error', text: 'Please sign in first.' });
-      return;
-    }
-    setLoading(planId);
-    setMessage(null);
-    try {
-      const { data, status } = await api.post('/billing/test-activate', {
-        plan: planId,
-        user_id: session.user.id,
-      }, { validateStatus: () => true });
-      if (status < 200 || status >= 300) {
-        throw new Error(data?.detail || 'Failed to activate');
-      }
-      setMessage({ type: 'success', text: data.message });
-      setCurrentPlan(planId);
-      setCurrentPlanType('agentic_paid');
-    } catch (err: unknown) {
-      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to activate plan.' });
+      setMessage({ type: 'error', text: toUserError(err, 'Unable to start checkout. Please try again in a moment.') });
     } finally {
       setLoading(null);
     }
@@ -207,20 +124,15 @@ export function Pricing() {
 
   return (
     <div className="pricing-page">
-      {/* Test Mode Banner */}
-      {testMode && (
-        <div className="pricing-test-banner">
-          <AlertCircle size={15} />
-          <span>
-            <strong>Test Mode</strong> — No real payments are processed. Use the "Test Activate" buttons to simulate purchases.
-            Configure <code>RAZORPAY_KEY_ID</code> in your environment to enable real billing.
-          </span>
-        </div>
-      )}
-
       {/* Header */}
       <div className="pricing-header">
-        <button className="pricing-back" onClick={() => window.history.back()}>
+        <button className="pricing-back" onClick={() => {
+          if (onBack) {
+            onBack();
+          } else {
+            window.history.back();
+          }
+        }}>
           <ArrowLeft size={16} />
           Back
         </button>
@@ -233,7 +145,7 @@ export function Pricing() {
       </div>
 
       {/* Current Plan Badge */}
-      {currentPlanType === 'agentic_paid' && currentPlan && (
+      {currentPlan && (
         <div className="pricing-current">
           <div className="pricing-current-badge">
             <Check size={15} />
@@ -244,22 +156,34 @@ export function Pricing() {
         </div>
       )}
 
-      {currentPlanType === 'byok' && (
-        <div className="pricing-current">
-          <div className="pricing-current-badge pricing-current-badge--byok">
-            <KeyRound size={15} />
-            <span>
-              You're on <strong>BYOK mode</strong>. Subscribe to use Infinite without managing model keys.
-            </span>
-          </div>
-        </div>
-      )}
-
       {/* Message */}
       {message && (
         <div className={`pricing-message pricing-message--${message.type}`}>
           {message.type === 'success' ? <Check size={15} /> : <AlertCircle size={15} />}
           {message.text}
+        </div>
+      )}
+
+      {checkoutUrl && (
+        <div className="pricing-checkout-fallback">
+          <div>
+            <strong>Checkout link ready</strong>
+            <p>Open the secure Lemon Squeezy checkout in your browser, then return here and recheck your license.</p>
+          </div>
+          <div className="pricing-checkout-actions">
+            <button className="pricing-btn pricing-checkout-btn" onClick={() => openCheckoutUrl(checkoutUrl)}>
+              Open checkout
+            </button>
+            <button
+              className="pricing-btn pricing-checkout-btn pricing-checkout-btn--ghost"
+              onClick={() => {
+                navigator.clipboard?.writeText(checkoutUrl);
+                setMessage({ type: 'success', text: 'Checkout link copied.' });
+              }}
+            >
+              Copy link
+            </button>
+          </div>
         </div>
       )}
 
@@ -309,7 +233,7 @@ export function Pricing() {
                 <button className="pricing-btn" onClick={() => setMessage({ type: 'error', text: 'Please sign in first.' })}>
                   Sign in to Purchase
                 </button>
-              ) : currentPlan === plan.id && currentPlanType === 'agentic_paid' ? (
+              ) : currentPlan === plan.id ? (
                 <button className="pricing-btn pricing-btn--active" disabled>
                   <Check size={15} />
                   Current Plan
@@ -323,15 +247,6 @@ export function Pricing() {
                   >
                     {loading === plan.id ? 'Processing…' : `Get ${plan.name}`}
                   </button>
-                  {testMode && (
-                    <button
-                      className="pricing-btn pricing-btn--test"
-                      disabled={loading !== null}
-                      onClick={() => handleTestActivate(plan.id)}
-                    >
-                      {loading === plan.id ? 'Activating…' : `Test Activate (Free)`}
-                    </button>
-                  )}
                 </>
               )}
             </div>

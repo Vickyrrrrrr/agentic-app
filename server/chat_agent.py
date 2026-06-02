@@ -37,74 +37,93 @@ TOOL_DEFS = [
     {"type": "function", "function": {
         "name": "glob", "description": "List files matching a glob pattern",
         "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}}},
+    {"type": "function", "function": {
+        "name": "web_search", "description": "Search the web for datasheets, PDK docs, tool guides, application notes, or any information",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer", "default": 5}}, "required": ["query"]}}},
 ]
 
-SYSTEM_PROMPT = """You are an autonomous VLSI design engineer agent. You follow the EXACT same algorithm as OpenCode for writing structured chip projects.
+SYSTEM_PROMPT = """You are an autonomous VLSI design engineer agent. You follow the same operating model as OpenCode, but for silicon projects.
 
-CRITICAL RULE — YOU MUST USE TOOLS, NOT JUST TALK:
-You can ONLY show your work by calling write() or bash(). Text responses alone are invisible. NEVER describe what you will do. ALWAYS call the tool and do it.
+CORE OPERATING MODEL — EXACTLY SEVEN TOOLS:
+You have seven generic tools: read, write, edit, bash, grep, glob, and web_search.
+You are NOT a wrapper around any fixed EDA stack. You can use open-source tools, proprietary tools,
+customer scripts, Makefiles, Tcl flows, shell flows, Docker flows, or PDK-provided utilities if they
+exist in the user's local environment and workspace.
 
-CRITICAL RULE — NO HARDCODED PATHS:
+CRITICAL RULE — PRESERVE USER INTENT:
+The user's initial request and follow-up constraints are the design contract. Before fixing an error,
+choosing a flow, or changing a script, re-anchor to what the user asked for: target block/chip, PDK,
+tool preference, interface, clock/reset, deliverables, and any stated constraints. Do not "simplify"
+the design or switch tools unless that still satisfies the user's intent or you ask first.
+
+CRITICAL RULE — USE TOOLS, NOT JUST TALK:
+For build/design work, progress is made by calling read/write/edit/bash/grep/glob. Text alone does
+not create files, inspect PDKs, or fix Tcl/RTL errors.
+
+CRITICAL RULE — NO HARDCODED TOOLS OR PATHS:
 Never assume tools or PDKs are installed at specific paths. Always discover dynamically:
-- bash("which <tool>") to check if a tool is in PATH
-- bash("echo $PDK_ROOT"), glob("**/*.lib"), ls common locations
-- If a tool is missing: tell the user via NEEDS_INPUT and suggest how to install it
+- Inspect the user's request for named tools/PDKs/flows first, then probe those names.
+- Use bash("env | sort") to inspect EDA, license, and PDK-related environment variables.
+- Use bash("command -v <tool>") only for tools implied by the user, existing scripts, or discovered env.
+- glob/read only inside the workspace or user-provided directories
+- If a required tool, license, script, or PDK is missing: use NEEDS_INPUT and ask whether to configure a path, install/use Docker, use an alternative local tool, or continue with a reduced flow.
 
 ┌──────────────────────────────────────────────────────────────┐
-│  OPENCODE ALGORITHM — Follow this EXACTLY for every chip:   │
+│  OPENCODE-STYLE ALGORITHM — Follow for every chip task:      │
 │                                                              │
-│  STEP 1 — EXPLORE & DISCOVER:                               │
-│    bash("which iverilog verilator yosys opensta openroad     │
-│           gtkwave make python3")                             │
-│    Report what's found and what's missing.                   │
-│    If any tool is missing → NEEDS_INPUT: tell user which     │
-│    tools are missing and suggest install commands.           │
-│    Wait for user to confirm before proceeding.               │
+│  STEP 1 — UNDERSTAND + DISCOVER:                            │
+│    Read the conversation and preserve the user's original    │
+│    goal. Then inspect the workspace and environment.         │
+│    Start with generic discovery, not a fixed tool list:      │
+│      bash("env | sort")                                      │
+│      bash("find . -maxdepth 3 -type f | sort | head -300")   │
+│      glob("**/{Makefile,*.mk,*.tcl,*.sdc,*.ys,*.sh,*.cfg}")  │
+│    If files/scripts exist, read them before inventing a new  │
+│    flow. If the user named tools, probe exactly those tools. │
 │                                                              │
 │    Discover PDKs dynamically (no hardcoded paths):           │
-│    bash("echo $PDK_ROOT") to check env var                  │
-│    bash("ls -d ~/.ciel/*/ ~/.pdk/*/ /usr/share/pdk/*/       │
-│           /usr/local/share/pdk/*/ 2>/dev/null") common locs  │
-│    glob("**/*.lib") from workspace root to find PDK libs    │
-│    Report what PDKs are available.                           │
+│      inspect PDK_ROOT, PDKPATH, PDK_HOME,                    │
+│      AGENTIC_PDK_SEARCH_PATHS, user-provided paths, and      │
+│      workspace scripts.                                      │
+│    Only list/read PDK files under paths the environment or   │
+│    user explicitly provides. If no PDK path is known, ask.   │
 │                                                              │
-│    Check for stale files in the workspace:                   │
-│    bash("ls .") and remove any stale root files:            │
-│    bash("rm -rf ./*/ *.v *.sv *.vcd simv 2>/dev/null; true")│
+│    Check for existing files in the workspace:                │
+│    use bash/glob and keep existing projects intact unless    │
+│    the user explicitly asks to clean or delete them.         │
+│    Use web_search() to look up PDK docs, datasheets,        │
+│    tool documentation, or any information you lack locally.  │
 │                                                              │
-│  STEP 2 — PLAN (in your head, ZERO text planning):          │
-│    Pick: project name, ALL files, ALL paths, ALL contents.   │
-│    Goal: write everything in ONE response, no second pass.   │
-│    NEVER say "I'll start by..." — just do it.                │
+│  STEP 2 — CHOOSE A LOCAL FLOW THAT MATCHES USER INTENT:      │
+│    Prefer existing user/project/PDK scripts. If none exist,  │
+│    create a minimal project flow appropriate to available    │
+│    tools. Do not force Icarus/Yosys/OpenROAD if proprietary │
+│    tools or customer scripts are requested or present.       │
 │                                                              │
-│  STEP 3 — WRITE EVERYTHING IN ONE RESPONSE:                 │
-│    Multiple write() calls, ALL in the same LLM response:     │
-│      write("<project>/rtl/top.sv", ...)                      │
-│      write("<project>/rtl/<module>.sv", ...)                 │
-│      write("<project>/rtl/<pkg>.sv", ...)                    │
-│      write("<project>/tb/top_tb.sv", ...)                    │
-│      write("<project>/tb/sim_main.cpp", ...) ← if verilator  │
-│      write("<project>/Makefile", ...)                        │
-│      write("<project>/synth/synth.tcl", ...)  ← if yosys     │
-│      write("<project>/synth/constraints.sdc", ...)           │
-│      write("<project>/reports/build_summary.md", "pending")  │
+│  STEP 3 — WRITE OR EDIT COHERENTLY:                         │
+│    Batch-write the files needed for the chosen flow. Use     │
+│    standard project directories when creating a fresh design,│
+│    but respect existing project layout when continuing work. │
 │                                                              │
-│  STEP 4 — RUN (bash calls, ONE per tool):                   │
-│    bash("cd <project> && make sim")                          │
-│    bash("cd <project> && make lint")   ← if verilator        │
-│    bash("cd <project> && make synth")  ← if yosys            │
-│    bash("cd <project> && make pnr")    ← if openroad         │
+│  STEP 4 — RUN THE LOCAL FLOW:                               │
+│    Run the existing or generated command/script. This may be │
+│    make, Tcl, shell, Python, a proprietary binary, Docker,   │
+│    or an open-source EDA tool. Use one bash call per major   │
+│    stage so failures are observable.                         │
 │                                                              │
-│  STEP 5 — REPORT:                                           │
-│    write("<project>/reports/build_summary.md", "results...") │
-│    List all created file paths in your response text         │
+│  STEP 5 — DEBUG BY READING REAL EVIDENCE:                   │
+│    On errors, read logs, scripts, PDK files, tool help, and  │
+│    generated reports. For Tcl errors, read the Tcl around    │
+│    the failing line, read referenced PDK/config variables,   │
+│    then edit the actual Tcl/script/constraints.              │
 │                                                              │
-│  KEY RULE: If you need 5 files, write ALL 5 in one go.      │
-│  One write() per file. Never write one file per round.      │
-│  This is how OpenCode achieves zero-waste speed.             │
+│  STEP 6 — REPORT CONCISELY:                                 │
+│    Summarize what changed, what passed/failed, and where     │
+│    artifacts are. Do not expose raw commands/logs in final   │
+│    user-facing text.                                         │
 └──────────────────────────────────────────────────────────────┘
 
-STANDARD DIRECTORIES — inside each chip project folder:
+RECOMMENDED DIRECTORIES FOR NEW PROJECTS:
   <project>/rtl/        — synthesizable HDL ONLY (.v, .sv)
   <project>/tb/         — testbenches ONLY (.sv or sim_main.cpp)
   <project>/dv/         — DV scripts, coverage, formal
@@ -113,36 +132,27 @@ STANDARD DIRECTORIES — inside each chip project folder:
   <project>/sta/        — STA scripts, timing reports
   <project>/sim/        — simulation logs, waveforms (.vcd)
   <project>/reports/    — build summaries (*.md)
-
-MAKEFILE — ALWAYS create one in <project>/Makefile:
-  sim  → iverilog -g2012 -o sim/sim.vvp rtl/*.sv tb/*.sv && vvp sim/sim.vvp
-  lint → verilator --lint-only --top <top> rtl/*.sv (if verilator available)
-  synth → yosys -c synth/synth.tcl (if yosys available)
-  clean → rm -rf sim/* synth/*
+These are conventions, not constraints. If the user's proprietary/customer flow has a different
+layout, follow that layout.
 
 RTL RULES (applies to ALL chips — counter, CPU, accelerator, anything):
-- SystemVerilog (.sv) with always_ff/always_comb
-- Package shared types in <project>_pkg.sv
-- Fully parameterized: data width, depth, etc.
-- Include clock + async reset
-- One module per file, named after the module
-- Top module wires everything together
-- Testbench: toggle clock, assert reset, run N cycles, "$display SIMULATION DONE"
-- If verilator is available: write tb/sim_main.cpp with Verilator C++ wrapper instead of SV testbench
-- If both iverilog and verilator: write BOTH
+- Generate synthesizable RTL suitable for the user's chosen language/tool flow.
+- Prefer SystemVerilog when appropriate, but use Verilog-2005/VHDL/etc. if the flow requires it.
+- Preserve the requested interface, clock/reset convention, parameterization, and behavior.
+- Add testbenches/properties/scripts only if they match available tools or user-requested flow.
 
 DEBUG LOOP:
 1. bash() → fails
-2. read() error output, then read() PDK or source files that caused the error
-3. Hypothesize based on ACTUAL FILE CONTENT (not guesses)
-4. edit() or write() to fix
+2. read() the relevant log/report/script/source/PDK files that caused the error
+3. Reconcile the failure with the user's original intent and actual PDK/tool documentation
+4. edit() or write() the smallest correct fix
 5. bash() to re-run. Still failing? Repeat.
-6. NEVER guess. NEVER apply random fixes.
+6. NEVER guess. NEVER apply random Tcl/constraint/PDK fixes without reading the evidence.
 
 ASKING THE USER:
 - NEEDS_INPUT: Start with this marker when you need the user to decide or provide something
-- Tool missing after which()? → "NEEDS_INPUT: <tool> not found. Install with: sudo apt install <tool> (or brew/conda/pip)"
-- PDK not found? → "NEEDS_INPUT: No PDK found. Set PDK_ROOT or point me to your PDK location."
+- Tool missing after discovery? → "NEEDS_INPUT: <capability> is unavailable. Do you want me to install an open-source tool, use Docker, configure a proprietary tool path, or continue without this stage?"
+- PDK not found? → "NEEDS_INPUT: No PDK path is configured. Set PDK_ROOT/PDKPATH/PDK_HOME/AGENTIC_PDK_SEARCH_PATHS or tell me where the PDK is installed."
 - Truly stuck after many attempts? Explain what you tried and ask for guidance
 
 CLEANUP — user asks to "clear", "clean", "delete", "reset", "remove":
@@ -154,7 +164,8 @@ CLEANUP — user asks to "clear", "clean", "delete", "reset", "remove":
 COMPLETION:
 - Summarize what you built
 - List all created file paths organized by directory
-- Report which EDA tools ran and their results"""
+- Report which EDA tool stages ran and whether they passed, but never include raw commands,
+  tool-call JSON, full logs, or stack traces in the final user-facing response."""
 
 
 # ── Prompt injection guard ──────────────────────────────────────
@@ -186,13 +197,106 @@ def _sanitize_messages(raw: list[dict]) -> list[dict]:
     return sanitized
 
 
+def _env_true(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _strip_needs_input(text: str) -> str:
+    return re.sub(r"^\s*NEEDS_INPUT:\s*", "", text or "", flags=re.IGNORECASE).strip()
+
+
+def _sanitize_assistant_text(text: str) -> str:
+    """Remove implementation internals from text that is visible to users."""
+    text = _strip_needs_input(text)
+    text = re.sub(r"\b(read|write|edit|bash|grep|glob|web_search)\s*\([^)]*\)", "a local workspace step", text, flags=re.DOTALL)
+    text = re.sub(r"\bbash\s*\(\s*\{[^}]*\}\s*\)", "a local EDA step", text, flags=re.IGNORECASE | re.DOTALL)
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("$ "):
+            continue
+        if re.search(r"\b(command|stdout|stderr|traceback|exit code)\b", stripped, re.IGNORECASE):
+            if any(marker in stripped for marker in ("{", "}", "&&", "||")):
+                continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _progress_event(label: str, stage: str = "WORKING", status: str = "running") -> dict:
+    return {
+        "type": "progress",
+        "content": label,
+        "label": label,
+        "stage": stage,
+        "status": status,
+    }
+
+
+def _safe_project_name(path: str) -> str | None:
+    parts = [part for part in (path or "").replace("\\", "/").split("/") if part and part not in {".", ".."}]
+    if len(parts) >= 2 and not parts[0].startswith("."):
+        return parts[0]
+    return None
+
+
+def _progress_for_tool_call(name: str, args: dict) -> dict:
+    lower_name = (name or "").lower()
+    if lower_name == "read":
+        return _progress_event("Reviewing generated files", "READ")
+    if lower_name == "write":
+        path = str(args.get("path", "")).lower()
+        event = None
+        if "/tb/" in path or "testbench" in path or path.endswith("_tb.sv"):
+            event = _progress_event("Preparing the testbench", "WRITE")
+        elif "/rtl/" in path or path.endswith((".v", ".sv", ".svh", ".vh")):
+            event = _progress_event("Creating RTL files", "WRITE")
+        elif "/reports/" in path or path.endswith((".md", ".rpt", ".log")):
+            event = _progress_event("Updating the build summary", "WRITE")
+        else:
+            event = _progress_event("Updating generated artifacts", "WRITE")
+        design_name = _safe_project_name(str(args.get("path", "")))
+        if design_name:
+            event["design_name"] = design_name
+        return event
+    if lower_name == "edit":
+        return _progress_event("Fixing generated files", "EDIT")
+    if lower_name in {"grep", "glob"}:
+        return _progress_event("Searching workspace context", lower_name.upper())
+    if lower_name == "web_search":
+        return _progress_event("Searching the web", "SEARCH")
+    if lower_name == "bash":
+        command = str(args.get("command", "")).lower()
+        if any(token in command for token in ("which ", "env ", "pdk", "license", "command -v", "find ")):
+            return _progress_event("Inspecting available local EDA tools", "DISCOVER")
+        if any(token in command for token in ("lint", "verilator", "check_design", "check_timing", "check_design")):
+            return _progress_event("Running lint checks", "VERIFY")
+        if any(token in command for token in ("sim", "xrun", "vcs", "questa", "vsim", "iverilog", "vvp", "simulation")):
+            return _progress_event("Running verification", "VERIFY")
+        if any(token in command for token in ("synth", "yosys", "genus", "dc_shell", "design compiler", "rtl compiler")):
+            return _progress_event("Running synthesis", "SYNTHESIS")
+        if any(token in command for token in ("pnr", "place", "route", "innovus", "icc2", "openroad", "opensta", "sta", "primetime")):
+            return _progress_event("Running implementation flow", "IMPLEMENTATION")
+        if "tcl" in command:
+            return _progress_event("Running a local Tcl flow", "RUN")
+        if "ls" in command:
+            return _progress_event("Checking the workspace", "DISCOVER")
+        return _progress_event("Running a local EDA step", "RUN")
+    return _progress_event("Working on the chip design", "WORKING")
+
+
+def _progress_for_tool_result(result: str) -> dict:
+    if result.strip().lower().startswith("exit code"):
+        return _progress_event("Reviewing a tool issue", "DEBUG", "needs_attention")
+    return _progress_event("Local step completed", "WORKING", "completed")
+
+
 def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                     base_url: str | None = None, model: str = "gpt-4o"):
     """Yields event dicts for SSE streaming. One call = one agent interaction."""
 
     system_prompt = SYSTEM_PROMPT
     # Add environment info
-    from docker_runner import detect_environment
+    from local_tools import detect_environment
     env = detect_environment()
     env_info = json.dumps(env, indent=2)
     system_prompt += f"\n\n## System environment\n{env_info}"
@@ -217,6 +321,7 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=120)
 
     max_rounds = 20
+    debug_events = _env_true("AGENTIC_DEBUG_EVENTS")
     for _round in range(max_rounds):
         logger.info("LLM round %d/%d — sending %d messages", _round + 1, max_rounds, len(full_messages))
         try:
@@ -238,11 +343,10 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
         if msg.tool_calls:
             logger.info("LLM requested %d tool call(s)", len(msg.tool_calls))
 
-            # Only emit text as reasoning when tool calls follow (user sees thinking + tool results)
             if msg.content:
                 if "NEEDS_INPUT:" in msg.content:
-                    yield {"type": "needs_input", "content": msg.content}
-                else:
+                    yield {"type": "needs_input", "content": _sanitize_assistant_text(msg.content)}
+                elif debug_events:
                     yield {"type": "reasoning", "content": msg.content}
 
             full_messages.append({"role": "assistant", "content": None, "tool_calls": [
@@ -257,22 +361,26 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                     args = {}
 
                 logger.info("Tool call: %s args=%s", fn.name, json.dumps(args)[:200])
-                yield {"type": "tool-call", "content": f"{fn.name}({json.dumps(args)[:300]})", "state": fn.name.upper()}
+                yield _progress_for_tool_call(fn.name, args)
+                if debug_events:
+                    yield {"type": "tool-call", "content": f"{fn.name}({json.dumps(args)[:300]})", "state": fn.name.upper()}
 
                 t0 = time.time()
                 result = dispatch_tool(fn.name, args, workspace_root)
                 elapsed = time.time() - t0
 
                 logger.info("Tool %s completed in %.1fs (result length: %d)", fn.name, elapsed, len(result))
-                yield {"type": "tool-result", "content": result[:1500], "state": fn.name.upper()}
+                yield _progress_for_tool_result(result)
+                if debug_events:
+                    yield {"type": "tool-result", "content": result[:1500], "state": fn.name.upper()}
                 full_messages.append({"role": "tool", "tool_call_id": tc.id, "content": result[:5000]})
         else:
             # No tool calls — this is a final text response
             if msg.content:
                 if "NEEDS_INPUT:" in msg.content:
-                    yield {"type": "needs_input", "content": msg.content}
+                    yield {"type": "needs_input", "content": _sanitize_assistant_text(msg.content)}
                 else:
-                    yield {"type": "response", "content": msg.content}
+                    yield {"type": "response", "content": _sanitize_assistant_text(msg.content)}
             else:
                 logger.info("LLM returned empty response with no tool calls")
             logger.info("Agent conversation complete (no tool calls)")

@@ -1,0 +1,17 @@
+services:
+  agentic-license:
+    build: .
+    container_name: agentic_license
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8088:8080"
+    volumes:
+      - /opt/agentic-license/keys:/opt/agentic-license/keys:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

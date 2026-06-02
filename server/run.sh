@@ -19,12 +19,13 @@ if command -v docker &>/dev/null; then
     fi
 fi
 
-for pdk_dir in "$HOME/.ciel" "$HOME/.pdk" /usr/share/pdk /usr/local/share/pdk; do
-    if [ -d "$pdk_dir" ]; then
-        echo "[scan] Found PDK directory: $pdk_dir"
-        for d in "$pdk_dir"/*/; do
-            [ -d "$d" ] && echo "         - $(basename "$d")"
-        done
+echo "[scan] PDK paths are discovered from PDK_ROOT, PDKPATH, PDK_HOME, or AGENTIC_PDK_SEARCH_PATHS."
+IFS=':' read -r -a pdk_candidates <<< "${PDK_ROOT:-}:${PDKPATH:-}:${PDK_HOME:-}:${AGENTIC_PDK_SEARCH_PATHS:-}"
+for pdk_dir in "${pdk_candidates[@]}"; do
+    [ -z "$pdk_dir" ] && continue
+    expanded="${pdk_dir/#\~/$HOME}"
+    if [ -d "$expanded" ]; then
+        echo "[scan] Found configured PDK directory: $expanded"
     fi
 done
 
@@ -36,4 +37,5 @@ echo "→ AgentIC Local Server starting at http://localhost:7860"
 echo ""
 
 cd "$SCRIPT_DIR"
+export AGENTIC_LICENSE_STATUS_URL=${AGENTIC_LICENSE_STATUS_URL:-"https://api.buildstack.live/license/status"}
 python3 main.py

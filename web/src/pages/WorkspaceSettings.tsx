@@ -19,12 +19,24 @@ interface WorkspaceSettingsProps {
   profile: ProfileSummary | null;
   sessionEmail: string;
   onOpenByok: () => void;
+  licenseStatus?: {
+    active?: boolean;
+    plan?: string;
+    source?: string;
+    reason?: string;
+  } | null;
+  toolStatus?: {
+    capability_tier?: string;
+    missing?: Array<{ capability: string; tools: string[] }>;
+  } | null;
 }
 
 export const WorkspaceSettings: React.FC<WorkspaceSettingsProps> = ({
   profile,
   sessionEmail,
   onOpenByok,
+  licenseStatus,
+  toolStatus,
 }) => {
   const [localByokConfigured, setLocalByokConfigured] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -46,6 +58,9 @@ export const WorkspaceSettings: React.FC<WorkspaceSettingsProps> = ({
   const runningBuilds = profile?.running_builds ?? 0;
   const failedBuilds = profile?.failed_builds ?? 0;
   const activeDesigns = profile?.active_designs ?? 0;
+  const licenseReady = licenseStatus?.active !== false;
+  const capabilityTier = toolStatus?.capability_tier || 'checking';
+  const missingCapabilities = toolStatus?.missing || [];
 
   const downloadBackup = async () => {
     setExporting(true);
@@ -86,6 +101,10 @@ export const WorkspaceSettings: React.FC<WorkspaceSettingsProps> = ({
           <span className={`app-hero-pill ${byokReady ? 'is-success' : 'is-warn'}`}>
             <ShieldCheck size={15} />
             {byokReady ? 'Model key ready' : 'Model key needed'}
+          </span>
+          <span className={`app-hero-pill ${licenseReady ? 'is-success' : 'is-warn'}`}>
+            <ShieldCheck size={15} />
+            {licenseReady ? `License ${licenseStatus?.plan || 'active'}` : 'License required'}
           </span>
         </div>
       </section>
@@ -155,6 +174,27 @@ export const WorkspaceSettings: React.FC<WorkspaceSettingsProps> = ({
             <Download size={15} />
             {exporting ? 'Preparing export...' : 'Export Build History'}
           </button>
+        </div>
+
+        <div className="ws-card">
+          <div className="ws-card-header">
+            <ShieldCheck size={16} className="ws-card-icon" />
+            <span className="ws-card-label">Local Execution</span>
+          </div>
+          <h3 className="ws-card-title">EDA capability: {capabilityTier}</h3>
+          <p className="ws-card-desc">
+            AgentIC runs EDA commands on this machine. Cloud calls are limited to license checks,
+            usage counts, and your BYOK model provider.
+          </p>
+          <div className="ws-health-grid">
+            {missingCapabilities.length === 0 ? (
+              <span className="ws-health-pill is-good">No setup gaps</span>
+            ) : missingCapabilities.slice(0, 3).map((item) => (
+              <span className="ws-health-pill is-warn" key={item.capability}>
+                {item.capability}: {item.tools.join(' / ')}
+              </span>
+            ))}
+          </div>
         </div>
       </div>
 

@@ -7,6 +7,7 @@ export interface ElectronAPI {
   ) => Promise<{ success: boolean; filePath: string | null }>
   getVersion: () => Promise<string>
   getPlatform: () => Promise<string>
+  openExternal: (url: string) => Promise<{ success: boolean }>
   onDeepLink: (callback: (path: string) => void) => () => void
   onBackendReady: (callback: () => void) => () => void
   executeLocalEDA: (
@@ -22,6 +23,8 @@ const electronAPI: ElectronAPI = {
   getVersion: () => ipcRenderer.invoke('get-app-version'),
 
   getPlatform: () => ipcRenderer.invoke('get-platform'),
+
+  openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
 
   onDeepLink: (callback: (path: string) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, path: string): void => {

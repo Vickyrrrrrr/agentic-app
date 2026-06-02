@@ -13,6 +13,8 @@ files:
 extraResources:
   - from: out/renderer
     to: renderer
+  - from: resources/license.json
+    to: license.json
 
 asar: true
 compression: maximum
