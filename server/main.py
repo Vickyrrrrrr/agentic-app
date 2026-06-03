@@ -18,7 +18,7 @@ from openai import AzureOpenAI, OpenAI
 from sse_starlette.sse import EventSourceResponse
 
 from models import ChatRequest, ToolInstallPlanRequest, ToolInstallRequest, UsageBuildRequest
-from workspace import list_artifacts, list_designs, read_artifact, ensure_workspace
+from workspace import list_artifacts, list_designs, read_artifact, read_workspace_artifact, ensure_workspace
 from chat_agent import converse_stream
 from local_tools import detect_environment, install_command_for, run_bash
 
@@ -45,6 +45,12 @@ ENTITLEMENT_PATH = STATE_DIR / "entitlement.json"
 USAGE_LOG_PATH = STATE_DIR / "usage.jsonl"
 RUN_EVENTS_PATH = STATE_DIR / "run_events.jsonl"
 ACTIVE_DESIGN_PATH = STATE_DIR / "active_design.json"
+CANCELLED_RUNS: set[str] = set()
+WORKSPACE_SECTION_DIRS = {
+    "rtl", "tb", "dv", "sim", "synth", "pnr", "sta", "reports",
+    "constraints", "formal", "layout", "logs", "scripts", "hardening",
+    "signoff", "openlane", "openroad", "runs",
+}
 
 # Load local license.json values into environment if not set
 try:
@@ -522,7 +528,13 @@ def _append_run_event(event: dict) -> None:
 
 
 def _set_active_design(design_name: str | None) -> None:
-    if not design_name or design_name.startswith(".") or "/" in design_name or "\\" in design_name:
+    if (
+        not design_name
+        or design_name.startswith(".")
+        or "/" in design_name
+        or "\\" in design_name
+        or design_name.lower() in WORKSPACE_SECTION_DIRS
+    ):
         return
     ACTIVE_DESIGN_PATH.write_text(json.dumps({
         "name": design_name,
@@ -533,7 +545,10 @@ def _set_active_design(design_name: str | None) -> None:
 def _get_active_design() -> dict | None:
     try:
         active = json.loads(ACTIVE_DESIGN_PATH.read_text(encoding="utf-8"))
-        if active.get("name"):
+        active_name = str(active.get("name") or "")
+        if active_name:
+            if active_name.lower() in WORKSPACE_SECTION_DIRS:
+                return None
             return active
     except Exception:
         pass
@@ -812,6 +827,17 @@ async def get_artifacts(request: Request, design_name: str = ""):
     return list_artifacts(design_name, WS_ROOT)
 
 
+@app.get("/build/artifacts/file/{file_name:path}")
+async def get_workspace_artifact(request: Request, file_name: str):
+    license_status = resolve_license_status(request)
+    if not license_status.get("active"):
+        raise HTTPException(402, license_status.get("reason") or "Active license required")
+    content = read_workspace_artifact(file_name, WS_ROOT)
+    if content is None:
+        raise HTTPException(404, "Artifact not found")
+    return content
+
+
 @app.get("/build/artifacts/{design_name}/{file_name:path}")
 async def get_artifact(request: Request, design_name: str, file_name: str):
     license_status = resolve_license_status(request)
@@ -834,7 +860,8 @@ async def chat_converse(req: ChatRequest, request: Request):
         raise HTTPException(400, "BYOK model key required before running the local agent.")
     base_url = req.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
     model = req.model or os.environ.get("OPENAI_MODEL", "gpt-4o")
-    run_id = uuid.uuid4().hex
+    run_id = req.run_id or uuid.uuid4().hex
+    CANCELLED_RUNS.discard(run_id)
 
     async def event_generator():
         loop = asyncio.get_event_loop()
@@ -854,6 +881,7 @@ async def chat_converse(req: ChatRequest, request: Request):
                     base_url=base_url,
                     model=model,
                     event_pusher=_push_event,
+                    is_cancelled=lambda: run_id in CANCELLED_RUNS,
                 ):
                     loop.call_soon_threadsafe(queue.put_nowait, ("event", event))
                 loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
@@ -867,6 +895,18 @@ async def chat_converse(req: ChatRequest, request: Request):
                 kind, payload = await asyncio.wait_for(queue.get(), timeout=LLM_TIMEOUT)
 
                 if kind == "done":
+                    if run_id in CANCELLED_RUNS:
+                        done_event = {
+                            "run_id": run_id,
+                            "type": "cancelled",
+                            "state": "cancelled",
+                            "label": "Run stopped",
+                            "status": "cancelled",
+                            "timestamp": time.time(),
+                        }
+                        _append_run_event(done_event)
+                        yield {"event": "message", "data": json.dumps(done_event)}
+                        break
                     done_event = {
                         "run_id": run_id,
                         "type": "stream_end",
@@ -912,10 +952,12 @@ async def chat_converse(req: ChatRequest, request: Request):
                 }
                 if sse_data.get("design_name"):
                     _set_active_design(sse_data["design_name"])
-                if event_type in {"progress", "needs_input", "response", "error", "stream_end"}:
+                if event_type in {"progress", "needs_input", "response", "error", "stream_end", "cancelled"}:
                     _append_run_event(sse_data)
 
                 yield {"event": "message", "data": json.dumps(sse_data)}
+                if event_type == "cancelled":
+                    break
 
         except asyncio.TimeoutError:
             timeout_event = {
@@ -936,6 +978,26 @@ async def chat_converse(req: ChatRequest, request: Request):
                 pass
 
     return EventSourceResponse(event_generator())
+
+
+@app.post("/runs/{run_id}/cancel")
+async def cancel_run(request: Request, run_id: str):
+    license_status = resolve_license_status(request)
+    if not license_status.get("active"):
+        raise HTTPException(402, license_status.get("reason") or "Active license required")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", run_id or ""):
+        raise HTTPException(400, "Invalid run id")
+    CANCELLED_RUNS.add(run_id)
+    cancel_event = {
+        "run_id": run_id,
+        "type": "cancelled",
+        "state": "cancelled",
+        "label": "Run stop requested",
+        "status": "cancelling",
+        "timestamp": time.time(),
+    }
+    _append_run_event(cancel_event)
+    return {"status": "cancelling", "run_id": run_id}
 
 
 @app.post("/lab/syntax-check")

@@ -45,10 +45,6 @@ mac:
   category: public.app-category.developer-tools
   icon: resources/icon.icns
   darkModeSupport: true
-  hardenedRuntime: true
-  gatekeeperAssess: false
-  entitlements: build/entitlements.mac.plist
-  entitlementsInherit: build/entitlements.mac.plist
   target:
     - target: dmg
       arch:
@@ -93,5 +89,5 @@ appImage:
 publish:
   provider: github
   owner: Vickyrrrrrr
-  repo: AgentIC
+  repo: buildstack
   releaseType: release

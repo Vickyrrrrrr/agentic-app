@@ -3,6 +3,11 @@ import shutil
 from pathlib import Path
 
 DEFAULT_ROOT = os.path.expanduser("~/AgentIC-workspace")
+WORKSPACE_SECTION_DIRS = {
+    "rtl", "tb", "dv", "sim", "synth", "pnr", "sta", "reports",
+    "constraints", "formal", "layout", "logs", "scripts", "hardening",
+    "signoff", "openlane", "openroad", "runs",
+}
 
 
 def ensure_workspace(workspace_root: str | None = None) -> str:
@@ -22,7 +27,7 @@ def list_designs(workspace_root: str | None = None) -> list[dict]:
     root = ensure_workspace(workspace_root)
     designs = []
     for entry in sorted(os.listdir(root)):
-        if entry.startswith("."):
+        if entry.startswith(".") or entry.lower() in WORKSPACE_SECTION_DIRS:
             continue
         full = os.path.join(root, entry)
         if os.path.isdir(full):
@@ -59,14 +64,39 @@ def read_artifact(design_name: str, file_name: str, workspace_root: str | None =
     if not design_name or design_name.startswith("."):
         return None
     root = ensure_workspace(workspace_root)
-    dp = os.path.normpath(os.path.join(root, design_name))
+    dp = os.path.abspath(os.path.normpath(os.path.join(root, design_name)))
     if not os.path.isdir(dp):
         return None
-    full = os.path.normpath(os.path.join(dp, file_name))
-    dp_norm = os.path.normpath(dp)
-    if not (full == dp_norm or full.startswith(dp_norm + os.sep)):
+    full = os.path.abspath(os.path.normpath(os.path.join(dp, file_name)))
+    dp_norm = os.path.abspath(os.path.normpath(dp))
+    try:
+        if os.path.commonpath([dp_norm, full]) != dp_norm:
+            return None
+    except ValueError:
         return None
     rel = os.path.relpath(full, dp_norm)
+    if rel.startswith("..") or any(part.startswith(".") for part in Path(rel).parts):
+        return None
+    if not os.path.isfile(full):
+        return None
+    if os.path.getsize(full) > 2 * 1024 * 1024:
+        return "Preview unavailable: file is larger than 2 MB."
+    try:
+        with open(full, "r", errors="replace") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+def read_workspace_artifact(file_name: str, workspace_root: str | None = None) -> str | None:
+    root = os.path.abspath(os.path.normpath(ensure_workspace(workspace_root)))
+    full = os.path.abspath(os.path.normpath(os.path.join(root, file_name)))
+    try:
+        if os.path.commonpath([root, full]) != root:
+            return None
+    except ValueError:
+        return None
+    rel = os.path.relpath(full, root)
     if rel.startswith("..") or any(part.startswith(".") for part in Path(rel).parts):
         return None
     if not os.path.isfile(full):

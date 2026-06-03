@@ -1,8 +1,13 @@
 {
   "name": "agentic-desktop",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "AgentIC — Autonomous AI-Powered Silicon Design Studio (Desktop)",
   "private": true,
+  "homepage": "https://github.com/Vickyrrrrrr/agentic-app",
+  "author": {
+    "name": "Vicky",
+    "email": "vickynishad@users.noreply.github.com"
+  },
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

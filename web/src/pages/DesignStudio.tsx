@@ -22,6 +22,7 @@ import {
   Folder,
   FolderOpen,
   Plus,
+  Square,
   Trash2,
 } from 'lucide-react';
 import { BillingModal } from '../components/BillingModal';
@@ -114,7 +115,15 @@ const ERROR_RE = /(%error|%warning|syntax error|parse error|error:|fatal|failed|
 const CASUAL_RE = /^(hi+|hello+|hey+|yo+|sup|thanks|thank you|ok|okay|test)$/i;
 const CHAT_HISTORY_STORAGE_KEY = 'agentic_chat_conversations_v1';
 const ACTIVE_CHAT_STORAGE_KEY = 'agentic_active_conversation_id';
+const HISTORY_COLLAPSED_STORAGE_KEY = 'agentic_history_collapsed';
 const MAX_LOCAL_CONVERSATIONS = 40;
+const COLLAPSIBLE_MESSAGE_CHARS = 720;
+const COLLAPSIBLE_MESSAGE_LINES = 8;
+const WORKSPACE_SECTION_NAMES = new Set([
+  'rtl', 'tb', 'dv', 'sim', 'synth', 'pnr', 'sta', 'reports',
+  'constraints', 'formal', 'layout', 'logs', 'scripts', 'hardening',
+  'signoff', 'openlane', 'openroad', 'runs',
+]);
 
 function safeNow(): number {
   return Date.now();
@@ -151,6 +160,22 @@ function formatConversationAge(updatedAt: number): string {
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d`;
   return new Date(updatedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function isWorkspaceSectionName(name?: string): boolean {
+  return Boolean(name && WORKSPACE_SECTION_NAMES.has(String(name).trim().toLowerCase()));
+}
+
+function normalizeActiveDesignName(name?: string): string {
+  const trimmed = String(name || '').trim();
+  return isWorkspaceSectionName(trimmed) ? '' : trimmed;
+}
+
+function artifactPath(path: string): string {
+  return String(path || '')
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/');
 }
 
 function loadConversations(): ChatConversation[] {
@@ -238,14 +263,22 @@ function inferArtifactType(artifact: Artifact): string {
   if (/\/tb\//.test(name) || name.startsWith('tb/')) return 'verification';
   if (/\/dv\//.test(name) || name.startsWith('dv/')) return 'verification';
   if (/\/synth\//.test(name) || name.startsWith('synth/')) return 'synthesis';
+  if (/\/hardening\//.test(name) || name.startsWith('hardening/')) return 'hardening';
+  if (/\/openlane\//.test(name) || name.startsWith('openlane/')) return 'hardening';
+  if (/\/openroad\//.test(name) || name.startsWith('openroad/')) return 'hardening';
+  if (/\/runs\//.test(name) || name.startsWith('runs/')) return 'hardening';
   if (/\/pnr\//.test(name) || name.startsWith('pnr/')) return 'physical';
+  if (/\/layout\//.test(name) || name.startsWith('layout/')) return 'physical';
   if (/\/sta\//.test(name) || name.startsWith('sta/')) return 'timing';
+  if (/\/signoff\//.test(name) || name.startsWith('signoff/')) return 'signoff';
   if (/\/sim\//.test(name) || name.startsWith('sim/')) return 'simulation';
   if (/\/reports\//.test(name) || name.startsWith('reports/')) return 'report';
   // Fallback to extension-based matching
   if (/\.(v|sv|svh|vh)$/.test(name) && !name.includes('tb')) return 'rtl';
   if (name.includes('tb') || name.endsWith('.sby') || name.includes('formal') || name.endsWith('.vcd')) return 'verification';
-  if (name.endsWith('.gds') || name.endsWith('.def') || name.endsWith('.lef') || name.includes('openlane')) return 'physical';
+  if (name.includes('openlane') || name.includes('openroad') || name.includes('innovus') || name.includes('icc2')) return 'hardening';
+  if (name.includes('drc') || name.includes('lvs') || name.includes('erc') || name.includes('signoff')) return 'signoff';
+  if (name.endsWith('.gds') || name.endsWith('.def') || name.endsWith('.lef') || name.endsWith('.spef')) return 'physical';
   if (name.endsWith('.sdc') || name.includes('constraint')) return 'constraints';
   if (name.endsWith('.rpt') || name.endsWith('.pdf') || name.endsWith('.docx') || name.includes('report')) return 'report';
   if (name.endsWith('.log')) return 'log';
@@ -261,8 +294,10 @@ function artifactSections(artifacts: Artifact[]) {
     { label: 'Verification', types: ['verification', 'formal', 'waveform'] },
     { label: 'Constraints', types: ['constraints'] },
     { label: 'Synthesis', types: ['synthesis'] },
-    { label: 'Physical (PnR)', types: ['physical', 'layout'] },
+    { label: 'Hardening', types: ['hardening'] },
+    { label: 'Physical Layout', types: ['physical', 'layout'] },
     { label: 'Timing (STA)', types: ['timing'] },
+    { label: 'Signoff', types: ['signoff'] },
     { label: 'Simulation', types: ['simulation'] },
     { label: 'Reports', types: ['report', 'log', 'config', 'script', 'other'] },
   ];
@@ -367,6 +402,7 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
   }
   const [prompt, setPrompt] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>(initialChatRef.current.messages);
+  const [collapsedMessages, setCollapsedMessages] = useState<Record<string, boolean>>({});
   const [conversations, setConversations] = useState<ChatConversation[]>(initialChatRef.current.conversations);
   const [activeConversationId, setActiveConversationId] = useState(initialChatRef.current.activeConversationId);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -374,6 +410,10 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
   const [artifactPreview, setArtifactPreview] = useState('');
   const [newArtifactNames, setNewArtifactNames] = useState<Set<string>>(new Set());
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
+  const [historyCollapsed, setHistoryCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem(HISTORY_COLLAPSED_STORAGE_KEY) === 'true';
+  });
   const [pdkOptions, setPdkOptions] = useState<PdkOption[]>([]);
   const [pdkProfile, setPdkProfile] = useState('');
   const [profile, setProfile] = useState<{ has_byok_key?: boolean } | null>(null);
@@ -381,6 +421,7 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
   const [designName, setDesignName] = useState('');
   const [thinking, setThinking] = useState('');
   const [isChatting, setIsChatting] = useState(false);
+  const [activeRunId, setActiveRunId] = useState('');
   const [localToolStatus, setLocalToolStatus] = useState<ToolStatus | null>(toolStatus || null);
   const [installPlan, setInstallPlan] = useState<InstallPlan | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -425,11 +466,12 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
     if (!force && now - artifactFetchAt.current < 1200) return;
     artifactFetchAt.current = now;
     try {
-      const endpoint = targetDesign ? `/build/artifacts/${targetDesign}` : '/build/artifacts';
+      const normalizedTarget = normalizeActiveDesignName(targetDesign);
+      const endpoint = normalizedTarget ? `/build/artifacts/${normalizedTarget}` : '/build/artifacts';
       const res = await api.get(endpoint);
       const incoming: Artifact[] = uniqueArtifacts(Array.isArray(res.data) ? res.data : Array.isArray(res.data?.artifacts) ? res.data.artifacts : []);
       setArtifacts((previous) => {
-        const merged = uniqueArtifacts([...previous, ...incoming]);
+        const merged = force ? incoming : uniqueArtifacts([...previous, ...incoming]);
         const newNames = new Set<string>();
         for (const artifact of merged) {
           if (!previous.find((p) => p.name === artifact.name)) {
@@ -477,6 +519,11 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
     let assistantContent = '';
     let done = false;
     let failed = false;
+    let cancelled = false;
+    const runId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID().replace(/-/g, '')
+      : `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setActiveRunId(runId);
 
     try {
       const ctrl = new AbortController();
@@ -493,6 +540,7 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
           base_url: byokConfig.baseUrl,
           model: byokConfig.model,
           pdk_profile: pdkProfile,
+          run_id: runId,
         }),
         signal: ctrl.signal,
         onmessage(event) {
@@ -501,6 +549,7 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
             const data = JSON.parse(event.data);
             const eventType = data.type || '';
             const content = cleanUserFacingAgentText(data.label || data.content || data.message || '');
+            if (data.run_id) setActiveRunId(String(data.run_id));
 
             if (eventType === 'progress') {
               setThinking(content || 'Agent is working...');
@@ -556,6 +605,7 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
               });
             } else if (eventType === 'stream_end') {
               done = true;
+              setActiveRunId('');
               addRunEvent({
                 run_id: data.run_id,
                 type: eventType,
@@ -578,6 +628,20 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
                 timestamp: data.timestamp,
               });
               setMessages((prev) => [...prev, { role: 'assistant', tone: 'error', content: assistantContent }]);
+            } else if (eventType === 'cancelled') {
+              cancelled = true;
+              done = true;
+              setThinking('');
+              setActiveRunId('');
+              addRunEvent({
+                run_id: data.run_id,
+                type: eventType,
+                label: content || 'Run stopped',
+                stage: data.stage,
+                status: data.status || 'cancelled',
+                design_name: data.design_name,
+                timestamp: data.timestamp,
+              });
             }
           } catch {
             // ignore parse errors
@@ -601,12 +665,15 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
       setThinking('');
       setIsChatting(false);
       abortRef.current = null;
-      api.post('/usage/build', {
-        status: failed ? 'failed' : 'done',
-        capability_tier: toolTier,
-        successful_builds: failed ? 0 : 1,
-        total_builds: 1,
-      }).catch(() => {});
+      setActiveRunId('');
+      if (!cancelled) {
+        api.post('/usage/build', {
+          status: failed ? 'failed' : 'done',
+          capability_tier: toolTier,
+          successful_builds: failed ? 0 : 1,
+          total_builds: 1,
+        }).catch(() => {});
+      }
       void refreshRunEvents();
       void refreshActiveDesign();
       void fetchArtifacts(designName, true);
@@ -615,13 +682,43 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
 
   const handlePrimaryAction = async () => {
     const text = prompt.trim();
-    if (isBusy) return;
+    if (isBusy) {
+      if (text) {
+        await handleSteerAction(text);
+      }
+      return;
+    }
     if (!text) return;
 
     setPrompt('');
     const nextMessages: ChatMessage[] = [...messages, { role: 'user', content: text }];
     await sendChatMessage(text, nextMessages);
   };
+
+  const stopCurrentRun = useCallback(async (notice = 'Run stopped. You can steer the next step.') => {
+    const runId = activeRunId;
+    if (runId) {
+      api.post(`/runs/${encodeURIComponent(runId)}/cancel`).catch(() => {});
+    }
+    abortRef.current?.abort();
+    setIsChatting(false);
+    setThinking('');
+    setActiveRunId('');
+    if (notice) {
+      setMessages((prev) => [...prev, { role: 'assistant', content: notice }]);
+    }
+  }, [activeRunId]);
+
+  const handleSteerAction = useCallback(async (text: string) => {
+    const guidance = text.trim();
+    if (!guidance) return;
+    setPrompt('');
+    await stopCurrentRun('');
+    const nextMessages: ChatMessage[] = [...messages, { role: 'user', content: guidance }];
+    setTimeout(() => {
+      void sendChatMessage(guidance, nextMessages);
+    }, 250);
+  }, [messages, stopCurrentRun]);
 
   const handleEditorDidMount = (editor: any, monaco: any) => {
     editorRef.current = editor;
@@ -651,8 +748,8 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
   const refreshActiveDesign = useCallback(async () => {
     try {
       const res = await api.get('/workspace/active');
-      const activeName = res.data?.active?.name;
-      if (activeName) {
+      const activeName = normalizeActiveDesignName(res.data?.active?.name);
+      if (activeName || res.data?.active?.name) {
         setDesignName(activeName);
         onActiveDesignChange?.(activeName);
         void fetchArtifacts(activeName, true);
@@ -668,9 +765,10 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
       label: cleanUserFacingAgentText(event.label || ''),
     };
     if (safeEvent.design_name) {
-      setDesignName(safeEvent.design_name);
-      onActiveDesignChange?.(safeEvent.design_name);
-      void fetchArtifacts(safeEvent.design_name, true);
+      const nextDesignName = normalizeActiveDesignName(safeEvent.design_name);
+      setDesignName(nextDesignName);
+      onActiveDesignChange?.(nextDesignName);
+      void fetchArtifacts(nextDesignName, true);
     }
     setRunEvents((previous) => [...previous.slice(-79), safeEvent].filter((item) => item.label || item.type === 'stream_end'));
   }, [fetchArtifacts, onActiveDesignChange]);
@@ -748,8 +846,9 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
   };
 
   useEffect(() => {
-    setDesignName(selectedDesign || '');
-    if (selectedDesign) void fetchArtifacts(selectedDesign, true);
+    const initialDesign = normalizeActiveDesignName(selectedDesign);
+    setDesignName(initialDesign);
+    void fetchArtifacts(initialDesign, true);
     api.get('/pdks').then((res) => {
       const data = res.data || {};
       const options: PdkOption[] = [];
@@ -773,11 +872,12 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (selectedDesign && selectedDesign !== designName) {
-      setDesignName(selectedDesign);
+    const normalizedSelectedDesign = normalizeActiveDesignName(selectedDesign);
+    if (normalizedSelectedDesign !== designName) {
+      setDesignName(normalizedSelectedDesign);
       setArtifacts([]);
       setSelectedArtifact(null);
-      void fetchArtifacts(selectedDesign, true);
+      void fetchArtifacts(normalizedSelectedDesign, true);
     }
   }, [selectedDesign]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -809,8 +909,11 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
   }, [activeConversationId, designName, messages]);
 
   useEffect(() => {
-    if (selectedArtifact && designName) {
-      api.get(`/build/artifacts/${designName}/${selectedArtifact.name}`)
+    if (selectedArtifact) {
+      const endpoint = designName
+        ? `/build/artifacts/${encodeURIComponent(designName)}/${artifactPath(selectedArtifact.name)}`
+        : `/build/artifacts/file/${artifactPath(selectedArtifact.name)}`;
+      api.get(endpoint)
         .then((res) => setArtifactPreview(typeof res.data === 'string' ? res.data : JSON.stringify(res.data, null, 2)))
         .catch(() => setArtifactPreview('Error loading artifact'));
     } else {
@@ -845,53 +948,102 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
         </div>
 
         <div className="codex-vlsi-history-strip">
-          <div className="codex-vlsi-history-title">
+          <button
+            type="button"
+            className="codex-vlsi-history-title"
+            onClick={() => {
+              setHistoryCollapsed((value) => {
+                const next = !value;
+                localStorage.setItem(HISTORY_COLLAPSED_STORAGE_KEY, String(next));
+                return next;
+              });
+            }}
+            aria-expanded={!historyCollapsed}
+            title={historyCollapsed ? 'Show recent conversations' : 'Hide recent conversations'}
+          >
+            {historyCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
             <History size={13} />
             <span>Recent</span>
-          </div>
-          <div className="codex-vlsi-history-list">
-            {recentConversations.map((conversation) => (
-              <div
-                key={conversation.id}
-                className={`codex-vlsi-history-item${conversation.id === activeConversationId ? ' active' : ''}`}
-              >
-                <button
-                  type="button"
-                  className="codex-vlsi-history-open"
-                  onClick={() => selectConversation(conversation.id)}
-                  title={conversation.title}
+            <em>{recentConversations.length}</em>
+          </button>
+          {!historyCollapsed && (
+            <div className="codex-vlsi-history-list">
+              {recentConversations.map((conversation) => (
+                <div
+                  key={conversation.id}
+                  className={`codex-vlsi-history-item${conversation.id === activeConversationId ? ' active' : ''}`}
                 >
-                  <span>{conversation.title}</span>
-                  <em>{formatConversationAge(conversation.updatedAt)}</em>
-                </button>
-                <button
-                  type="button"
-                  className="codex-vlsi-history-delete"
-                  onClick={(event) => {
-                    deleteConversation(conversation.id);
-                  }}
-                  aria-label="Delete conversation"
-                  title="Delete conversation"
-                >
-                  <Trash2 size={12} />
-                </button>
-              </div>
-            ))}
-          </div>
+                  <button
+                    type="button"
+                    className="codex-vlsi-history-open"
+                    onClick={() => selectConversation(conversation.id)}
+                    title={conversation.title}
+                  >
+                    <span>{conversation.title}</span>
+                    <em>{formatConversationAge(conversation.updatedAt)}</em>
+                  </button>
+                  <button
+                    type="button"
+                    className="codex-vlsi-history-delete"
+                    onClick={() => {
+                      deleteConversation(conversation.id);
+                    }}
+                    aria-label="Delete conversation"
+                    title="Delete conversation"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="codex-vlsi-thread">
-          {messages.map((message, index) => (
-            <motion.article
-              key={`${message.role}-${index}`}
-              className={`codex-vlsi-message ${message.role} ${message.tone || ''}`}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.16 }}
-            >
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-            </motion.article>
-          ))}
+          {messages.map((message, index) => {
+            const displayContent = cleanUserFacingAgentText(message.content);
+            const messageKey = `${message.role}-${index}-${displayContent.slice(0, 32)}`;
+            const isLatestAssistant = message.role === 'assistant' && index === messages.length - 1 && Boolean(thinking);
+            const canCollapse =
+              message.role === 'assistant' &&
+              !isLatestAssistant &&
+              (displayContent.length > COLLAPSIBLE_MESSAGE_CHARS ||
+                displayContent.split('\n').length > COLLAPSIBLE_MESSAGE_LINES);
+            const isCollapsed = canCollapse && collapsedMessages[messageKey] !== false;
+            const preview = displayContent.replace(/\s+/g, ' ').trim().slice(0, 190);
+
+            return (
+              <motion.article
+                key={messageKey}
+                className={`codex-vlsi-message ${message.role} ${message.tone || ''} ${isCollapsed ? 'is-collapsed' : ''}`}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.16 }}
+              >
+                {canCollapse && (
+                  <button
+                    type="button"
+                    className="codex-vlsi-message-toggle"
+                    onClick={() =>
+                      setCollapsedMessages((prev) => ({
+                        ...prev,
+                        [messageKey]: isCollapsed,
+                      }))
+                    }
+                    aria-expanded={!isCollapsed}
+                  >
+                    {isCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                    <span>{isCollapsed ? 'Show details' : 'Hide details'}</span>
+                  </button>
+                )}
+                {isCollapsed ? (
+                  <p className="codex-vlsi-message-preview">{preview}...</p>
+                ) : (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
+                )}
+              </motion.article>
+            );
+          })}
 
           {thinking && (
             <div className="codex-vlsi-thinking">
@@ -936,12 +1088,23 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
               type="button"
               className="codex-vlsi-send"
               onClick={() => void handlePrimaryAction()}
-              disabled={isBusy || !prompt.trim()}
+              disabled={!prompt.trim()}
               aria-label="Send prompt"
-              title="Send prompt"
+              title={isBusy ? 'Stop current run and send guidance' : 'Send prompt'}
             >
               <ArrowUp size={17} />
             </button>
+            {isBusy && (
+              <button
+                type="button"
+                className="codex-vlsi-stop"
+                onClick={() => void stopCurrentRun()}
+                aria-label="Stop run"
+                title="Stop run"
+              >
+                <Square size={13} />
+              </button>
+            )}
           </div>
           <div className="codex-vlsi-composer-meta">
             {hasByok && <span className="is-auto">Autonomous agent</span>}

@@ -1208,11 +1208,29 @@
   display: flex;
   align-items: center;
   gap: 0.42rem;
+  width: 100%;
+  border: 0;
+  background: transparent;
   color: var(--studio-dim);
   font-size: 0.68rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.codex-vlsi-history-title:hover {
+  color: var(--studio-text);
+}
+
+.codex-vlsi-history-title em {
+  margin-left: auto;
+  color: var(--studio-dim);
+  font-size: 0.66rem;
+  font-style: normal;
+  letter-spacing: 0;
 }
 
 .codex-vlsi-history-list {
@@ -1318,6 +1336,37 @@
 .codex-vlsi-message.error {
   background: transparent;
   border-color: transparent;
+}
+
+.codex-vlsi-message.is-collapsed {
+  border: 1px solid var(--studio-line);
+  background: color-mix(in srgb, var(--studio-panel-2) 55%, transparent);
+  padding: 0.68rem 0.72rem;
+}
+
+.codex-vlsi-message-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 1.55rem;
+  margin: 0 0 0.38rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--studio-muted);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.codex-vlsi-message-toggle:hover {
+  color: var(--studio-text);
+}
+
+.codex-vlsi-message-preview {
+  margin: 0;
+  color: var(--studio-muted);
 }
 
 .codex-vlsi-message p,
@@ -1468,6 +1517,27 @@
 .codex-vlsi-send:disabled {
   background: #2b2925;
   color: var(--studio-dim);
+}
+
+.codex-vlsi-input-shell:has(.codex-vlsi-stop) {
+  grid-template-columns: minmax(0, 1fr) 38px 38px;
+}
+
+.codex-vlsi-stop {
+  width: 38px;
+  height: 38px;
+  border-radius: 7px;
+  border: 1px solid rgba(226, 125, 115, 0.34);
+  background: rgba(226, 125, 115, 0.12);
+  color: #f1b0aa;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.codex-vlsi-stop:hover {
+  background: rgba(226, 125, 115, 0.2);
+  color: #ffd2cd;
 }
 
 .codex-vlsi-composer-meta {

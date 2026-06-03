@@ -72,9 +72,43 @@ ALLOWED_READ_EXTENSIONS = {
 }
 
 
+TEXT_WRITE_EXTENSIONS = {
+    ".v", ".sv", ".vh", ".svh", ".vhd", ".vhdl", ".tcl", ".sdc", ".sby",
+    ".ys", ".cfg", ".json", ".md", ".txt", ".log", ".rpt", ".lib", ".lef",
+    ".def", ".py", ".c", ".cpp", ".h", ".sh", ".mk", ".makefile", ".yml",
+    ".yaml", ".toml", ".ini", ".csv", ".sp", ".spi", ".lvs",
+}
+
+
+def _safe_workspace_path(path: str, workspace_root: str) -> str | None:
+    root = os.path.abspath(os.path.normpath(workspace_root))
+    full = os.path.abspath(os.path.normpath(os.path.join(root, path)))
+    try:
+        if os.path.commonpath([root, full]) != root:
+            return None
+    except ValueError:
+        return None
+    return full
+
+
+def _is_text_source_path(path: str) -> bool:
+    lower = path.lower()
+    suffix = os.path.splitext(lower)[1]
+    return suffix in TEXT_WRITE_EXTENSIONS or lower.endswith(("makefile", "dockerfile"))
+
+
+def _normalize_text_content(path: str, content: str) -> str:
+    if not _is_text_source_path(path):
+        return content
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.rstrip() for line in normalized.split("\n")]
+    normalized = "\n".join(lines).rstrip("\n") + "\n"
+    return normalized
+
+
 def read_file(path: str, workspace_root: str) -> str:
-    full = os.path.normpath(os.path.join(workspace_root, path))
-    if not full.startswith(os.path.normpath(workspace_root)):
+    full = _safe_workspace_path(path, workspace_root)
+    if not full:
         return f"Error: path '{path}' is outside workspace"
     if not os.path.isfile(full):
         return f"Error: file not found: {path}"
@@ -87,11 +121,12 @@ def read_file(path: str, workspace_root: str) -> str:
 
 
 def write_file(path: str, content: str, workspace_root: str) -> str:
-    full = os.path.normpath(os.path.join(workspace_root, path))
-    if not full.startswith(os.path.normpath(workspace_root)):
+    full = _safe_workspace_path(path, workspace_root)
+    if not full:
         return f"Error: path '{path}' is outside workspace"
     os.makedirs(os.path.dirname(full), exist_ok=True)
     try:
+        content = _normalize_text_content(path, content)
         with open(full, "w") as f:
             f.write(content)
         return f"File written: {path} ({len(content)} bytes)"
@@ -100,8 +135,8 @@ def write_file(path: str, content: str, workspace_root: str) -> str:
 
 
 def edit_file(path: str, old_string: str, new_string: str, workspace_root: str) -> str:
-    full = os.path.normpath(os.path.join(workspace_root, path))
-    if not full.startswith(os.path.normpath(workspace_root)):
+    full = _safe_workspace_path(path, workspace_root)
+    if not full:
         return f"Error: path '{path}' is outside workspace"
     if not os.path.isfile(full):
         return f"Error: file not found: {path}"
@@ -113,7 +148,7 @@ def edit_file(path: str, old_string: str, new_string: str, workspace_root: str) 
         count = content.count(old_string)
         if count > 1:
             return f"Error: found {count} matches. Provide more context."
-        new_content = content.replace(old_string, new_string, 1)
+        new_content = _normalize_text_content(path, content.replace(old_string, new_string, 1))
         with open(full, "w") as f:
             f.write(new_content)
         return f"File edited: {path}"
@@ -121,11 +156,11 @@ def edit_file(path: str, old_string: str, new_string: str, workspace_root: str) 
         return f"Error editing file: {e}"
 
 
-def bash_tool(command: str, workspace_root: str, timeout: int = 300, on_output=None) -> str:
+def bash_tool(command: str, workspace_root: str, timeout: int = 300, on_output=None, cancel_checker=None) -> str:
     if on_output:
-        result = run_bash_stream(command, workspace_root, timeout=timeout, on_line=on_output)
+        result = run_bash_stream(command, workspace_root, timeout=timeout, on_line=on_output, cancel_checker=cancel_checker)
     else:
-        result = run_bash(command, workspace_root, timeout=timeout)
+        result = run_bash(command, workspace_root, timeout=timeout, cancel_checker=cancel_checker)
     output = ""
     if result["stdout"]:
         output += result["stdout"]
@@ -139,8 +174,8 @@ def bash_tool(command: str, workspace_root: str, timeout: int = 300, on_output=N
 
 
 def grep_tool(pattern: str, path: str, workspace_root: str) -> str:
-    full = os.path.normpath(os.path.join(workspace_root, path))
-    if not full.startswith(os.path.normpath(workspace_root)):
+    full = _safe_workspace_path(path, workspace_root)
+    if not full:
         return f"Error: path '{path}' is outside workspace"
     if not os.path.exists(full):
         return f"Error: path not found: {path}"
@@ -165,9 +200,19 @@ def grep_tool(pattern: str, path: str, workspace_root: str) -> str:
 
 
 def glob_tool(pattern: str, workspace_root: str) -> str:
+    if any(part == ".." for part in pattern.replace("\\", "/").split("/")):
+        return f"Error: pattern '{pattern}' is outside workspace"
     full = os.path.join(workspace_root, pattern)
+    root = os.path.abspath(os.path.normpath(workspace_root))
     try:
-        results = glob_mod.glob(full, recursive=True)
+        results = []
+        for result in glob_mod.glob(full, recursive=True):
+            normalized = os.path.abspath(os.path.normpath(result))
+            try:
+                if os.path.commonpath([root, normalized]) == root:
+                    results.append(normalized)
+            except ValueError:
+                continue
         if not results:
             return f"No files matching: {pattern}"
         rels = [os.path.relpath(p, workspace_root) for p in sorted(results)]
@@ -177,7 +222,8 @@ def glob_tool(pattern: str, workspace_root: str) -> str:
 
 
 def web_search(query: str, max_results: int = 5) -> str:
-    if not _env_true("AGENTIC_ENABLE_WEB_SEARCH"):
+    web_setting = os.environ.get("AGENTIC_ENABLE_WEB_SEARCH", "true").strip().lower()
+    if web_setting in {"0", "false", "no", "off"}:
         return (
             "Web search is disabled for IP safety. Use local files first. "
             "If public web research is needed, ask the user to enable AGENTIC_ENABLE_WEB_SEARCH=true."
@@ -200,7 +246,7 @@ def web_search(query: str, max_results: int = 5) -> str:
         return f"Web search error: {e}"
 
 
-def dispatch_tool(name: str, args: dict, workspace_root: str, on_output=None) -> str:
+def dispatch_tool(name: str, args: dict, workspace_root: str, on_output=None, cancel_checker=None) -> str:
     if name == "read":
         return read_file(args["path"], workspace_root)
     elif name == "write":
@@ -209,7 +255,7 @@ def dispatch_tool(name: str, args: dict, workspace_root: str, on_output=None) ->
         return edit_file(args["path"], args["old_string"], args["new_string"], workspace_root)
     elif name == "bash":
         timeout = args.get("timeout", 300)
-        return bash_tool(args["command"], workspace_root, timeout=timeout, on_output=on_output)
+        return bash_tool(args["command"], workspace_root, timeout=timeout, on_output=on_output, cancel_checker=cancel_checker)
     elif name == "grep":
         path = args.get("path", ".")
         return grep_tool(args["pattern"], path, workspace_root)

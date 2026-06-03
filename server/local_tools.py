@@ -2,6 +2,14 @@ import os
 import platform
 import shutil
 import subprocess
+
+if hasattr(subprocess, "CREATE_NO_WINDOW"):
+    _NO_WINDOW = subprocess.CREATE_NO_WINDOW
+elif getattr(os, "name", "") == "nt":
+    _NO_WINDOW = 0x08000000
+else:
+    _NO_WINDOW = 0
+
 import threading
 from pathlib import Path
 
@@ -76,7 +84,8 @@ def _wsl_status() -> dict:
     if not shutil.which("wsl"):
         return {"available": False, "required": False, "distros": []}
     try:
-        result = subprocess.run(["wsl", "-l", "-q"], capture_output=True, text=True, timeout=8)
+        result = subprocess.run(["wsl", "-l", "-q"], capture_output=True, text=True,
+            creationflags=_NO_WINDOW, timeout=8)
         distros = [
             line.strip("\x00\r\n ")
             for line in result.stdout.splitlines()
@@ -87,7 +96,7 @@ def _wsl_status() -> dict:
         return {"available": True, "required": False, "distros": []}
 
 
-def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_line=None) -> dict:
+def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_line=None, cancel_checker=None) -> dict:
     """Run a command, streaming each output line via on_line callback. Returns same dict as run_bash."""
     try:
         process = subprocess.Popen(
@@ -96,6 +105,7 @@ def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_li
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            creationflags=_NO_WINDOW,
             cwd=workspace_root,
         )
 
@@ -112,7 +122,20 @@ def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_li
 
         thread = threading.Thread(target=reader, daemon=True)
         thread.start()
-        thread.join(timeout=timeout)
+        elapsed = 0.0
+        while thread.is_alive() and elapsed < timeout:
+            if cancel_checker and cancel_checker():
+                process.kill()
+                thread.join(timeout=5)
+                full_output = "\n".join(output_lines)
+                return {
+                    "success": False,
+                    "stdout": full_output,
+                    "stderr": "Command cancelled",
+                    "code": -1,
+                }
+            thread.join(timeout=0.2)
+            elapsed += 0.2
 
         if thread.is_alive():
             process.kill()
@@ -130,13 +153,16 @@ def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_li
         return {"success": False, "stdout": "", "stderr": str(e), "code": -1}
 
 
-def run_bash(command: str, workspace_root: str, timeout: int = 300) -> dict:
+def run_bash(command: str, workspace_root: str, timeout: int = 300, cancel_checker=None) -> dict:
+    if cancel_checker:
+        return run_bash_stream(command, workspace_root, timeout=timeout, cancel_checker=cancel_checker)
     try:
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             text=True,
+            creationflags=_NO_WINDOW,
             timeout=timeout,
             cwd=workspace_root,
         )
@@ -175,7 +201,8 @@ def _version_for(tool: str) -> str | None:
     if not version_args:
         return None
     try:
-        result = subprocess.run(version_args, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(version_args, capture_output=True, text=True,
+            creationflags=_NO_WINDOW, timeout=5)
         text = (result.stdout or result.stderr).strip().splitlines()
         return text[0] if text else None
     except Exception:
@@ -190,6 +217,7 @@ def _docker_images() -> list[str]:
             ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
             capture_output=True,
             text=True,
+            creationflags=_NO_WINDOW,
             timeout=10,
         )
         if result.returncode != 0:

@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../supabaseClient';
+import { API_BASE } from '../api';
 import { motion, AnimatePresence } from 'framer-motion';
 import { gsap } from 'gsap';
 import { Sparkles, ArrowRight, ShieldCheck, Terminal, Cpu, Layers } from 'lucide-react';
+
+type AgenticElectronWindow = Window & {
+  electronAPI?: {
+    openExternal?: (url: string) => Promise<{ success: boolean }>;
+  };
+};
 
 export const LandingPage = ({ onAuthSuccess }: { onAuthSuccess: () => void }) => {
   const [email, setEmail] = useState('');
@@ -117,20 +124,14 @@ export const LandingPage = ({ onAuthSuccess }: { onAuthSuccess: () => void }) =>
       localStorage.setItem('agentic_landing_prompt', promptInput.trim());
       localStorage.setItem('agentic_landing_pdk', pdkChoice);
     }
-    const { error: err } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: window.location.origin,
-        queryParams: {
-          prompt: 'select_account'
-        }
-      },
-    });
-    if (err) {
-      setError(err.message);
-    } else {
-      onAuthSuccess();
+    const url = `${API_BASE}/auth/google/start`;
+    const desktopOpen = (window as AgenticElectronWindow).electronAPI?.openExternal;
+    const result = desktopOpen ? await desktopOpen(url) : null;
+    if (!result?.success) {
+      const opened = window.open(url, '_blank', 'noopener,noreferrer');
+      if (!opened) window.location.href = url;
     }
+    setSuccessMsg('Google sign-in opened in your browser. Choose Open AgentIC Desktop after sign-in.');
   };
 
   const handleStartSynthesis = () => {

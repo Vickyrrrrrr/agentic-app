@@ -148,13 +148,28 @@ RECOMMENDED DIRECTORIES FOR NEW PROJECTS:
   <project>/rtl/        — synthesizable HDL ONLY (.v, .sv)
   <project>/tb/         — testbenches ONLY (.sv or sim_main.cpp)
   <project>/dv/         — DV scripts, coverage, formal
-  <project>/synth/      — synthesis scripts, constraints (.tcl, .ys, .sdc)
-  <project>/pnr/        — PnR outputs (.def, .gds, .lef)
+  <project>/constraints/ — timing/IO constraints (.sdc, pin config)
+  <project>/synth/      — synthesis scripts and netlists (.tcl, .ys, .sdc)
+  <project>/hardening/  — OpenLane/OpenROAD/proprietary hardening run configs and logs
+  <project>/pnr/        — placement/routing outputs (.def, .gds, .lef, .spef)
   <project>/sta/        — STA scripts, timing reports
+  <project>/signoff/    — DRC/LVS/ERC/signoff scripts and reports
   <project>/sim/        — simulation logs, waveforms (.vcd)
+  <project>/scripts/    — reusable flow scripts
+  <project>/logs/       — raw local tool logs when needed
   <project>/reports/    — build summaries (*.md)
+For a new chip, choose a clear <project> root from the user's request and keep generated files
+under it. Do not create root-level rtl/, tb/, sim/, synth/, pnr/, hardening/, signoff/, or reports/
+folders unless the user is continuing an existing root-level workspace layout.
 These are conventions, not constraints. If the user's proprietary/customer flow has a different
-layout, follow that layout.
+layout, discover it with glob/read/grep and follow that layout.
+
+FILE QUALITY RULES:
+- Write readable, deterministic source files with consistent indentation and a final newline.
+- Keep RTL, testbench, simulation, synthesis, hardening, signoff, reports, and logs separated.
+- Use concise file headers that explain purpose, clock/reset assumptions, and generated status.
+- Do not write one-line HDL/Tcl blobs; structure modules, tasks, always blocks, and scripts clearly.
+- For hardening, preserve each tool's native folder expectations if using OpenLane/OpenROAD/Innovus/ICC2/etc.
 
 RTL RULES (applies to ALL chips — counter, CPU, accelerator, anything):
 - Generate synthesizable RTL suitable for the user's chosen language/tool flow.
@@ -227,6 +242,34 @@ def _is_simple_greeting(text: str) -> bool:
     )
 
 
+def _looks_like_chip_task(text: str) -> bool:
+    lowered = (text or "").lower()
+    if len(lowered.split()) >= 18:
+        return True
+    return any(token in lowered for token in (
+        "rtl", "verilog", "systemverilog", "vhdl", "testbench", "simulate",
+        "synthesis", "synthesize", "yosys", "openroad", "openlane", "gds",
+        "pdks", "pdk", "sky130", "gf180", "asap7", "risc-v", "riscv",
+        "cpu", "soc", "microcontroller", "uart", "gpio", "timer", "pwm",
+        "adc", "spi", "i2c", "axi", "wishbone", "hardening", "drc", "lvs",
+    ))
+
+
+def _tool_enforcement_message(user_text: str) -> dict:
+    return {
+        "role": "user",
+        "content": (
+            "The previous response did not use tools. This is an AgentIC build task, "
+            "so continue by using tools now. First inspect the workspace and available "
+            "flow context with glob/grep/bash/read as appropriate, then write a concise "
+            "project plan under a project reports directory derived from the user's chip "
+            "request. Continue into RTL/testbench/scripts if the request is specific. "
+            "Use web_search only for public, non-confidential terms. Do not answer only "
+            f"in prose.\n\nOriginal chip request:\n{user_text[:4000]}"
+        ),
+    }
+
+
 def _user_facing_llm_error(error: Exception) -> str:
     text = str(error).lower()
     if any(token in text for token in ("content_filter", "responsibleaipolicyviolation", "content management policy")):
@@ -275,6 +318,13 @@ def _progress_event(label: str, stage: str = "WORKING", status: str = "running")
 
 def _safe_project_name(path: str) -> str | None:
     parts = [part for part in (path or "").replace("\\", "/").split("/") if part and part not in {".", ".."}]
+    root_sections = {
+        "rtl", "tb", "dv", "sim", "synth", "pnr", "sta", "reports",
+        "constraints", "formal", "layout", "logs", "scripts", "hardening",
+        "signoff", "openlane", "openroad", "runs",
+    }
+    if parts and parts[0].lower() in root_sections:
+        return None
     if len(parts) >= 2 and not parts[0].startswith("."):
         return parts[0]
     return None
@@ -315,7 +365,7 @@ def _progress_for_tool_call(name: str, args: dict) -> dict:
             return _progress_event("Running verification", "VERIFY")
         if any(token in command for token in ("synth", "yosys", "genus", "dc_shell", "design compiler", "rtl compiler")):
             return _progress_event("Running synthesis", "SYNTHESIS")
-        if any(token in command for token in ("pnr", "place", "route", "innovus", "icc2", "openroad", "opensta", "sta", "primetime")):
+        if any(token in command for token in ("harden", "openlane", "pnr", "place", "route", "innovus", "icc2", "openroad", "opensta", "sta", "primetime")):
             return _progress_event("Running implementation flow", "IMPLEMENTATION")
         if "tcl" in command:
             return _progress_event("Running a local Tcl flow", "RUN")
@@ -355,7 +405,7 @@ def _progress_for_bash_output(line: str) -> dict:
 
 def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                     base_url: str | None = None, model: str = "gpt-4o",
-                    event_pusher=None):
+                    event_pusher=None, is_cancelled=None):
     """Yields event dicts for SSE streaming. One call = one agent interaction.
     event_pusher: optional callable(event_dict) to push events mid-dispatch (for bash streaming)."""
 
@@ -395,14 +445,33 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
 
     max_rounds = 20
     debug_events = _env_true("AGENTIC_DEBUG_EVENTS")
+    forced_tool_name: str | None = None
+    forced_tool_retries = 0
+    has_write_call = False
+    user_text = _plain_user_text(messages)
+    should_enforce_tools = _looks_like_chip_task(user_text)
+
     for _round in range(max_rounds):
+        if is_cancelled and is_cancelled():
+            yield {
+                "type": "cancelled",
+                "content": "Run stopped.",
+                "label": "Run stopped",
+                "stage": "cancelled",
+                "status": "cancelled",
+            }
+            return
         logger.info("LLM round %d/%d — sending %d messages", _round + 1, max_rounds, len(full_messages))
         try:
             response = client.chat.completions.create(
                 model=model,
                 messages=full_messages,
                 tools=TOOL_DEFS,
-                tool_choice="auto",
+                tool_choice=(
+                    {"type": "function", "function": {"name": forced_tool_name}}
+                    if forced_tool_name
+                    else "auto"
+                ),
             )
             logger.info("LLM round %d/%d — got response", _round + 1, max_rounds)
         except Exception as e:
@@ -420,6 +489,7 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
         msg = choice.message
 
         if msg.tool_calls:
+            forced_tool_name = None
             logger.info("LLM requested %d tool call(s)", len(msg.tool_calls))
 
             if msg.content:
@@ -440,6 +510,8 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                     args = {}
 
                 logger.info("Tool call: %s args=%s", fn.name, json.dumps(args)[:200])
+                if fn.name == "write":
+                    has_write_call = True
                 yield _progress_for_tool_call(fn.name, args)
                 if debug_events:
                     yield {"type": "tool-call", "content": f"{fn.name}({json.dumps(args)[:300]})", "state": fn.name.upper()}
@@ -460,7 +532,23 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                             last_stream_progress["time"] = now
                             event_pusher(event)
 
-                result = dispatch_tool(fn.name, args, workspace_root, on_output=on_bash_output if fn.name == "bash" else None)
+                if is_cancelled and is_cancelled():
+                    yield {
+                        "type": "cancelled",
+                        "content": "Run stopped.",
+                        "label": "Run stopped",
+                        "stage": "cancelled",
+                        "status": "cancelled",
+                    }
+                    return
+
+                result = dispatch_tool(
+                    fn.name,
+                    args,
+                    workspace_root,
+                    on_output=on_bash_output if fn.name == "bash" else None,
+                    cancel_checker=is_cancelled,
+                )
                 elapsed = time.time() - t0
 
                 logger.info("Tool %s completed in %.1fs (result length: %d)", fn.name, elapsed, len(result))
@@ -469,6 +557,15 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                     yield {"type": "tool-result", "content": result[:1500], "state": fn.name.upper()}
                 full_messages.append({"role": "tool", "tool_call_id": tc.id, "content": result[:5000]})
         else:
+            if should_enforce_tools and not has_write_call and forced_tool_retries < 2:
+                logger.info("LLM returned no tool calls for chip task; enforcing a tool-backed retry")
+                yield _progress_event("Starting a tool-backed design run", "DISCOVER")
+                if msg.content:
+                    full_messages.append({"role": "assistant", "content": _sanitize_assistant_text(msg.content)})
+                full_messages.append(_tool_enforcement_message(user_text))
+                forced_tool_name = "write"
+                forced_tool_retries += 1
+                continue
             # No tool calls — this is a final text response
             if msg.content:
                 if "NEEDS_INPUT:" in msg.content:

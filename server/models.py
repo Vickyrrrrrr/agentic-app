@@ -9,6 +9,7 @@ class ChatRequest(BaseModel):
     pdk_profile: str = ""
     base_url: Optional[str] = None
     model: Optional[str] = None
+    run_id: Optional[str] = None
 
 
 class ToolInstallPlanRequest(BaseModel):
