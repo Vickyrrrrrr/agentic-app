@@ -14,12 +14,15 @@ import {
   CheckCircle2,
   Code2,
   FileText,
+  History,
   Settings2,
   Terminal,
   ChevronRight,
   ChevronDown,
   Folder,
   FolderOpen,
+  Plus,
+  Trash2,
 } from 'lucide-react';
 import { BillingModal } from '../components/BillingModal';
 import { api, API_BASE, getSseHeaders } from '../api';
@@ -29,6 +32,15 @@ interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   tone?: 'normal' | 'success' | 'error';
+}
+
+interface ChatConversation {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  designName?: string;
+  messages: ChatMessage[];
 }
 
 interface Artifact {
@@ -100,6 +112,97 @@ interface DesignStudioProps {
 const HELP_RE = /\b(help|what can you do|capabilit|possible|not possible|can you|how do i|suggest|prompt)\b/i;
 const ERROR_RE = /(%error|%warning|syntax error|parse error|error:|fatal|failed|traceback|critical|lint|violation|unmapped|pinmissing|pinnotfound)/i;
 const CASUAL_RE = /^(hi+|hello+|hey+|yo+|sup|thanks|thank you|ok|okay|test)$/i;
+const CHAT_HISTORY_STORAGE_KEY = 'agentic_chat_conversations_v1';
+const ACTIVE_CHAT_STORAGE_KEY = 'agentic_active_conversation_id';
+const MAX_LOCAL_CONVERSATIONS = 40;
+
+function safeNow(): number {
+  return Date.now();
+}
+
+function createConversation(): ChatConversation {
+  const id = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `conv-${safeNow()}-${Math.random().toString(16).slice(2)}`;
+  const now = safeNow();
+  return {
+    id,
+    title: 'New conversation',
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+  };
+}
+
+function conversationTitle(messages: ChatMessage[], fallback = 'New conversation'): string {
+  const firstUser = messages.find((message) => message.role === 'user')?.content?.trim();
+  if (!firstUser) return fallback;
+  const singleLine = firstUser.replace(/\s+/g, ' ');
+  return singleLine.length > 58 ? `${singleLine.slice(0, 55)}...` : singleLine;
+}
+
+function formatConversationAge(updatedAt: number): string {
+  const diff = Math.max(0, safeNow() - Number(updatedAt || safeNow()));
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return 'now';
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d`;
+  return new Date(updatedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function loadConversations(): ChatConversation[] {
+  if (typeof window === 'undefined') return [createConversation()];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CHAT_HISTORY_STORAGE_KEY) || '[]');
+    if (!Array.isArray(parsed)) return [createConversation()];
+    const conversations = parsed
+      .filter((item) => item?.id && Array.isArray(item.messages))
+      .map((item) => ({
+        id: String(item.id),
+        title: String(item.title || conversationTitle(item.messages)),
+        createdAt: Number(item.createdAt || safeNow()),
+        updatedAt: Number(item.updatedAt || item.createdAt || safeNow()),
+        designName: item.designName ? String(item.designName) : undefined,
+        messages: item.messages
+          .filter((message: ChatMessage) => message?.role === 'user' || message?.role === 'assistant')
+          .map((message: ChatMessage) => ({
+            role: message.role,
+            content: String(message.content || ''),
+            tone: message.tone,
+          })),
+      }))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, MAX_LOCAL_CONVERSATIONS);
+    return conversations.length ? conversations : [createConversation()];
+  } catch {
+    return [createConversation()];
+  }
+}
+
+function saveConversations(conversations: ChatConversation[]): void {
+  if (typeof window === 'undefined') return;
+  const safe = conversations
+    .filter((conversation) => conversation.messages.length > 0 || conversation.title === 'New conversation')
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, MAX_LOCAL_CONVERSATIONS);
+  localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(safe));
+}
+
+function initialChatState() {
+  const conversations = loadConversations();
+  const storedActiveId = typeof window !== 'undefined'
+    ? localStorage.getItem(ACTIVE_CHAT_STORAGE_KEY)
+    : null;
+  const active = conversations.find((conversation) => conversation.id === storedActiveId) || conversations[0];
+  return {
+    conversations,
+    activeConversationId: active.id,
+    messages: active.messages,
+  };
+}
 
 function isTextArtifact(name: string): boolean {
   return /\.(v|sv|svh|vh|sby|sdc|tcl|json|md|txt|log|rpt|csv|ys|cfg|lef|def|lib|spice|sp)$/i.test(name);
@@ -258,8 +361,14 @@ function pdkReadinessLabel(pdk?: PdkOption): string {
 }
 
 export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', onActiveDesignChange }: DesignStudioProps = {}) => {
+  const initialChatRef = useRef<ReturnType<typeof initialChatState> | null>(null);
+  if (!initialChatRef.current) {
+    initialChatRef.current = initialChatState();
+  }
   const [prompt, setPrompt] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>(initialChatRef.current.messages);
+  const [conversations, setConversations] = useState<ChatConversation[]>(initialChatRef.current.conversations);
+  const [activeConversationId, setActiveConversationId] = useState(initialChatRef.current.activeConversationId);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
   const [artifactPreview, setArtifactPreview] = useState('');
@@ -293,6 +402,11 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
   const missingTools = effectiveToolStatus?.missing || [];
   const toolTier = effectiveToolStatus?.capability_tier || 'checking';
   const licenseActive = licenseStatus?.active !== false;
+  const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
+  const recentConversations = conversations
+    .filter((conversation) => conversation.messages.length > 0 || conversation.id === activeConversationId)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 6);
 
   const visibleArtifacts = useMemo(() => {
     const priority = ['.v', '.sv', '.sby', '.sdc', '.gds', '.def', '.lef', '.rpt', '.json', '.tcl', '.lib', '.ys', '.cfg'];
@@ -453,7 +567,7 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
               });
             } else if (eventType === 'error') {
               failed = true;
-              assistantContent = 'The agent hit an issue while working locally. Please check your model key, license, and local EDA setup, then try again.';
+              assistantContent = content || 'The agent hit an issue while working locally. Please check your model key, license, and local EDA setup, then try again.';
               addRunEvent({
                 run_id: data.run_id,
                 type: eventType,
@@ -561,6 +675,48 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
     setRunEvents((previous) => [...previous.slice(-79), safeEvent].filter((item) => item.label || item.type === 'stream_end'));
   }, [fetchArtifacts, onActiveDesignChange]);
 
+  const startNewConversation = useCallback(() => {
+    const next = createConversation();
+    setConversations((previous) => {
+      const updated = [next, ...previous].slice(0, MAX_LOCAL_CONVERSATIONS);
+      saveConversations(updated);
+      return updated;
+    });
+    setActiveConversationId(next.id);
+    localStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, next.id);
+    setMessages([]);
+    setPrompt('');
+    setThinking('');
+  }, []);
+
+  const selectConversation = useCallback((conversationId: string) => {
+    const conversation = conversations.find((item) => item.id === conversationId);
+    if (!conversation) return;
+    setActiveConversationId(conversationId);
+    localStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, conversationId);
+    setMessages(conversation.messages);
+    if (conversation.designName) {
+      setDesignName(conversation.designName);
+      onActiveDesignChange?.(conversation.designName);
+      void fetchArtifacts(conversation.designName, true);
+    }
+  }, [conversations, fetchArtifacts, onActiveDesignChange]);
+
+  const deleteConversation = useCallback((conversationId: string) => {
+    setConversations((previous) => {
+      const remaining = previous.filter((conversation) => conversation.id !== conversationId);
+      const updated = remaining.length ? remaining : [createConversation()];
+      saveConversations(updated);
+      const nextActive = updated[0];
+      if (conversationId === activeConversationId) {
+        setActiveConversationId(nextActive.id);
+        localStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, nextActive.id);
+        setMessages(nextActive.messages);
+      }
+      return updated;
+    });
+  }, [activeConversationId]);
+
   const requestInstallPlan = async (capability = missingTools[0]?.capability || 'pnr') => {
     setInstallMessage('');
     try {
@@ -635,6 +791,24 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
   }, [toolStatus]);
 
   useEffect(() => {
+    setConversations((previous) => {
+      const now = safeNow();
+      const updated = previous.map((conversation) => {
+        if (conversation.id !== activeConversationId) return conversation;
+        return {
+          ...conversation,
+          title: conversationTitle(messages, conversation.title),
+          updatedAt: messages.length ? now : conversation.updatedAt,
+          designName: designName || conversation.designName,
+          messages,
+        };
+      });
+      saveConversations(updated);
+      return updated;
+    });
+  }, [activeConversationId, designName, messages]);
+
+  useEffect(() => {
     if (selectedArtifact && designName) {
       api.get(`/build/artifacts/${designName}/${selectedArtifact.name}`)
         .then((res) => setArtifactPreview(typeof res.data === 'string' ? res.data : JSON.stringify(res.data, null, 2)))
@@ -656,7 +830,53 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
         <div className="codex-vlsi-chat-head">
           <div>
             <div className="codex-vlsi-title">AgentIC Studio</div>
-            <div className="codex-vlsi-subtitle">Describe the chip. Watch the build.</div>
+            <div className="codex-vlsi-subtitle">{activeConversation?.title || 'Describe the chip. Watch the build.'}</div>
+          </div>
+          <button
+            type="button"
+            className="codex-vlsi-icon-button"
+            onClick={startNewConversation}
+            disabled={isBusy}
+            aria-label="New conversation"
+            title="New conversation"
+          >
+            <Plus size={15} />
+          </button>
+        </div>
+
+        <div className="codex-vlsi-history-strip">
+          <div className="codex-vlsi-history-title">
+            <History size={13} />
+            <span>Recent</span>
+          </div>
+          <div className="codex-vlsi-history-list">
+            {recentConversations.map((conversation) => (
+              <div
+                key={conversation.id}
+                className={`codex-vlsi-history-item${conversation.id === activeConversationId ? ' active' : ''}`}
+              >
+                <button
+                  type="button"
+                  className="codex-vlsi-history-open"
+                  onClick={() => selectConversation(conversation.id)}
+                  title={conversation.title}
+                >
+                  <span>{conversation.title}</span>
+                  <em>{formatConversationAge(conversation.updatedAt)}</em>
+                </button>
+                <button
+                  type="button"
+                  className="codex-vlsi-history-delete"
+                  onClick={(event) => {
+                    deleteConversation(conversation.id);
+                  }}
+                  aria-label="Delete conversation"
+                  title="Delete conversation"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
           </div>
         </div>
 

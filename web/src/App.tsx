@@ -1,7 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { QueryClientProvider } from '@tanstack/react-query';
-import type { Session, AuthChangeEvent } from '@supabase/supabase-js';
-import { supabase } from './supabaseClient';
 import { LandingPage } from './pages/LandingPage';
 import { WaitlistDashboard } from './pages/WaitlistDashboard';
 import { AuthPage } from './components/AuthPage';
@@ -10,6 +8,7 @@ import { BillingModal } from './components/BillingModal';
 import { ErrorBoundary, PageErrorBoundary } from './components/ErrorBoundary';
 import { queryClient } from './lib/query-client';
 import { toUserError } from './utils/errorFormatter';
+import { clearAuthSession, getStoredAuthSession, refreshAuthSession, saveAuthSession, type AgenticAuthSession } from './authSession';
 import './index.css';
 import type { LucideIcon } from 'lucide-react';
 import {
@@ -23,9 +22,9 @@ import {
   PanelLeftOpen,
 } from 'lucide-react';
 
-  const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
-  const IS_LOCAL_MODE = !import.meta.env.VITE_API_BASE_URL && !import.meta.env.VITE_SUPABASE_URL;
   const IS_DESKTOP_APP = typeof window !== 'undefined' && 'electronAPI' in window;
+  const AUTH_ENABLED = IS_DESKTOP_APP || Boolean(import.meta.env.VITE_SUPABASE_URL);
+  const IS_LOCAL_MODE = !IS_DESKTOP_APP && !import.meta.env.VITE_API_BASE_URL && !import.meta.env.VITE_SUPABASE_URL;
   const BUILD_FLAVOR = import.meta.env.DEV ? 'dev' : 'built';
 
 const DesignStudio = lazy(() =>
@@ -99,8 +98,11 @@ type ToolStatus = {
 type AgenticElectronWindow = Window & {
   electronAPI?: {
     onDeepLink?: (callback: (path: string) => void) => () => void;
+    openExternal?: (url: string) => Promise<{ success: boolean }>;
   };
 };
+
+const AGENTIC_DOWNLOAD_URL = 'https://buildstack.live/agentic/download';
 
 type NavGroup = {
   label: string;
@@ -143,8 +145,20 @@ const PAGE_META: Record<PageKey, { title: string; subtitle: string }> = {
   },
 };
 
+function userFromAccessToken(token: string): AgenticAuthSession['user'] {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return null;
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const parsed = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')));
+    return { id: parsed.sub, email: parsed.email };
+  } catch {
+    return null;
+  }
+}
+
 const App = () => {
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<AgenticAuthSession | null>(null);
   const [authLoading, setAuthLoading] = useState(AUTH_ENABLED);
   const [selectedPage, setSelectedPage] = useState<PageKey>('Design Studio');
   const [showPricing, setShowPricing] = useState(() =>
@@ -174,9 +188,9 @@ const App = () => {
       api.get('/profile'),
       api.get('/tools/status'),
     ]);
-    if (requestSeq !== licenseRequestSeq.current) return;
+    if (requestSeq !== licenseRequestSeq.current) return null;
 
-    setLicenseStatus(
+    const nextLicenseStatus =
       licenseRes.status === 'fulfilled'
         ? licenseRes.value.data || null
         : {
@@ -184,8 +198,9 @@ const App = () => {
             plan: 'unlicensed',
             reason: 'Unable to verify license.',
             source: 'unavailable',
-          }
-    );
+          };
+
+    setLicenseStatus(nextLicenseStatus);
     if (profileRes.status === 'fulfilled') {
       setProfile(profileRes.value.data || null);
     }
@@ -193,25 +208,46 @@ const App = () => {
       setToolsStatus(toolsRes.value.data || null);
     }
     setLicenseLoading(false);
+    return nextLicenseStatus;
   }, [licenseStatus?.active]);
+
+  const pollLicenseAfterExternalFlow = useCallback(async () => {
+    setLicenseLoading(true);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1200));
+      }
+      const status = await refreshLicenseContext();
+      if (status?.active) {
+        setShowPricing(false);
+        setSelectedPage('Design Studio');
+        setLicenseLoading(false);
+        return;
+      }
+    }
+    setLicenseLoading(false);
+  }, [refreshLicenseContext]);
 
   useEffect(() => {
     if (IS_LOCAL_MODE) {
-      setSession({ user: { email: 'local@agentic.app' } } as unknown as Session);
+      setSession({ user: { email: 'local@agentic.app' }, access_token: 'local' });
       setAuthLoading(false);
       return;
     }
     if (!AUTH_ENABLED) {
+      setAuthLoading(false);
       return;
     }
-    supabase.auth.getSession().then(({ data: { session: s } }: { data: { session: Session | null } }) => {
-      setSession(s);
+    const stored = getStoredAuthSession();
+    if (!stored?.access_token) {
+      setSession(null);
       setAuthLoading(false);
-    }).catch(() => setAuthLoading(false));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: AuthChangeEvent, s: Session | null) => {
-      setSession(s);
-    });
-    return () => subscription.unsubscribe();
+      return;
+    }
+    refreshAuthSession(stored)
+      .then((next) => setSession(next))
+      .catch(() => setSession(null))
+      .finally(() => setAuthLoading(false));
   }, []);
 
   useEffect(() => {
@@ -228,7 +264,7 @@ const App = () => {
       if (route.startsWith('/license/success') || route.startsWith('/checkout/success')) {
         setShowPricing(false);
         window.history.replaceState({}, '', '/');
-        refreshLicenseContext().catch(() => {
+        pollLicenseAfterExternalFlow().catch(() => {
           setLicenseStatus({
             active: false,
             plan: 'unlicensed',
@@ -245,22 +281,30 @@ const App = () => {
         const params = new URLSearchParams(fragment);
         const accessToken = params.get('access_token');
         const refreshToken = params.get('refresh_token');
-
         if (accessToken && refreshToken) {
-          supabase.auth
-            .setSession({ access_token: accessToken, refresh_token: refreshToken })
-            .then(({ data }: { data: { session: Session | null } }) => setSession(data.session))
-            .catch(() => undefined);
+          const expiresAtRaw = params.get('expires_at');
+          const expiresInRaw = params.get('expires_in');
+          const expiresAt = expiresAtRaw ? Number(expiresAtRaw) : undefined;
+          const expiresIn = expiresInRaw ? Number(expiresInRaw) : undefined;
+          const next = {
+            access_token: accessToken,
+            refresh_token: refreshToken,
+            expires_at: Number.isFinite(expiresAt) ? expiresAt : undefined,
+            expires_in: Number.isFinite(expiresIn) ? expiresIn : undefined,
+            token_type: params.get('token_type') || 'bearer',
+            user: userFromAccessToken(accessToken),
+          };
+          saveAuthSession(next);
+          setSession(next);
+          setShowPricing(false);
+          window.history.replaceState({}, '', '/');
+          pollLicenseAfterExternalFlow().catch(() => undefined);
           return;
         }
-
-        supabase.auth
-          .getSession()
-          .then(({ data: { session: s } }: { data: { session: Session | null } }) => setSession(s))
-          .catch(() => undefined);
+        refreshAuthSession().then((next) => setSession(next)).catch(() => undefined);
       }
     });
-  }, [refreshLicenseContext]);
+  }, [pollLicenseAfterExternalFlow]);
 
   // Capture prompt from landing page on successful session
   useEffect(() => {
@@ -432,9 +476,18 @@ const App = () => {
   }, [session]);
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
+    clearAuthSession();
+    api.post('/auth/logout').catch(() => undefined);
     setSession(null);
     setSelectedPage('Design Studio');
+  };
+
+  const openDownloadPage = async () => {
+    const desktopOpen = (window as AgenticElectronWindow).electronAPI?.openExternal;
+    const result = desktopOpen ? await desktopOpen(AGENTIC_DOWNLOAD_URL) : null;
+    if (!result?.success) {
+      window.open(AGENTIC_DOWNLOAD_URL, '_blank', 'noopener,noreferrer');
+    }
   };
 
   if (authLoading) {
@@ -454,21 +507,13 @@ const App = () => {
     if (IS_DESKTOP_APP) {
       return (
         <AuthPage
-          onAuth={() =>
-            supabase.auth
-              .getSession()
-              .then(({ data: { session: s } }: { data: { session: Session | null } }) => setSession(s))
-          }
+          onAuth={() => setSession(getStoredAuthSession())}
         />
       );
     }
     return (
       <LandingPage
-        onAuthSuccess={() =>
-          supabase.auth
-            .getSession()
-            .then(({ data: { session: s } }: { data: { session: Session | null } }) => setSession(s))
-        }
+        onAuthSuccess={() => setSession(getStoredAuthSession())}
       />
     );
   }
@@ -479,7 +524,7 @@ const App = () => {
       <div style={{ position: 'relative' }}>
         <LandingPage onAuthSuccess={() => {}} />
         <button
-          onClick={() => setSession({ user: { email: 'preview@agentic.app' } } as unknown as Session)}
+          onClick={() => setSession({ user: { email: 'preview@agentic.app' }, access_token: 'preview' })}
           style={{
             position: 'fixed', bottom: '1rem', right: '1rem',
             background: '#27272A', color: '#71717A',
@@ -500,10 +545,11 @@ const App = () => {
       adminEmails.push(...import.meta.env.VITE_WHITELISTED_EMAILS.split(',').map((e: string) => e.trim()));
     }
     
-    const isAllowed = session.user?.email && adminEmails.includes(session.user.email);
+    const sessionEmail = session.user?.email || '';
+    const isAllowed = sessionEmail && adminEmails.includes(sessionEmail);
 
     if (!isAllowed) {
-      return <WaitlistDashboard email={session.user?.email || ''} />;
+      return <WaitlistDashboard email={sessionEmail} />;
     }
   }
 
@@ -572,6 +618,9 @@ const App = () => {
             <button className="top-nav-btn" onClick={() => setShowPricing(true)}>
               View Pricing
             </button>
+            <button className="top-nav-btn" onClick={openDownloadPage}>
+              Download Latest App
+            </button>
             {session && (
               <button className="top-nav-btn" onClick={handleLogout}>
                 {needsFreshSignIn ? 'Sign In Again' : 'Sign Out'}
@@ -618,7 +667,7 @@ const App = () => {
         return (
           <WorkspaceSettings
             profile={profile}
-            sessionEmail={session?.user.email || ''}
+            sessionEmail={session?.user?.email || ''}
             onOpenByok={() => setShowBillingModal(true)}
             licenseStatus={licenseStatus}
             toolStatus={toolsStatus}

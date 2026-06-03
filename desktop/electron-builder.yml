@@ -2,6 +2,11 @@ appId: live.buildstack.agentic
 productName: AgentIC
 copyright: Copyright © 2024-2026 AgentIC
 
+protocols:
+  - name: AgentIC Desktop
+    schemes:
+      - agentic
+
 directories:
   buildResources: resources
   output: dist
@@ -15,6 +20,23 @@ extraResources:
     to: renderer
   - from: resources/license.json
     to: license.json
+  - from: resources/backend
+    to: backend
+    filter:
+      - "**/*"
+  - from: ../server
+    to: server
+    filter:
+      - "**/*"
+      - "!**/__pycache__/**"
+      - "!**/.pytest_cache/**"
+      - "!**/.mypy_cache/**"
+      - "!**/.ruff_cache/**"
+      - "!**/*.pyc"
+      - "!**/.env"
+      - "!**/.env.*"
+      - "!**/*.log"
+      - "!**/.agentic-state/**"
 
 asar: true
 compression: maximum
@@ -46,7 +68,6 @@ win:
     - target: nsis
       arch:
         - x64
-        - arm64
 
 nsis:
   oneClick: false
@@ -74,6 +95,3 @@ publish:
   owner: Vickyrrrrrr
   repo: AgentIC
   releaseType: release
-
-electronDownload:
-  mirror: https://github.com/nicedoc/electron/releases/download/

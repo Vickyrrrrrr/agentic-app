@@ -1,11 +1,15 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, protocol, session } from 'electron'
 import { join, resolve as nodeResolve } from 'path'
-import { readFileSync } from 'fs'
+import { appendFileSync, existsSync, readFileSync } from 'fs'
 import { writeFile } from 'fs/promises'
 import { execFile, spawn } from 'child_process'
+import { get as httpGet } from 'http'
+import { autoUpdater } from 'electron-updater'
 
 let mainWindow: BrowserWindow | null = null
 let backendProcess: import('child_process').ChildProcess | null = null
+let rendererReady = false
+const pendingDeepLinks: string[] = []
 const isDev = !app.isPackaged
 
 async function createWindow(): Promise<void> {
@@ -42,6 +46,16 @@ async function createWindow(): Promise<void> {
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show()
   })
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    rendererReady = true
+    flushPendingDeepLinks()
+    mainWindow?.show()
+  })
+
+  setTimeout(() => {
+    mainWindow?.show()
+  }, 2500)
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
@@ -85,6 +99,7 @@ if (!gotTheLock) {
     registerIpcHandlers()
     registerProtocol()
     startBackend()
+    setupAutoUpdates()
     void createWindow()
 
     app.on('activate', () => {
@@ -129,50 +144,161 @@ function watchWindowShortcuts(window: BrowserWindow): void {
 }
 
 function startBackend(): void {
-  const serverDir = join(__dirname, '..', '..', '..', 'server')
+  const serverDir = app.isPackaged
+    ? join(process.resourcesPath, 'server')
+    : join(__dirname, '..', '..', '..', 'server')
   const serverScript = join(serverDir, 'main.py')
   const runScript = join(serverDir, 'run.sh')
   const workspace = join(app.getPath('home'), 'AgentIC-workspace')
   const env = backendEnvironment(workspace)
+  env['PYTHONUNBUFFERED'] = '1'
+  const bundledBackend = app.isPackaged ? packagedBackendExecutablePath() : null
+
+  const launchBackend = (): void => {
+    if (bundledBackend && existsSync(bundledBackend)) {
+      logBackendLine('backend', `Starting bundled backend runtime: ${bundledBackend}`)
+      backendProcess = spawn(bundledBackend, [], {
+        cwd: serverDir,
+        env,
+        stdio: 'pipe',
+        windowsHide: true,
+      })
+    } else if (process.platform === 'win32') {
+      logBackendLine('backend', 'Bundled backend runtime is unavailable. Falling back to Windows Python.')
+      backendProcess = spawn('python', [serverScript], {
+        cwd: serverDir,
+        env,
+        stdio: 'pipe',
+        windowsHide: true
+      })
+    } else {
+      backendProcess = spawn('bash', [runScript], {
+        cwd: serverDir,
+        env,
+        stdio: 'pipe',
+      })
+    }
+
+    attachBackendLogging()
+    waitForBackendReady()
+  }
+
+  if (process.platform === 'win32' && app.isPackaged) {
+    if (bundledBackend && existsSync(bundledBackend)) {
+      launchBackend()
+    } else {
+      ensureWindowsBackendDependencies(serverDir, env, launchBackend)
+    }
+    return
+  }
+
+  launchBackend()
+}
+
+function packagedBackendExecutablePath(): string {
+  const platformKey = `${process.platform}-${process.arch}`
+  const executable = process.platform === 'win32' ? 'agentic-backend.exe' : 'agentic-backend'
+  return join(process.resourcesPath, 'backend', platformKey, executable)
+}
+
+function ensureWindowsBackendDependencies(
+  serverDir: string,
+  env: NodeJS.ProcessEnv,
+  onReady: () => void
+): void {
+  const probe = spawn('python', ['-c', 'import fastapi, uvicorn, sse_starlette, openai, jwt'], {
+    cwd: serverDir,
+    env,
+    stdio: 'pipe',
+    windowsHide: true
+  })
+
+  attachProcessLogging(probe, 'backend-deps-check')
+
+  probe.on('exit', (code: number | null) => {
+    if (code === 0) {
+      onReady()
+      return
+    }
+
+    logBackendLine('backend-deps', 'Installing local backend dependencies for packaged Windows app.')
+    const installer = spawn('python', ['-m', 'pip', 'install', '--user', '-r', join(serverDir, 'requirements.txt')], {
+      cwd: serverDir,
+      env,
+      stdio: 'pipe',
+      windowsHide: true
+    })
+
+    attachProcessLogging(installer, 'backend-deps')
+    installer.on('exit', (installCode: number | null) => {
+      logBackendLine('backend-deps', `Dependency install exited with code ${installCode}`)
+      onReady()
+    })
+  })
+}
+
+function attachBackendLogging(): void {
+  if (!backendProcess) return
 
   if (process.platform === 'win32') {
-    // Windows: use the Python launcher
-    backendProcess = spawn('python', [serverScript], {
-      cwd: serverDir,
-      env,
-      stdio: 'pipe',
-    })
-  } else {
-    // Linux/macOS: use run.sh
-    backendProcess = spawn('bash', [runScript], {
-      cwd: serverDir,
-      env,
-      stdio: 'pipe',
-    })
+    logBackendLine('backend', 'Starting packaged Windows backend.')
   }
 
-  if (backendProcess.stdout) {
-    backendProcess.stdout.on('data', (data: Buffer) => {
-      const text = data.toString()
-      // Log server output in dev mode
-      if (isDev) process.stdout.write(`[backend] ${text}`)
-      // Notify renderer when server is ready
-      if (text.includes('Uvicorn running on') || text.includes('localhost:7860')) {
-        mainWindow?.webContents.send('backend-ready')
-      }
-    })
-  }
-
-  if (backendProcess.stderr) {
-    backendProcess.stderr.on('data', (data: Buffer) => {
-      if (isDev) process.stderr.write(`[backend:err] ${data.toString()}`)
-    })
-  }
+  attachProcessLogging(backendProcess, 'backend')
 
   backendProcess.on('exit', (code: number | null) => {
-    if (isDev) console.log(`[backend] exited with code ${code}`)
+    logBackendLine('backend', `exited with code ${code}`)
     backendProcess = null
   })
+}
+
+function attachProcessLogging(processRef: import('child_process').ChildProcess, label: string): void {
+  processRef.stdout?.on('data', (data: Buffer) => {
+    const text = data.toString()
+    logBackendLine(label, text)
+    if (text.includes('Uvicorn running on') || text.includes('localhost:7860')) {
+      mainWindow?.webContents.send('backend-ready')
+    }
+  })
+
+  processRef.stderr?.on('data', (data: Buffer) => {
+    logBackendLine(`${label}:err`, data.toString())
+  })
+}
+
+function waitForBackendReady(attempt = 0): void {
+  if (attempt > 80 || !backendProcess) return
+
+  const request = httpGet('http://127.0.0.1:7860/health', (response) => {
+    response.resume()
+    if (response.statusCode && response.statusCode >= 200 && response.statusCode < 500) {
+      mainWindow?.webContents.send('backend-ready')
+      logBackendLine('backend', 'Local backend is ready.')
+      return
+    }
+    setTimeout(() => waitForBackendReady(attempt + 1), 500)
+  })
+
+  request.on('error', () => {
+    setTimeout(() => waitForBackendReady(attempt + 1), 500)
+  })
+  request.setTimeout(1000, () => {
+    request.destroy()
+    setTimeout(() => waitForBackendReady(attempt + 1), 500)
+  })
+}
+
+function logBackendLine(label: string, text: string): void {
+  if (isDev) {
+    process.stdout.write(`[${label}] ${text}`)
+    return
+  }
+
+  try {
+    appendFileSync(join(app.getPath('userData'), 'backend.log'), `[${new Date().toISOString()}] [${label}] ${text}`)
+  } catch {
+    // Logging should never prevent the desktop app from opening.
+  }
 }
 
 function backendEnvironment(workspace: string): NodeJS.ProcessEnv {
@@ -257,6 +383,29 @@ function stopBackend(): void {
   }
 }
 
+function setupAutoUpdates(): void {
+  if (isDev) return
+
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+
+  autoUpdater.on('checking-for-update', () => logBackendLine('updates', 'Checking for updates.'))
+  autoUpdater.on('update-available', (info) => logBackendLine('updates', `Update available: ${info.version}`))
+  autoUpdater.on('update-not-available', () => logBackendLine('updates', 'No update available.'))
+  autoUpdater.on('update-downloaded', (info) => {
+    logBackendLine('updates', `Update downloaded: ${info.version}. It will install when AgentIC exits.`)
+  })
+  autoUpdater.on('error', (error) => {
+    logBackendLine('updates', `Update check failed: ${error.message}`)
+  })
+
+  setTimeout(() => {
+    autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+      logBackendLine('updates', `Update check failed: ${error.message}`)
+    })
+  }, 10000)
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle('save-file', async (_event, fileName: string, content: string) => {
     const { canceled, filePath } = await dialog.showSaveDialog({
@@ -296,38 +445,38 @@ function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle('execute-local-eda', async (_event, command: string, cwd?: string) => {
-    try {
-      const { exec } = await import('child_process')
-      const { promisify } = await import('util')
-      const execAsync = promisify(exec)
-
-      let fullCommand: string
-      if (process.platform === 'win32') {
-        const wslCwd = cwd ? `cd ${cwd} && ` : ''
-        fullCommand = `wsl -d Ubuntu-22.04 bash -c "${wslCwd}${command.replace(/"/g, '\\"')}"`
-      } else {
-        fullCommand = cwd ? `cd "${cwd}" && ${command}` : command
-      }
-
-      const { stdout, stderr } = await execAsync(fullCommand)
-      return { success: true, stdout, stderr, code: 0 }
-    } catch (error: any) {
-      return {
-        success: false,
-        stdout: error.stdout || '',
-        stderr: error.stderr || error.message,
-        code: error.code || 1
-      }
-    }
-  })
+  // EDA execution intentionally stays behind the local FastAPI backend.
+  // The renderer should not receive a generic arbitrary-command IPC.
 }
 
 async function openExternalUrl(url: string): Promise<boolean> {
   if (isWslRuntime()) {
+    const escapedPowerShellUrl = url.replace(/'/g, "''")
     try {
-      const escaped = url.replace(/'/g, "''")
-      await execFileAsync('powershell.exe', ['-NoProfile', '-Command', `Start-Process '${escaped}'`])
+      await execFileAsync('powershell.exe', ['-NoProfile', '-Command', `Start-Process '${escapedPowerShellUrl}'`])
+      return true
+    } catch {
+      // Try the Windows shell next.
+    }
+
+    try {
+      await execFileAsync('cmd.exe', ['/c', 'start', '', url])
+      return true
+    } catch {
+      // Try common WSL desktop helpers.
+    }
+  }
+
+  try {
+    await execFileAsync('wslview', [url])
+    return true
+  } catch {
+    // Continue to Linux desktop helpers.
+  }
+
+  if (process.platform === 'linux') {
+    try {
+      await execFileAsync('xdg-open', [url])
       return true
     } catch {
       // Fall through to Electron's normal opener.
@@ -354,7 +503,7 @@ function isWslRuntime(): boolean {
 
 function execFileAsync(command: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    execFile(command, args, (error) => {
+    execFile(command, args, { windowsHide: true }, (error) => {
       if (error) reject(error)
       else resolve()
     })
@@ -363,6 +512,9 @@ function execFileAsync(command: string, args: string[]): Promise<void> {
 
 function registerProtocol(): void {
   if (process.defaultApp) {
+    if (process.env['AGENTIC_REGISTER_PROTOCOL_IN_DEV'] !== 'true') {
+      return
+    }
     if (process.argv.length >= 2) {
       app.setAsDefaultProtocolClient('agentic', process.execPath, [
         resolve(process.argv[1])
@@ -373,15 +525,30 @@ function registerProtocol(): void {
   }
 
   protocol.handle('agentic', (request) => {
-    mainWindow?.webContents.send('deep-link', toDeepLinkPath(request.url))
+    deliverDeepLink(toDeepLinkPath(request.url))
     return new Response('', { status: 200 })
   })
 }
 
 function handleDeepLink(args: string[]): void {
   const deepLinkUrl = args.find((arg) => arg.startsWith('agentic://'))
-  if (deepLinkUrl && mainWindow) {
-    mainWindow.webContents.send('deep-link', toDeepLinkPath(deepLinkUrl))
+  if (!deepLinkUrl) return
+  deliverDeepLink(toDeepLinkPath(deepLinkUrl))
+}
+
+function deliverDeepLink(path: string): void {
+  if (mainWindow && rendererReady) {
+    mainWindow.webContents.send('deep-link', path)
+    return
+  }
+  pendingDeepLinks.push(path)
+}
+
+function flushPendingDeepLinks(): void {
+  if (!mainWindow || !rendererReady) return
+  while (pendingDeepLinks.length > 0) {
+    const path = pendingDeepLinks.shift()
+    if (path) mainWindow.webContents.send('deep-link', path)
   }
 }
 

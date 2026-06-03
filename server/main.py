@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -12,6 +13,8 @@ from pathlib import Path
 import jwt
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from openai import AzureOpenAI, OpenAI
 from sse_starlette.sse import EventSourceResponse
 
 from models import ChatRequest, ToolInstallPlanRequest, ToolInstallRequest, UsageBuildRequest
@@ -29,6 +32,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok", "service": "agentic-local"}
 
 WS_ROOT = os.environ.get("AGENTIC_WORKSPACE") or os.path.expanduser("~/AgentIC-workspace")
 ensure_workspace(WS_ROOT)
@@ -187,6 +194,15 @@ def _write_cached_entitlement(entitlement: dict) -> None:
         ENTITLEMENT_PATH.write_text(json.dumps(entitlement, indent=2), encoding="utf-8")
 
 
+def _cached_entitlement_for_temporary_failure(reason: str | None = None) -> dict | None:
+    cached = _read_cached_entitlement()
+    if not cached:
+        return None
+    cached["source"] = "cache"
+    cached["reason"] = reason or "Using cached entitlement while license verification refreshes."
+    return cached
+
+
 def _authorization_headers(request: Request) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     auth = request.headers.get("authorization")
@@ -222,6 +238,11 @@ def resolve_license_status(request: Request) -> dict:
             if not data.get("active"):
                 return _normalize_entitlement(data, "cloud")
             if _env_bool("AGENTIC_REQUIRE_SIGNED_ENTITLEMENT", True):
+                cached = _cached_entitlement_for_temporary_failure(
+                    "Using cached entitlement while license verification refreshes."
+                )
+                if cached:
+                    return cached
                 return {
                     "active": False,
                     "plan": "unlicensed",
@@ -234,6 +255,11 @@ def resolve_license_status(request: Request) -> dict:
             return entitlement
         except urllib.error.HTTPError as exc:
             if exc.code == 401:
+                cached = _cached_entitlement_for_temporary_failure(
+                    "Using cached entitlement while your sign-in session refreshes."
+                )
+                if cached:
+                    return cached
                 return {
                     "active": False,
                     "plan": "unlicensed",
@@ -250,6 +276,11 @@ def resolve_license_status(request: Request) -> dict:
                     "reason": _safe_license_failure_reason(exc.code),
                 }
             body = exc.read().decode("utf-8", errors="replace")
+            cached = _cached_entitlement_for_temporary_failure(
+                "Using cached entitlement because license verification is temporarily unavailable."
+            )
+            if cached:
+                return cached
             return {
                 "active": False,
                 "plan": "unlicensed",
@@ -258,9 +289,10 @@ def resolve_license_status(request: Request) -> dict:
                 "reason": _safe_license_failure_reason(exc.code, body),
             }
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-            cached = _read_cached_entitlement()
+            cached = _cached_entitlement_for_temporary_failure(
+                "Using cached entitlement because license cloud is temporarily unavailable."
+            )
             if cached:
-                cached["reason"] = "Using cached entitlement because license cloud is temporarily unavailable."
                 return cached
             return {
                 "active": False,
@@ -417,6 +449,52 @@ def _forward_checkout(plan: str, request: Request) -> dict:
         raise HTTPException(502, "Unable to start checkout. Please try again in a moment.")
 
 
+def _license_server_base() -> str:
+    return os.environ.get("AGENTIC_LICENSE_SERVER_URL", "").strip().rstrip("/")
+
+
+def _forward_license_json(
+    path: str,
+    method: str = "GET",
+    payload: dict | None = None,
+    request: Request | None = None,
+    include_auth: bool = True,
+    timeout: int = 15,
+) -> dict | list:
+    license_base = _license_server_base()
+    if not license_base:
+        raise HTTPException(503, "Account service is not configured.")
+
+    headers = {"Content-Type": "application/json"}
+    if request is not None and include_auth:
+        auth = request.headers.get("authorization")
+        if auth:
+            headers["Authorization"] = auth
+
+    data = json.dumps(payload or {}).encode("utf-8") if method.upper() != "GET" else None
+    cloud_req = urllib.request.Request(
+        f"{license_base}{path}",
+        data=data,
+        headers=headers,
+        method=method.upper(),
+    )
+    try:
+        with urllib.request.urlopen(cloud_req, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        reason = _safe_license_failure_reason(exc.code, body)
+        if path.startswith("/auth/"):
+            if exc.code == 401:
+                reason = "Sign-in failed. Check your email and password."
+            elif exc.code == 503:
+                reason = "Account sign-in is temporarily unavailable."
+        raise HTTPException(exc.code if exc.code in {400, 401, 402, 422, 503} else 502, reason)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        raise HTTPException(502, "Account service is temporarily unavailable. Please try again in a moment.")
+
+
 def _append_run_event(event: dict) -> None:
     event_type = event.get("type")
     label = event.get("label")
@@ -491,6 +569,78 @@ async def get_pdks():
 @app.get("/license/status")
 async def get_license_status(request: Request):
     return resolve_license_status(request)
+
+
+@app.get("/plans")
+async def get_plans():
+    data = _forward_license_json("/plans", method="GET", include_auth=False)
+    return {"plans": data if isinstance(data, list) else []}
+
+
+@app.post("/auth/password-login")
+async def auth_password_login(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    email = str(body.get("email") or "").strip()
+    password = str(body.get("password") or "")
+    if not email or not password:
+        raise HTTPException(400, "Email and password are required.")
+    return _forward_license_json(
+        "/auth/password-login",
+        method="POST",
+        payload={"email": email, "password": password},
+        include_auth=False,
+    )
+
+
+@app.post("/auth/signup")
+async def auth_signup(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    email = str(body.get("email") or "").strip()
+    password = str(body.get("password") or "")
+    if not email or not password:
+        raise HTTPException(400, "Email and password are required.")
+    return _forward_license_json(
+        "/auth/signup",
+        method="POST",
+        payload={"email": email, "password": password},
+        include_auth=False,
+    )
+
+
+@app.post("/auth/refresh")
+async def auth_refresh(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    refresh_token = str(body.get("refresh_token") or "")
+    if not refresh_token:
+        raise HTTPException(400, "Refresh token is required.")
+    return _forward_license_json(
+        "/auth/refresh",
+        method="POST",
+        payload={"refresh_token": refresh_token},
+        include_auth=False,
+    )
+
+
+@app.post("/auth/logout")
+async def auth_logout():
+    return {"ok": True}
+
+
+@app.get("/auth/google/start")
+async def auth_google_start():
+    license_base = _license_server_base()
+    if not license_base:
+        raise HTTPException(503, "Google sign-in is not configured.")
+    return RedirectResponse(f"{license_base}/auth/google/start")
 
 
 @app.post("/usage/build")
@@ -576,10 +726,51 @@ async def get_profile():
     }
 
 
+def _safe_model_error(error: Exception) -> str:
+    text = str(error).lower()
+    if any(token in text for token in ("401", "unauthorized", "api key", "authentication")):
+        return "Model provider rejected the API key."
+    if any(token in text for token in ("404", "model", "not found", "does not exist")):
+        return "Model provider did not accept the selected model."
+    if any(token in text for token in ("base_url", "connection", "connect", "dns", "ssl", "timeout", "timed out")):
+        return "Could not reach the model provider. Check the base URL and network connection."
+    if any(token in text for token in ("quota", "rate limit", "429", "billing")):
+        return "Model provider is rate-limiting or out of quota."
+    return "Model connection failed. Check the key, model name, and OpenAI-compatible base URL."
+
+
 @app.post("/profile/byok/test")
-async def test_byok_connection():
-    # Local mode: accept any key format, let the agent runtime handle errors
-    return {"status": "ok", "message": "Local mode BYOK test skipped — agent will validate on first use"}
+async def test_byok_connection(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    group = body.get(str(body.get("group") or "group1")) if isinstance(body, dict) else {}
+    if not isinstance(group, dict):
+        group = {}
+    api_key = str(group.get("api_key") or body.get("api_key") or "").strip()
+    base_url = str(group.get("base_url") or body.get("base_url") or "https://api.openai.com/v1").strip()
+    model = str(group.get("model") or body.get("model") or "gpt-4o").strip()
+    if not api_key:
+        raise HTTPException(400, "Model API key is required.")
+    try:
+        if "azure.com" in base_url.lower():
+            match = re.match(r"(https://[^.]+\.openai\.azure\.com)", base_url)
+            azure_endpoint = match.group(1) if match else base_url
+            version_match = re.search(r"api-version=([\d-]+)", base_url)
+            api_version = version_match.group(1) if version_match else "2024-08-01-preview"
+            client = AzureOpenAI(api_key=api_key, api_version=api_version, azure_endpoint=azure_endpoint, timeout=20)
+        else:
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=20)
+        client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Reply with OK."}],
+            max_tokens=4,
+            temperature=0,
+        )
+        return {"status": "ok", "message": "Model connection verified."}
+    except Exception as exc:
+        raise HTTPException(400, _safe_model_error(exc))
 
 
 @app.post("/profile/byok")
@@ -650,6 +841,9 @@ async def chat_converse(req: ChatRequest, request: Request):
         queue = asyncio.Queue()
         LLM_TIMEOUT = 300
 
+        def _push_event(event_dict: dict) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, ("event", event_dict))
+
         def run_sync_gen():
             """Run the synchronous generator and push events to the queue."""
             try:
@@ -659,6 +853,7 @@ async def chat_converse(req: ChatRequest, request: Request):
                     workspace_root=WS_ROOT,
                     base_url=base_url,
                     model=model,
+                    event_pusher=_push_event,
                 ):
                     loop.call_soon_threadsafe(queue.put_nowait, ("event", event))
                 loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
@@ -766,4 +961,4 @@ async def get_active_workspace(request: Request):
 if __name__ == "__main__":
     import uvicorn
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+    uvicorn.run(app, host="0.0.0.0", port=7860, log_config=None, access_log=False)

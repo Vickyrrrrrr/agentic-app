@@ -1,6 +1,6 @@
 {
   "name": "agentic-desktop",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "AgentIC — Autonomous AI-Powered Silicon Design Studio (Desktop)",
   "private": true,
   "main": "./out/main/index.js",
@@ -8,17 +8,23 @@
     "dev": "electron-vite dev",
     "dev:fresh": "bash scripts/dev-fresh.sh",
     "build": "electron-vite build",
+    "build:backend": "node scripts/build-backend-runtime.mjs",
+    "build:backend:win": "node scripts/build-backend-runtime.mjs win32",
+    "build:backend:mac": "node scripts/build-backend-runtime.mjs darwin",
+    "build:backend:linux": "node scripts/build-backend-runtime.mjs linux",
     "run:built": "bash scripts/run-built.sh",
     "preview": "electron-vite preview",
     "postinstall": "electron-builder install-app-deps",
     "build:unpack": "npm run build && electron-builder --dir",
-    "build:win": "npm run build && electron-builder --win",
-    "build:mac": "npm run build && electron-builder --mac",
-    "build:linux": "npm run build && electron-builder --linux"
+    "build:win": "npm run build:backend:win && npm run build && electron-builder --win",
+    "build:win:no-backend": "npm run build && electron-builder --win",
+    "build:mac": "npm run build:backend:mac && npm run build && electron-builder --mac",
+    "build:linux": "npm run build:backend:linux && npm run build && electron-builder --linux"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.1",
-    "@electron-toolkit/utils": "^3.0.0"
+    "@electron-toolkit/utils": "^3.0.0",
+    "electron-updater": "^6.3.9"
   },
   "devDependencies": {
     "@microsoft/fetch-event-source": "^2.0.1",

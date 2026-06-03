@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, ChevronDown, ChevronUp, Eye, EyeOff, Check, Fingerprint, LockKeyhole, Sparkles, Cpu, KeyRound } from 'lucide-react';
-import { API_BASE } from '../api';
-import { supabase } from '../supabaseClient';
+import { api } from '../api';
 import { toUserError } from '../utils/errorFormatter';
 
 type GroupKey = 'group1' | 'group2' | 'group3';
@@ -23,7 +22,6 @@ const DEFAULT_BYOK_BASE_URL = 'https://api.openai.com/v1';
 
 const PROVIDER_PRESETS: ProviderPreset[] = [
   { id: 'openai', label: 'OpenAI', model: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
-  { id: 'anthropic', label: 'Anthropic (Claude)', model: 'claude-3-5-sonnet-latest', baseUrl: '' },
   { id: 'nvidia', label: 'NVIDIA NIM', model: 'meta/llama-3.3-70b-instruct', baseUrl: 'https://integrate.api.nvidia.com/v1' },
   { id: 'openrouter', label: 'OpenRouter', model: 'openai/gpt-4o-mini', baseUrl: 'https://openrouter.ai/api/v1' },
   { id: 'groq', label: 'Groq', model: 'llama-3.3-70b-versatile', baseUrl: 'https://api.groq.com/openai/v1' },
@@ -204,27 +202,6 @@ export const BillingModal = ({
     setMode(initialMode);
 
     const loadKeys = async () => {
-      // Try server-side first
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (session?.access_token) {
-          const resp = await fetch(`${API_BASE}/profile/byok`, {
-            headers: { Authorization: `Bearer ${session.access_token}` },
-          });
-          if (resp.ok) {
-            const serverData = await resp.json();
-            if (serverData && serverData.group1) {
-              localStorage.setItem('agentic_byok_key', JSON.stringify(serverData));
-              applyParsed(serverData);
-              return;
-            }
-          }
-        }
-      } catch {
-        // fall through
-      }
-
-      // localStorage fallback
       try {
         const raw = localStorage.getItem('agentic_byok_key');
         if (!raw) {
@@ -297,19 +274,7 @@ export const BillingModal = ({
     setTestStatus('');
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const resp = await fetch(`${API_BASE}/profile/byok/test`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
-        },
-        body: JSON.stringify({ ...buildPayload(), group: quickMode ? 'group2' : 'group1' }),
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) {
-        throw new Error(toUserError(data?.detail || data?.message, 'Model connection failed. Check the model name, base URL, and API key.'));
-      }
+      const { data } = await api.post('/profile/byok/test', { ...buildPayload(), group: quickMode ? 'group2' : 'group1' });
       setTestStatus(data?.message || 'Model connection verified.');
     } catch (err: unknown) {
       setError(toUserError(err, 'Model connection failed. Check the model name, base URL, and API key.'));
@@ -327,26 +292,6 @@ export const BillingModal = ({
 
     try {
       localStorage.setItem('agentic_byok_key', JSON.stringify(payload));
-
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (session?.access_token) {
-          const resp = await fetch(`${API_BASE}/profile/byok`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${session.access_token}`,
-            },
-            body: JSON.stringify(payload),
-          });
-          if (!resp.ok) {
-            const errData = await resp.json().catch(() => ({}));
-            console.warn('BYOK server save failed:', errData);
-          }
-        }
-      } catch (serverErr) {
-        console.warn('BYOK server save error (non-fatal):', serverErr);
-      }
 
       setSaved(true);
       setTimeout(() => { onKeySaved(); onClose(); }, 600);
@@ -444,8 +389,8 @@ export const BillingModal = ({
                 <div className="byok-onboarding-card">
                   <span className="byok-onboarding-icon"><LockKeyhole size={16} /></span>
                   <div>
-                    <strong>Encrypted and synced to your account</strong>
-                    <p>Keys are encrypted before storage and synced to your profile when sign-in is available.</p>
+                    <strong>Stored locally on this machine</strong>
+                    <p>Model credentials stay in the desktop workspace and are never sent to AgentIC cloud.</p>
                   </div>
                 </div>
                 <div className="byok-onboarding-card">
@@ -521,8 +466,7 @@ export const BillingModal = ({
                       onChange={(e) => {
                         const val = e.target.value;
                         setQuickKey(val);
-                        if (val.startsWith('sk-ant-')) updateQuickPreset('anthropic');
-                        else if (val.startsWith('gsk_')) updateQuickPreset('groq');
+                        if (val.startsWith('gsk_')) updateQuickPreset('groq');
                         else if (val.startsWith('sk-or-')) updateQuickPreset('openrouter');
                       }}
                       onKeyDown={(e) => {

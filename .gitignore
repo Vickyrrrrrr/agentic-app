@@ -15,6 +15,7 @@ openhands-backend/
 *.tmp
 .DS_Store
 Thumbs.db
+NUL
 __pycache__/
 .pytest_cache/
 .mypy_cache/
@@ -32,6 +33,9 @@ web/dist/
 web/.vite/
 server/.agentic-state/
 server/logs/
+server/build/
+server/dist/
+server/*.spec.bak
 AgentIC-workspace/
 agentic-workspace/
 *.vcd

@@ -1,18 +1,35 @@
 import { useState } from 'react';
-import { supabase } from '../supabaseClient';
+import { api, API_BASE } from '../api';
+import { saveAuthSession } from '../authSession';
+import { toUserError } from '../utils/errorFormatter';
 
 type AuthMode = 'login' | 'signup';
+type AgenticElectronWindow = Window & {
+  electronAPI?: {
+    openExternal?: (url: string) => Promise<{ success: boolean }>;
+  };
+};
 
 export const AuthPage = ({ onAuth }: { onAuth: () => void }) => {
-  const isDesktopApp =
-    typeof window !== 'undefined' &&
-    ('electronAPI' in window || window.location.protocol === 'file:' || window.location.protocol.startsWith('agentic'));
   const [mode, setMode] = useState<AuthMode>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+
+  const openGoogleSignIn = async () => {
+    setError('');
+    setSuccessMsg('');
+    const url = `${API_BASE}/auth/google/start`;
+    const desktopOpen = (window as AgenticElectronWindow).electronAPI?.openExternal;
+    const result = desktopOpen ? await desktopOpen(url) : null;
+    if (!result?.success) {
+      const opened = window.open(url, '_blank', 'noopener,noreferrer');
+      if (!opened) window.location.href = url;
+    }
+    setSuccessMsg('Google sign-in opened in your browser. Choose Open AgentIC Desktop after sign-in.');
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -22,42 +39,23 @@ export const AuthPage = ({ onAuth }: { onAuth: () => void }) => {
 
     try {
       if (mode === 'login') {
-        const { error: err } = await supabase.auth.signInWithPassword({ email, password });
-        if (err) throw err;
+        const { data } = await api.post('/auth/password-login', { email, password });
+        if (!data?.access_token) throw new Error('Sign-in failed. Check your email and password.');
+        saveAuthSession(data);
         onAuth();
       } else {
-        const { error: err } = await supabase.auth.signUp({ 
-          email, 
-          password,
-          options: {
-            emailRedirectTo: window.location.origin
-          }
-        });
-        if (err) throw err;
-        setSuccessMsg('We sent you a confirmation link. Check your email to continue.');
-      }
-    } catch (err: any) {
-      setError(err.message || 'Authentication failed');
-    }
-    setLoading(false);
-  };
-
-  const handleGoogleLogin = async () => {
-    setError('');
-    const redirectTo = isDesktopApp 
-      ? 'agentic://auth-callback' 
-      : window.location.origin;
-
-    const { error: err } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: redirectTo,
-        queryParams: {
-          prompt: 'select_account'
+        const { data } = await api.post('/auth/signup', { email, password });
+        if (data?.access_token) {
+          saveAuthSession(data);
+          onAuth();
+        } else {
+          setSuccessMsg(data?.message || 'Account created. Check your email to continue.');
         }
       }
-    });
-    if (err) setError(err.message || 'Google sign in failed');
+    } catch (err: any) {
+      setError(toUserError(err, 'Authentication failed. Please try again.'));
+    }
+    setLoading(false);
   };
 
   return (
@@ -199,7 +197,7 @@ export const AuthPage = ({ onAuth }: { onAuth: () => void }) => {
             <span className="auth-provider-line"></span>
           </div>
 
-          <button className="auth-google-btn" onClick={handleGoogleLogin}>
+          <button className="auth-google-btn" onClick={openGoogleSignIn}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
               <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>

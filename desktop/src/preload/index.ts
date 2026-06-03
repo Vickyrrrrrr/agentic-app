@@ -10,10 +10,6 @@ export interface ElectronAPI {
   openExternal: (url: string) => Promise<{ success: boolean }>
   onDeepLink: (callback: (path: string) => void) => () => void
   onBackendReady: (callback: () => void) => () => void
-  executeLocalEDA: (
-    command: string,
-    cwd?: string
-  ) => Promise<{ success: boolean; stdout: string; stderr: string; code: number }>
 }
 
 const electronAPI: ElectronAPI = {
@@ -42,10 +38,7 @@ const electronAPI: ElectronAPI = {
     return () => {
       ipcRenderer.removeListener('backend-ready', handler)
     }
-  },
-
-  executeLocalEDA: (command: string, cwd?: string) =>
-    ipcRenderer.invoke('execute-local-eda', command, cwd)
+  }
 }
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI)

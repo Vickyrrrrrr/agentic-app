@@ -2,6 +2,7 @@ import os
 import platform
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 
@@ -67,6 +68,66 @@ def configured_tools_for(capability: str) -> tuple[str, ...]:
 def _license_env_status() -> dict:
     keys = ("LM_LICENSE_FILE", "CDS_LIC_FILE", "SNPSLMD_LICENSE_FILE", "MGLS_LICENSE_FILE")
     return {key: bool(os.environ.get(key)) for key in keys}
+
+
+def _wsl_status() -> dict:
+    if platform.system().lower() != "windows":
+        return {"available": False, "required": False, "distros": []}
+    if not shutil.which("wsl"):
+        return {"available": False, "required": False, "distros": []}
+    try:
+        result = subprocess.run(["wsl", "-l", "-q"], capture_output=True, text=True, timeout=8)
+        distros = [
+            line.strip("\x00\r\n ")
+            for line in result.stdout.splitlines()
+            if line.strip("\x00\r\n ")
+        ]
+        return {"available": result.returncode == 0, "required": False, "distros": distros}
+    except Exception:
+        return {"available": True, "required": False, "distros": []}
+
+
+def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_line=None) -> dict:
+    """Run a command, streaming each output line via on_line callback. Returns same dict as run_bash."""
+    try:
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=workspace_root,
+        )
+
+        output_lines = []
+        def reader():
+            try:
+                for line in process.stdout:
+                    stripped = line.rstrip("\n\r")
+                    output_lines.append(stripped)
+                    if on_line:
+                        on_line(stripped)
+            except ValueError:
+                pass
+
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+
+        if thread.is_alive():
+            process.kill()
+            thread.join(timeout=5)
+
+        process.wait(timeout=5)
+        full_output = "\n".join(output_lines)
+        return {
+            "success": process.returncode == 0,
+            "stdout": full_output,
+            "stderr": "",
+            "code": process.returncode,
+        }
+    except Exception as e:
+        return {"success": False, "stdout": "", "stderr": str(e), "code": -1}
 
 
 def run_bash(command: str, workspace_root: str, timeout: int = 300) -> dict:
@@ -176,6 +237,7 @@ def detect_environment() -> dict:
 
     images = _docker_images()
     pdk_dirs = _pdk_dirs()
+    wsl = _wsl_status()
     has_sim = any(tools.get(tool) for tool in configured_tools_for("simulation"))
     has_synth = any(tools.get(tool) for tool in configured_tools_for("synthesis"))
     has_pnr_native = any(tools.get(tool) for tool in configured_tools_for("pnr"))
@@ -191,6 +253,7 @@ def detect_environment() -> dict:
         "physical_verification": has_physical_verify,
         "pdk": bool(pdk_dirs),
         "docker": bool(tools.get("docker")),
+        "wsl": wsl["available"],
     }
 
     missing = []
@@ -234,6 +297,7 @@ def detect_environment() -> dict:
             for capability, (env_name, _defaults) in CAPABILITY_TOOL_ENVS.items()
         },
         "license_env": _license_env_status(),
+        "wsl": wsl,
         "capabilities": capabilities,
         "missing": missing,
         "capability_tier": tier,

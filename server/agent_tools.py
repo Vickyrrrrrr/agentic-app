@@ -5,7 +5,7 @@ import urllib.parse
 import glob as glob_mod
 from html.parser import HTMLParser
 
-from local_tools import run_bash
+from local_tools import run_bash, run_bash_stream
 
 
 class _DDGResultParser(HTMLParser):
@@ -25,6 +25,42 @@ class _DDGResultParser(HTMLParser):
             if text:
                 self.results.append(f"{text} — {self._link}")
             self._capture = False
+
+
+def _env_true(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _looks_sensitive_web_query(query: str) -> bool:
+    """Conservative guard against leaking local/proprietary details to web search."""
+    lowered = (query or "").lower()
+    sensitive_markers = (
+        "/home/",
+        "/users/",
+        "/mnt/",
+        "c:\\",
+        "\\\\",
+        "agentic-workspace",
+        "pdk_root",
+        "pdkpath",
+        "pdk_home",
+        "lm_license_file",
+        "cds_lic_file",
+        "snpslmd_license_file",
+        "mgls_license_file",
+        "license.dat",
+    )
+    if any(marker in lowered for marker in sensitive_markers):
+        return True
+    if re.search(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", query or "", re.IGNORECASE):
+        return True
+    if re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", query or ""):
+        return True
+    if re.search(r"(?i)\b(?:token|api[_-]?key|secret|password)\s*[:=]", query or ""):
+        return True
+    if re.search(r"(?i)(?:^|\s)[./~][^\s]*(?:\.lib|\.lef|\.def|\.gds|\.tcl|\.sdc|\.v|\.sv|\.log|\.rpt)\b", query or ""):
+        return True
+    return False
 
 
 ALLOWED_READ_EXTENSIONS = {
@@ -85,8 +121,11 @@ def edit_file(path: str, old_string: str, new_string: str, workspace_root: str) 
         return f"Error editing file: {e}"
 
 
-def bash_tool(command: str, workspace_root: str, timeout: int = 300) -> str:
-    result = run_bash(command, workspace_root, timeout=timeout)
+def bash_tool(command: str, workspace_root: str, timeout: int = 300, on_output=None) -> str:
+    if on_output:
+        result = run_bash_stream(command, workspace_root, timeout=timeout, on_line=on_output)
+    else:
+        result = run_bash(command, workspace_root, timeout=timeout)
     output = ""
     if result["stdout"]:
         output += result["stdout"]
@@ -138,6 +177,16 @@ def glob_tool(pattern: str, workspace_root: str) -> str:
 
 
 def web_search(query: str, max_results: int = 5) -> str:
+    if not _env_true("AGENTIC_ENABLE_WEB_SEARCH"):
+        return (
+            "Web search is disabled for IP safety. Use local files first. "
+            "If public web research is needed, ask the user to enable AGENTIC_ENABLE_WEB_SEARCH=true."
+        )
+    if _looks_sensitive_web_query(query) and not _env_true("AGENTIC_ALLOW_SENSITIVE_WEB_SEARCH"):
+        return (
+            "Web search blocked because the query appears to contain local, license, or proprietary details. "
+            "Ask the user for approval or remove sensitive identifiers before searching public sources."
+        )
     url = f"https://lite.duckduckgo.com/lite/?q={urllib.parse.quote_plus(query)}"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "AgentIC/1.0"})
@@ -151,7 +200,7 @@ def web_search(query: str, max_results: int = 5) -> str:
         return f"Web search error: {e}"
 
 
-def dispatch_tool(name: str, args: dict, workspace_root: str) -> str:
+def dispatch_tool(name: str, args: dict, workspace_root: str, on_output=None) -> str:
     if name == "read":
         return read_file(args["path"], workspace_root)
     elif name == "write":
@@ -160,7 +209,7 @@ def dispatch_tool(name: str, args: dict, workspace_root: str) -> str:
         return edit_file(args["path"], args["old_string"], args["new_string"], workspace_root)
     elif name == "bash":
         timeout = args.get("timeout", 300)
-        return bash_tool(args["command"], workspace_root, timeout=timeout)
+        return bash_tool(args["command"], workspace_root, timeout=timeout, on_output=on_output)
     elif name == "grep":
         path = args.get("path", ".")
         return grep_tool(args["pattern"], path, workspace_root)

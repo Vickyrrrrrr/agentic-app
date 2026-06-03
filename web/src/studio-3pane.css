@@ -1167,6 +1167,123 @@
 .codex-vlsi-subtitle {
   color: var(--studio-muted);
   font-size: 0.78rem;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-vlsi-icon-button {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+  border: 1px solid var(--studio-line);
+  border-radius: 8px;
+  background: var(--studio-panel);
+  color: var(--studio-muted);
+  cursor: pointer;
+}
+
+.codex-vlsi-icon-button:hover {
+  color: var(--studio-text);
+  background: var(--studio-panel-2);
+}
+
+.codex-vlsi-icon-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.codex-vlsi-history-strip {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.75rem 1.05rem;
+  border-bottom: 1px solid var(--studio-line);
+  background: var(--studio-bg);
+}
+
+.codex-vlsi-history-title {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  color: var(--studio-dim);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.codex-vlsi-history-list {
+  display: grid;
+  gap: 0.38rem;
+  max-height: 142px;
+  overflow-y: auto;
+}
+
+.codex-vlsi-history-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--studio-line);
+  border-radius: 8px;
+  background: var(--studio-panel);
+}
+
+.codex-vlsi-history-item.active {
+  border-color: rgba(215, 170, 115, 0.42);
+  background: var(--studio-panel-2);
+}
+
+.codex-vlsi-history-open,
+.codex-vlsi-history-delete {
+  border: 0;
+  background: transparent;
+  color: var(--studio-muted);
+  cursor: pointer;
+}
+
+.codex-vlsi-history-open {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.56rem 0.68rem;
+  text-align: left;
+}
+
+.codex-vlsi-history-open span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--studio-text);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.codex-vlsi-history-open em {
+  color: var(--studio-dim);
+  font-size: 0.68rem;
+  font-style: normal;
+}
+
+.codex-vlsi-history-delete {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  opacity: 0.55;
+}
+
+.codex-vlsi-history-delete:hover {
+  color: var(--studio-bad);
+  opacity: 1;
+  background: rgba(226, 125, 115, 0.08);
 }
 
 .codex-vlsi-thread {

@@ -1,7 +1,7 @@
 import axios, { AxiosError } from 'axios';
-import { supabase } from './supabaseClient';
 import type { ApiError } from './lib/types';
 import { toUserError } from './utils/errorFormatter';
+import { getAuthHeader } from './authSession';
 
 const isDesktopApp = typeof window !== 'undefined' && (
   'electronAPI' in window || 
@@ -29,24 +29,13 @@ export const api = axios.create({
   },
 });
 
-export const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
+export const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL) || isDesktopApp;
 
 export const getAuthHeaders = async (
   extra: Record<string, string> = {}
 ): Promise<Record<string, string>> => {
   const headers: Record<string, string> = { ...extra };
-  if (!AUTH_ENABLED) return headers;
-
-  try {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (session?.access_token) {
-      headers.Authorization = `Bearer ${session.access_token}`;
-    }
-  } catch {
-    // Keep unauthenticated requests possible in local/dev mode.
-  }
-
-  return headers;
+  return { ...headers, ...(await getAuthHeader()) };
 };
 
 export const getSseHeaders = async (
@@ -59,15 +48,9 @@ export const getSseHeaders = async (
   });
 
 api.interceptors.request.use(async (config) => {
-  if (!AUTH_ENABLED) return config;
-  
-  try {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (session?.access_token) {
-      config.headers.Authorization = `Bearer ${session.access_token}`;
-    }
-  } catch {
-    // No session — request goes without auth
+  const authHeader = await getAuthHeader();
+  if (authHeader.Authorization) {
+    config.headers.Authorization = authHeader.Authorization;
   }
   return config;
 });

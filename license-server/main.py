@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import hmac
 import hashlib
+import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlencode
 
 import httpx
 import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, RedirectResponse
 from jwt import PyJWKClient
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -29,6 +32,7 @@ def _optional_env(name: str) -> str | None:
 
 
 SUPABASE_URL = _optional_env("SUPABASE_URL")
+SUPABASE_ANON_KEY = _optional_env("SUPABASE_ANON_KEY")
 SUPABASE_SERVICE_ROLE_KEY = _optional_env("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_JWT_SECRET = _optional_env("SUPABASE_JWT_SECRET")
 SUPABASE_JWKS_URL = _optional_env("SUPABASE_JWKS_URL")
@@ -51,6 +55,17 @@ ALLOWED_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
+PUBLIC_BASE_URL = os.getenv("AGENTIC_PUBLIC_BASE_URL", "https://api.buildstack.live").rstrip("/")
+BUILDSTACK_AGENTIC_SUCCESS_URL = os.getenv(
+    "AGENTIC_CHECKOUT_SUCCESS_URL",
+    "https://buildstack.live/agentic/success",
+).strip()
+PLAN_ALIASES = {
+    "starter": "starter",
+    "builder": "starter",
+    "pro": "pro",
+    "studio": "pro",
+}
 
 
 app = FastAPI(title="AgentIC License Server", version="1.0.0")
@@ -69,6 +84,40 @@ class CheckoutCreateResponse(BaseModel):
 
 class CheckoutCreateRequest(BaseModel):
     plan: str | None = None
+
+
+class AuthPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=6, max_length=4096)
+
+
+class AuthRefreshRequest(BaseModel):
+    refresh_token: str = Field(min_length=16, max_length=8192)
+
+
+class AuthUser(BaseModel):
+    id: str
+    email: str | None = None
+
+
+class AuthSessionResponse(BaseModel):
+    access_token: str | None = None
+    refresh_token: str | None = None
+    expires_in: int | None = None
+    expires_at: int | None = None
+    token_type: str = "bearer"
+    user: AuthUser | None = None
+    message: str | None = None
+
+
+class PlanResponse(BaseModel):
+    id: str
+    name: str
+    description: str
+    build_limit: int | None = None
+    price_display: str
+    features: list[str]
+    popular: bool = False
 
 
 class LicenseStatusResponse(BaseModel):
@@ -161,6 +210,31 @@ def _require_supabase() -> tuple[str, str]:
     return SUPABASE_URL.rstrip("/"), SUPABASE_SERVICE_ROLE_KEY
 
 
+def _require_supabase_auth() -> tuple[str, str]:
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise HTTPException(status_code=503, detail="Account sign-in is not configured")
+    return SUPABASE_URL.rstrip("/"), SUPABASE_ANON_KEY
+
+
+def _normalize_plan(plan: str | None) -> str:
+    candidate = (plan or PLAN_NAME or "pro").strip().lower()
+    normalized = PLAN_ALIASES.get(candidate)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Unknown AgentIC plan")
+    return normalized
+
+
+def _supabase_google_redirect(redirect_to: str) -> RedirectResponse:
+    if not SUPABASE_URL:
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured")
+    target = (
+        f"{SUPABASE_URL.rstrip('/')}/auth/v1/authorize"
+        f"?provider=google"
+        f"&redirect_to={quote(redirect_to, safe='')}"
+    )
+    return RedirectResponse(target)
+
+
 def _supabase_headers() -> dict[str, str]:
     _, key = _require_supabase()
     return {
@@ -210,6 +284,51 @@ async def _supabase_upsert(path: str, payload: dict[str, Any], on_conflict: str)
         )
     if response.status_code >= 400:
         raise HTTPException(status_code=502, detail="Supabase upsert failed")
+    return response.json()
+
+
+def _auth_response(data: dict[str, Any], message: str | None = None) -> AuthSessionResponse:
+    user_data = data.get("user") if isinstance(data.get("user"), dict) else {}
+    expires_in = data.get("expires_in")
+    expires_at = data.get("expires_at")
+    if expires_at is None and isinstance(expires_in, int):
+        expires_at = int(time.time()) + expires_in
+    return AuthSessionResponse(
+        access_token=data.get("access_token"),
+        refresh_token=data.get("refresh_token"),
+        expires_in=expires_in,
+        expires_at=expires_at,
+        token_type=data.get("token_type") or "bearer",
+        user=AuthUser(id=str(user_data.get("id") or user_data.get("sub") or ""), email=user_data.get("email"))
+        if user_data
+        else None,
+        message=message,
+    )
+
+
+async def _supabase_auth_post(path: str, payload: dict[str, Any], params: dict[str, str] | None = None) -> dict[str, Any]:
+    base_url, anon_key = _require_supabase_auth()
+    headers = {
+        "apikey": anon_key,
+        "Authorization": f"Bearer {anon_key}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            f"{base_url}/auth/v1/{path}",
+            headers=headers,
+            params=params,
+            json=payload,
+        )
+    if response.status_code >= 400:
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        message = body.get("msg") or body.get("message") or body.get("error_description")
+        if response.status_code in {400, 401, 422}:
+            raise HTTPException(status_code=401, detail=message or "Sign-in failed")
+        raise HTTPException(status_code=502, detail="Account service is temporarily unavailable")
     return response.json()
 
 
@@ -279,6 +398,213 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/plans", response_model=list[PlanResponse])
+async def plans() -> list[PlanResponse]:
+    starter_limit = int(os.getenv("AGENTIC_STARTER_BUILDS", "10"))
+    return [
+        PlanResponse(
+            id="starter",
+            name=os.getenv("AGENTIC_STARTER_PLAN_NAME", "Starter"),
+            description=f"{starter_limit} successful chip builds",
+            build_limit=starter_limit,
+            price_display=os.getenv("AGENTIC_STARTER_PRICE_DISPLAY", "$20"),
+            features=[
+                f"{starter_limit} successful chip builds",
+                "RTL generation and verification",
+                "Local EDA tool execution",
+                "Open-source or proprietary flow support",
+                "Sanitized build progress",
+                "Email support",
+            ],
+        ),
+        PlanResponse(
+            id="pro",
+            name=os.getenv("AGENTIC_PRO_PLAN_NAME", "Pro (Unlimited)"),
+            description="Unlimited successful chip builds",
+            build_limit=None,
+            price_display=os.getenv("AGENTIC_PRO_PRICE_DISPLAY", "$200"),
+            popular=True,
+            features=[
+                "Unlimited successful chip builds",
+                "RTL generation and verification",
+                "Local EDA tool execution",
+                "Open-source or proprietary flow support",
+                "Sanitized build progress",
+                "Priority support",
+            ],
+        ),
+    ]
+
+
+@app.post("/auth/password-login", response_model=AuthSessionResponse)
+async def password_login(payload: AuthPasswordRequest) -> AuthSessionResponse:
+    data = await _supabase_auth_post(
+        "token",
+        {"email": payload.email, "password": payload.password},
+        params={"grant_type": "password"},
+    )
+    return _auth_response(data)
+
+
+@app.post("/auth/signup", response_model=AuthSessionResponse)
+async def signup(payload: AuthPasswordRequest) -> AuthSessionResponse:
+    data = await _supabase_auth_post("signup", {"email": payload.email, "password": payload.password})
+    response = _auth_response(data, message="Account created. Check your email if confirmation is required.")
+    if not response.access_token:
+        response.message = "Account created. Check your email to confirm your sign-in before continuing."
+    return response
+
+
+@app.post("/auth/refresh", response_model=AuthSessionResponse)
+async def refresh(payload: AuthRefreshRequest) -> AuthSessionResponse:
+    data = await _supabase_auth_post(
+        "token",
+        {"refresh_token": payload.refresh_token},
+        params={"grant_type": "refresh_token"},
+    )
+    return _auth_response(data)
+
+
+@app.get("/auth/google/start")
+async def google_start() -> RedirectResponse:
+    return _supabase_google_redirect(f"{PUBLIC_BASE_URL}/auth/google/landing")
+
+
+@app.get("/purchase/start")
+async def purchase_start(plan: str = "pro") -> RedirectResponse:
+    normalized_plan = _normalize_plan(plan)
+    redirect_to = f"{PUBLIC_BASE_URL}/auth/google/landing?{urlencode({'flow': 'checkout', 'plan': normalized_plan})}"
+    return _supabase_google_redirect(redirect_to)
+
+
+@app.get("/auth/google/landing", response_class=HTMLResponse)
+async def google_landing(request: Request) -> HTMLResponse:
+    flow = (request.query_params.get("flow") or "desktop").strip().lower()
+    if flow not in {"desktop", "checkout"}:
+        flow = "desktop"
+    plan = _normalize_plan(request.query_params.get("plan")) if flow == "checkout" else ""
+    checkout_url = f"{PUBLIC_BASE_URL}/checkout/create"
+    return HTMLResponse(
+        """
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title id="pageTitle">AgentIC Account</title>
+    <style>
+      :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #050505; color: #f5f1ea; }
+      main { width: min(560px, calc(100vw - 40px)); padding: 34px; border: 1px solid rgba(255,255,255,.12); border-radius: 18px; background: #0d0d0c; box-shadow: 0 24px 80px rgba(0,0,0,.35); text-align: center; }
+      .mark { width: 34px; height: 34px; margin: 0 auto 18px; display: grid; place-items: center; border-radius: 10px; background: rgba(230,116,62,.14); color: #e6743e; font-weight: 800; }
+      h1 { margin: 0; font-size: clamp(30px, 5vw, 48px); line-height: 1; letter-spacing: 0; }
+      p { margin: 16px auto 0; color: #aaa39a; line-height: 1.55; max-width: 440px; }
+      a, button { margin-top: 28px; display: inline-flex; align-items: center; justify-content: center; min-height: 46px; padding: 0 22px; border-radius: 999px; border: 0; background: #f1e8d9; color: #16110d; font-weight: 800; text-decoration: none; cursor: pointer; }
+      .muted { margin-top: 16px; font-size: 13px; color: #756f68; }
+      .error { display: none; margin-top: 22px; padding: 12px 14px; border: 1px solid rgba(230,116,62,.45); border-radius: 12px; color: #f0a37a; background: rgba(230,116,62,.08); }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark">A</div>
+      <h1 id="headline">You're signed in</h1>
+      <p id="copy">Return to AgentIC Desktop to verify your license, configure your model, and continue building locally.</p>
+      <a id="openDesktop" href="#">Open AgentIC Desktop</a>
+      <button id="retryCheckout" class="hidden" type="button">Continue to Checkout</button>
+      <div class="muted">If nothing happens, make sure AgentIC Desktop is running and click again.</div>
+      <div id="error" class="error">Google sign-in completed, but the secure account token was not returned. Please try signing in again.</div>
+    </main>
+    <script>
+      const flow = __FLOW__;
+      const plan = __PLAN__;
+      const checkoutUrl = __CHECKOUT_URL__;
+      const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+      const accessToken = hash.get("access_token");
+      const refreshToken = hash.get("refresh_token");
+      const expiresAt = hash.get("expires_at");
+      const expiresIn = hash.get("expires_in");
+      const tokenType = hash.get("token_type") || "bearer";
+      const link = document.getElementById("openDesktop");
+      const retryCheckout = document.getElementById("retryCheckout");
+      const error = document.getElementById("error");
+      const headline = document.getElementById("headline");
+      const copy = document.getElementById("copy");
+      const muted = document.querySelector(".muted");
+
+      async function continueToCheckout() {
+        if (!accessToken) {
+          link.style.display = "none";
+          retryCheckout.classList.add("hidden");
+          error.style.display = "block";
+          return;
+        }
+        error.style.display = "none";
+        retryCheckout.disabled = true;
+        retryCheckout.textContent = "Preparing checkout...";
+        try {
+          const response = await fetch(checkoutUrl, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ plan }),
+          });
+          if (!response.ok) {
+            throw new Error("checkout_failed");
+          }
+          const body = await response.json();
+          if (!body.checkout_url) {
+            throw new Error("checkout_missing_url");
+          }
+          window.location.href = body.checkout_url;
+        } catch (_) {
+          retryCheckout.disabled = false;
+          retryCheckout.textContent = "Try Checkout Again";
+          error.textContent = "We could not prepare checkout securely. Please try again in a moment.";
+          error.style.display = "block";
+        }
+      }
+
+      if (flow === "checkout") {
+        document.title = "Preparing AgentIC Checkout";
+        headline.textContent = "Preparing checkout";
+        copy.textContent = "Your Google account is verified. AgentIC is opening the secure Lemon Squeezy checkout for your selected plan.";
+        link.style.display = "none";
+        muted.textContent = "No chip source, prompts, logs, PDK files, or artifacts are sent during checkout.";
+        retryCheckout.classList.remove("hidden");
+        retryCheckout.addEventListener("click", continueToCheckout);
+        continueToCheckout();
+      } else {
+        document.title = "Open AgentIC Desktop";
+        retryCheckout.classList.add("hidden");
+      if (accessToken && refreshToken) {
+        const deepLink = new URL("agentic://auth-callback");
+        deepLink.hash = new URLSearchParams({
+          access_token: accessToken,
+          refresh_token: refreshToken,
+          expires_at: expiresAt || "",
+          expires_in: expiresIn || "",
+          token_type: tokenType,
+        }).toString();
+        link.href = deepLink.toString();
+        setTimeout(() => { window.location.href = link.href; }, 600);
+      } else {
+        link.style.display = "none";
+        error.style.display = "block";
+      }
+      }
+    </script>
+  </body>
+</html>
+        """
+        .replace("__FLOW__", json.dumps(flow))
+        .replace("__PLAN__", json.dumps(plan))
+        .replace("__CHECKOUT_URL__", json.dumps(checkout_url))
+    )
+
+
 @app.get("/license/status", response_model=LicenseStatusResponse)
 async def license_status(user: UserContext = Depends(current_user)) -> LicenseStatusResponse:
     subscription = await _active_subscription(user.user_id)
@@ -306,7 +632,7 @@ async def _create_checkout_for_plan(request: CheckoutCreateRequest, user: UserCo
     if not all([LEMON_SQUEEZY_API_KEY, LEMON_SQUEEZY_STORE_ID]):
         raise HTTPException(status_code=503, detail="Lemon Squeezy checkout is not configured")
 
-    plan = (request.plan or PLAN_NAME).lower().strip()
+    plan = _normalize_plan(request.plan)
     variant_by_plan = {
         "starter": _optional_env("LEMON_SQUEEZY_STARTER_VARIANT_ID"),
         "pro": _optional_env("LEMON_SQUEEZY_PRO_VARIANT_ID") or LEMON_SQUEEZY_VARIANT_ID,
@@ -330,6 +656,7 @@ async def _create_checkout_for_plan(request: CheckoutCreateRequest, user: UserCo
                 },
                 "product_options": {
                     "enabled_variants": [int(variant_id)],
+                    "redirect_url": BUILDSTACK_AGENTIC_SUCCESS_URL,
                 },
             },
             "relationships": {

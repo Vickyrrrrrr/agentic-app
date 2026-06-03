@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Check, Zap, Infinity as InfinityIcon, ArrowLeft, Cpu, KeyRound, AlertCircle } from 'lucide-react';
-import type { Session } from '@supabase/supabase-js';
-import { supabase } from '../supabaseClient';
+import { Check, Zap, Infinity as InfinityIcon, ArrowLeft, Cpu, KeyRound, AlertCircle, Download } from 'lucide-react';
 import { api } from '../api';
+import { getStoredAuthSession, type AgenticAuthSession } from '../authSession';
 import { toUserError } from '../utils/errorFormatter';
 
 type AgenticElectronWindow = Window & {
@@ -22,7 +21,7 @@ type Plan = {
   popular?: boolean;
 };
 
-const PLANS: Plan[] = [
+const FALLBACK_PLANS: Plan[] = [
   {
     id: 'starter',
     name: 'Starter',
@@ -57,12 +56,25 @@ const PLANS: Plan[] = [
   },
 ];
 
+const AGENTIC_DOWNLOAD_URL = 'https://buildstack.live/agentic/download';
+
 export function Pricing({ onBack }: { onBack?: () => void }) {
   const [loading, setLoading] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<AgenticAuthSession | null>(null);
+  const [plans, setPlans] = useState<Plan[]>(FALLBACK_PLANS);
   const [currentPlan, setCurrentPlan] = useState<string | null>(null);
   const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null);
+
+  async function loadPlans() {
+    try {
+      const { data } = await api.get('/plans');
+      const incoming = Array.isArray(data?.plans) ? data.plans : Array.isArray(data) ? data : [];
+      if (incoming.length) setPlans(incoming);
+    } catch {
+      setPlans(FALLBACK_PLANS);
+    }
+  }
 
   async function loadBillingStatus() {
     try {
@@ -79,7 +91,8 @@ export function Pricing({ onBack }: { onBack?: () => void }) {
   }
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }: { data: { session: Session | null } }) => setSession(data.session));
+    setSession(getStoredAuthSession());
+    loadPlans();
     loadBillingStatus();
   }, []);
 
@@ -93,6 +106,8 @@ export function Pricing({ onBack }: { onBack?: () => void }) {
       }
     }
   };
+
+  const openDownloadPage = () => openCheckoutUrl(AGENTIC_DOWNLOAD_URL);
 
   const handlePurchase = async (planId: string) => {
     if (!session?.user) {
@@ -150,7 +165,7 @@ export function Pricing({ onBack }: { onBack?: () => void }) {
           <div className="pricing-current-badge">
             <Check size={15} />
             <span>
-              You have an active <strong>{PLANS.find(p => p.id === currentPlan)?.name}</strong> plan.
+              You have an active <strong>{plans.find(p => p.id === currentPlan)?.name || currentPlan}</strong> plan.
             </span>
           </div>
         </div>
@@ -187,9 +202,22 @@ export function Pricing({ onBack }: { onBack?: () => void }) {
         </div>
       )}
 
+      <div className="pricing-checkout-fallback pricing-download-fallback">
+        <div>
+          <strong>Need the desktop app?</strong>
+          <p>Download the latest AgentIC Desktop build, then sign in with the same Google account used for checkout.</p>
+        </div>
+        <div className="pricing-checkout-actions">
+          <button className="pricing-btn pricing-checkout-btn" onClick={openDownloadPage}>
+            <Download size={15} />
+            Download Desktop
+          </button>
+        </div>
+      </div>
+
       {/* Plan Cards */}
       <div className="pricing-cards">
-        {PLANS.map((plan, i) => (
+        {plans.map((plan, i) => (
           <motion.div
             key={plan.id}
             className={`pricing-card${plan.popular ? ' pricing-card--popular' : ''}`}
