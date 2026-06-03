@@ -67,7 +67,9 @@ export default defineConfig({
     plugins: [react()],
     resolve: {
       alias: {
-        '@': resolve(__dirname, '../web/src')
+        '@': resolve(__dirname, '../web/src'),
+        'react/jsx-runtime': resolve(__dirname, 'node_modules/react/jsx-runtime.js'),
+        'react/jsx-dev-runtime': resolve(__dirname, 'node_modules/react/jsx-dev-runtime.js')
       }
     }
   }
