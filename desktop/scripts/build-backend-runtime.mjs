@@ -28,9 +28,9 @@ const targetPath = join(targetDir, executableName)
 
 const pythonCandidates = platform === 'win32'
   ? [
+      ['python3', []],
       ['py', ['-3']],
       ['python', []],
-      ['python3', []],
     ]
   : [
       ['python3', []],

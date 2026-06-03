@@ -6,3 +6,4 @@ out/
 Thumbs.db
 .env
 .env.local
+resources/backend/
