@@ -54,4 +54,10 @@ jobs:
         working-directory: desktop
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: npx electron-builder --publish always
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          echo "GH_TOKEN is set: $([ -n "$GH_TOKEN" ] && echo yes || echo no)"
+          echo "GH_TOKEN length: ${#GH_TOKEN}"
+          export GH_TOKEN="$GH_TOKEN"
+          export GITHUB_TOKEN="$GH_TOKEN"
+          npx --no-install electron-builder --publish always
