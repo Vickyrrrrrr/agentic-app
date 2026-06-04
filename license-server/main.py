@@ -358,6 +358,30 @@ async def _active_subscription(user_id: str) -> dict[str, Any] | None:
     return None
 
 
+def normalize_pem_private_key(key_str: str) -> str:
+    key_str = key_str.strip().strip('"').strip("'")
+    key_str = key_str.replace("\\n", "\n").replace("\\r", "\r")
+    
+    header_marker = "-----BEGIN RSA PRIVATE KEY-----"
+    footer_marker = "-----END RSA PRIVATE KEY-----"
+    if header_marker not in key_str:
+        header_marker = "-----BEGIN PRIVATE KEY-----"
+        footer_marker = "-----END PRIVATE KEY-----"
+        
+    if header_marker in key_str:
+        parts = key_str.split(header_marker)
+        if len(parts) > 1:
+            body_and_footer = parts[1]
+            body_parts = body_and_footer.split(footer_marker)
+            if len(body_parts) > 0:
+                body = body_parts[0]
+                body_clean = "".join(body.split())
+                lines = [body_clean[i:i+64] for i in range(0, len(body_clean), 64)]
+                normalized = f"{header_marker}\n" + "\n".join(lines) + f"\n{footer_marker}"
+                return normalized
+    return key_str
+
+
 def _signed_entitlement(user: UserContext, subscription: dict[str, Any]) -> str:
     private_key_from_file = None
     if ENTITLEMENT_JWT_PRIVATE_KEY_FILE:
@@ -374,6 +398,15 @@ def _signed_entitlement(user: UserContext, subscription: dict[str, Any]) -> str:
     use_rsa = bool(private_key_from_file or ENTITLEMENT_JWT_PRIVATE_KEY)
     algorithm = "RS256" if use_rsa else "HS256"
     key_id = "agentic-rs256" if use_rsa else "agentic-hs256"
+    
+    if use_rsa:
+        try:
+            signing_key = normalize_pem_private_key(signing_key)
+        except Exception:
+            pass
+    else:
+        signing_key = signing_key.strip('"').strip("'").replace("\\n", "\n").replace("\\r", "\r")
+
     payload = {
         "iss": "agentic-license-server",
         "aud": "agentic-desktop",
@@ -387,7 +420,7 @@ def _signed_entitlement(user: UserContext, subscription: dict[str, Any]) -> str:
     }
     return jwt.encode(
         payload,
-        signing_key.replace("\\n", "\n"),
+        signing_key,
         algorithm=algorithm,
         headers={"kid": key_id},
     )
@@ -467,25 +500,32 @@ async def refresh(payload: AuthRefreshRequest) -> AuthSessionResponse:
 
 @app.get("/auth/google/start")
 async def google_start() -> RedirectResponse:
-    return _supabase_google_redirect(f"{PUBLIC_BASE_URL}/auth/google/landing")
+    response = _supabase_google_redirect(f"{PUBLIC_BASE_URL}/auth/google/landing")
+    response.set_cookie("agentic_flow", "desktop", max_age=3600, secure=True, samesite="lax")
+    return response
 
 
 @app.get("/purchase/start")
 async def purchase_start(plan: str = "pro") -> RedirectResponse:
     normalized_plan = _normalize_plan(plan)
-    redirect_to = f"{PUBLIC_BASE_URL}/auth/google/landing?{urlencode({'flow': 'checkout', 'plan': normalized_plan})}"
-    return _supabase_google_redirect(redirect_to)
+    redirect_to = f"{PUBLIC_BASE_URL}/auth/google/landing"
+    response = _supabase_google_redirect(redirect_to)
+    response.set_cookie("agentic_flow", "checkout", max_age=3600, secure=True, samesite="lax")
+    response.set_cookie("agentic_plan", normalized_plan, max_age=3600, secure=True, samesite="lax")
+    return response
 
 
 @app.get("/auth/google/landing", response_class=HTMLResponse)
 async def google_landing(request: Request) -> HTMLResponse:
-    flow = (request.query_params.get("flow") or "desktop").strip().lower()
+    flow = (request.query_params.get("flow") or request.cookies.get("agentic_flow") or "desktop").strip().lower()
     if flow not in {"desktop", "checkout"}:
         flow = "desktop"
-    plan = _normalize_plan(request.query_params.get("plan")) if flow == "checkout" else ""
+    plan_raw = request.query_params.get("plan") or request.cookies.get("agentic_plan")
+    plan = _normalize_plan(plan_raw) if flow == "checkout" else ""
     checkout_url = f"{PUBLIC_BASE_URL}/checkout/create"
-    return HTMLResponse(
-        """
+    
+    html_content = (
+        r"""
 <!doctype html>
 <html lang="en">
   <head>
@@ -520,11 +560,18 @@ async def google_landing(request: Request) -> HTMLResponse:
       const plan = __PLAN__;
       const checkoutUrl = __CHECKOUT_URL__;
       const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+      const searchParams = new URLSearchParams(window.location.search);
       const accessToken = hash.get("access_token");
       const refreshToken = hash.get("refresh_token");
       const expiresAt = hash.get("expires_at");
       const expiresIn = hash.get("expires_in");
       const tokenType = hash.get("token_type") || "bearer";
+      
+      let errorMsg = hash.get("error_description") || hash.get("error") || searchParams.get("error_description") || searchParams.get("error");
+      if (errorMsg) {
+        errorMsg = decodeURIComponent(errorMsg.replace(/\+/g, ' '));
+      }
+
       const link = document.getElementById("openDesktop");
       const retryCheckout = document.getElementById("retryCheckout");
       const error = document.getElementById("error");
@@ -532,11 +579,16 @@ async def google_landing(request: Request) -> HTMLResponse:
       const copy = document.getElementById("copy");
       const muted = document.querySelector(".muted");
 
+      function showError(defaultMsg) {
+        error.style.display = "block";
+        error.textContent = errorMsg ? "Error: " + errorMsg : defaultMsg;
+      }
+
       async function continueToCheckout() {
         if (!accessToken) {
           link.style.display = "none";
           retryCheckout.classList.add("hidden");
-          error.style.display = "block";
+          showError("Google sign-in completed, but the secure account token was not returned. Please try signing in again.");
           return;
         }
         error.style.display = "none";
@@ -592,7 +644,7 @@ async def google_landing(request: Request) -> HTMLResponse:
         setTimeout(() => { window.location.href = link.href; }, 600);
       } else {
         link.style.display = "none";
-        error.style.display = "block";
+        showError("Google sign-in completed, but the secure account token was not returned. Please try signing in again.");
       }
       }
     </script>
@@ -603,6 +655,11 @@ async def google_landing(request: Request) -> HTMLResponse:
         .replace("__PLAN__", json.dumps(plan))
         .replace("__CHECKOUT_URL__", json.dumps(checkout_url))
     )
+    
+    response = HTMLResponse(html_content)
+    response.delete_cookie("agentic_flow", secure=True, samesite="lax")
+    response.delete_cookie("agentic_plan", secure=True, samesite="lax")
+    return response
 
 
 @app.get("/license/status", response_model=LicenseStatusResponse)

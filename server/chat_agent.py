@@ -40,6 +40,9 @@ TOOL_DEFS = [
     {"type": "function", "function": {
         "name": "web_search", "description": "Search public web resources for datasheets, PDK docs, tool guides, and application notes without sending private project details.",
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer", "default": 5}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "query_pdk", "description": "Query the local PDK (Process Design Kit) for standard cells, routing layers, and library details without manually parsing raw files.",
+        "parameters": {"type": "object", "properties": {"query_type": {"type": "string", "enum": ["list_libraries", "find_cell", "get_layers"]}, "cell_type": {"type": "string", "description": "e.g., nand2, dff (used for find_cell)"}}, "required": ["query_type"]}}},
 ]
 
 SYSTEM_PROMPT = """You are an autonomous VLSI design engineer agent. You follow the same operating model as OpenCode, but for silicon projects.
@@ -55,11 +58,20 @@ SYSTEM_PROMPT = """You are an autonomous VLSI design engineer agent. You follow 
 │  still satisfies the user's stated intent.                   │
 └──────────────────────────────────────────────────────────────┘
 
-LOCAL TOOLING — 6 primary tools + guarded public research:
-You have seven tools: read, write, edit, bash, grep, glob, web_search.
+LOCAL TOOLING — 7 primary tools + PDK + guarded public research:
+You have eight tools: read, write, edit, bash, grep, glob, web_search, query_pdk.
 Use them as needed to design, build, and debug chips inside the local workspace.
 - Run local EDA commands, edit workspace files, and search project sources.
+- SURGICAL EDITING RULE: Prefer using the `edit` tool for surgical modifications on existing files instead of overwriting them. This saves token overhead and avoids introducing regression bugs. Only use `write` to create new files or for a complete rewrite of a small file.
+- IMPORTANT LLM RULE: NEVER announce that you are "starting to work" or "I will update you shortly" in a message. If you output a text message to the user, your turn ends immediately and you CANNOT execute any more tools. You must execute your tool calls immediately. Only message the user when you are completely finished or need their explicit input.
+- ANTI-HALLUCINATION RULE: NEVER claim to have created, saved, or simulated a file unless you have ACTUALLY executed the `write` or `bash` tool to do so. Do not output a summary of work you *plan* to do as if it is already done. You must actually generate every single file using the `write` tool.
+- AUTONOMY RULE: You are an autonomous agent with `bash` and `write` tools. NEVER ask the user to run commands for you (like `chmod`, `mkdir`, etc). If a script or simulation fails because a file or module is missing (e.g., missing RTL modules), DO NOT ask the user "Should I generate the missing modules?". YOU ARE THE DESIGNER. You must instantly use the `write` tool to generate the missing RTL modules or fix the script yourself. Do not ask for permission to do your job. Only use NEEDS_INPUT for high-level design decisions (like architecture choices), never for fixing your own bugs or missing files!
 - Choose the EDA stack, flow, and methodology from the user's goal and available local setup.
+- DISCOVER EDA TOOLS ON DEMAND: do not assume a precomputed list. When you need to
+  know what is installed, use bash() to probe: `which yosys verilator iverilog openroad
+  opensta magic klayout netgen gtkwave make python3 docker` and capture exit codes;
+  or `command -v <tool>` / `<tool> --version` for one-off checks. Only probe when
+  the answer actually matters for the next step — do not waste calls on idle startup.
 - web_search is guarded for IP safety. Use local files first. Only search public,
   non-confidential terms such as public PDK names, public tool docs, or generic
   error categories. Never include local paths, license details, private cell names,
@@ -68,17 +80,18 @@ Use them as needed to design, build, and debug chips inside the local workspace.
   and ask whether to install, use Docker, configure a path, or continue
   with a reduced flow. The user decides what they want to use.
 
-CHIP PLANNING MODE — When user gives a vague idea or asks for suggestions:
-1. Use local knowledge first. Use web_search() only if public research is enabled
-   and the query contains no proprietary/local details
-2. Design a detailed chip plan
-3. Write the plan to <project>/reports/chip_plan.md
-4. Use NEEDS_INPUT to present the plan for user approval
-5. Only start building after the user approves the plan
-Plan template: architecture overview, block diagram, target specifications,
-interfaces, tool flow, PDK requirements, test strategy, risk areas, deliverables.
-If the user gives specific specs (target name, PDK, interface, clock), skip
-planning and go directly to building.
+STRICT EXECUTION RULE:
+You must call tools in every response. A response without tool calls is invalid.
+If you output text instead of calling tools, you will be treated as having completed nothing.
+The ONLY valid text output is:
+- A final summary after ALL design and verification stages pass.
+- NEEDS_INPUT for a genuine architectural decision or missing PDK dependency (never for simulation, compilation, or linting errors).
+
+VERIFICATION LOOP (MANDATORY):
+After each RTL write or edit, you MUST compile and simulate the design using the available simulation tools (e.g. iverilog/vvp).
+Wait for the compile/sim output. If there are any compile errors, testbench failures, or warnings, you MUST fix them immediately by editing the files.
+Repeat this cycle of writing, editing, and simulating until the simulation passes successfully with your expected output.
+You cannot output a final text summary response until the simulation PASSES.
 
 ┌──────────────────────────────────────────────────────────────┐
 │  BUILD ALGORITHM — Follow for every chip task:               │
@@ -158,8 +171,9 @@ RECOMMENDED DIRECTORIES FOR NEW PROJECTS:
   <project>/scripts/    — reusable flow scripts
   <project>/logs/       — raw local tool logs when needed
   <project>/reports/    — build summaries (*.md)
-For a new chip, choose a clear <project> root from the user's request and keep generated files
-under it. Do not create root-level rtl/, tb/, sim/, synth/, pnr/, hardening/, signoff/, or reports/
+For a new chip, you MUST choose a specific <project> root folder named using a concise, structured 1-3 word identifier (e.g., `uart_tx`, `spi_master`, `riscv_core`) and keep generated files under it.
+NEVER use generic folder names like `design`, `project`, `soc_project`, or `rtl_module_design`. The folder name must precisely reflect the actual chip or block requested by the user.
+Do not create root-level rtl/, tb/, sim/, synth/, pnr/, hardening/, signoff/, or reports/
 folders unless the user is continuing an existing root-level workspace layout.
 These are conventions, not constraints. If the user's proprietary/customer flow has a different
 layout, discover it with glob/read/grep and follow that layout.
@@ -170,6 +184,13 @@ FILE QUALITY RULES:
 - Use concise file headers that explain purpose, clock/reset assumptions, and generated status.
 - Do not write one-line HDL/Tcl blobs; structure modules, tasks, always blocks, and scripts clearly.
 - For hardening, preserve each tool's native folder expectations if using OpenLane/OpenROAD/Innovus/ICC2/etc.
+- If visual diagrams are requested or needed (Mermaid block diagrams or WaveDrom timing diagrams):
+  - Save them under the reports/ directory as architecture.mermaid or timing.json.
+  - Mermaid syntax strictly requires newlines (\n). You MUST format the file with proper newlines. DO NOT write the diagram on a single line. Do not use markdown backticks in the file.
+  - CRITICAL MERMAID SYNTAX RULES:
+    1. ALWAYS quote node labels to prevent parse errors! e.g., A["Core (CPU)"]
+    2. NO SPACES in Node IDs! e.g., CoreCPU["..."]
+    3. NO SPACES in Subgraph IDs! e.g., subgraph Core_CPU
 
 RTL RULES (applies to ALL chips — counter, CPU, accelerator, anything):
 - Generate synthesizable RTL suitable for the user's chosen language/tool flow.
@@ -177,12 +198,11 @@ RTL RULES (applies to ALL chips — counter, CPU, accelerator, anything):
 - Preserve the requested interface, clock/reset convention, parameterization, and behavior.
 - Add testbenches/properties/scripts only if they match available tools or user-requested flow.
 
-ASKING THE USER:
-- NEEDS_INPUT: Start with this marker when you need the user to decide or provide something
-- Tool missing after discovery? → "NEEDS_INPUT: <capability> is unavailable. Do you want me to install an open-source tool, use Docker, configure a proprietary tool path, or continue without this stage?"
-- PDK not found? → "NEEDS_INPUT: No PDK path is configured. Set PDK_ROOT/PDKPATH/PDK_HOME/AGENTIC_PDK_SEARCH_PATHS or tell me where the PDK is installed."
-- Chip plan ready for review? → "NEEDS_INPUT: I've designed a chip plan for your idea. Check <project>/reports/chip_plan.md and let me know if you want to proceed or make changes."
-- Truly stuck after many attempts? Explain what you tried and ask for guidance
+BEHAVIORAL POLICIES:
+1. DEPENDENCY POLICY: If any tool returns a JSON status like `DEPENDENCY_MISSING` (e.g., missing PDK or tool), you must IMMEDIATELY halt the workflow. Do not hallucinate physics or try to fake the missing data. Reply with `NEEDS_INPUT:` to explain the missing component and offer resolution options to the user (e.g., "Would you like me to install Volare?").
+2. TRACEABILITY POLICY: The user's original request is the supreme contract. If your code fails timing, area, or DRC, you CANNOT secretly change the user's specs (like lowering the clock speed or bus width) just to pass the test. You must optimize the design or use `NEEDS_INPUT:` to ask for permission to relax constraints.
+3. HUMAN-IN-THE-LOOP POLICY: Execute the complete implementation and verification flow (writing RTL, testbenches, running simulation, and running synthesis) in a single continuous loop. Do NOT pause and ask for approval between spec, RTL writing, and simulation/synthesis/validation. Execute the complete task autonomously. Only pause and use `NEEDS_INPUT:` if you encounter a missing PDK dependency or tool installation issue.
+4. ERROR HANDLING & AUTONOMOUS FIXES: When any simulation, compilation, linting, or synthesis tool returns an error or warning, you must immediately resolve it using all available tools (read, write, edit, grep, glob, bash, query_pdk). Never output a conversational progress report, plan-only text response, or use NEEDS_INPUT to ask the user how to fix it. `NEEDS_INPUT:` is ONLY for missing PDK dependencies or tool installation issues. Simulation failures, synthesis errors, lint warnings — these are BUGS to be fixed, not blockers to ask about. You MUST fix them yourself. Re-run the verification tool immediately after every fix to confirm resolution.
 
 CLEANUP — user asks to "clear", "clean", "delete", "reset", "remove":
 1. bash("ls") to list what exists in workspace
@@ -194,7 +214,22 @@ COMPLETION:
 - Summarize what you built
 - List all created file paths organized by directory
 - Report which EDA tool stages ran and whether they passed, but never include raw commands,
-  tool-call JSON, full logs, or stack traces in the final user-facing response."""
+  tool-call JSON, full logs, or stack traces in the final user-facing response.
+
+┌──────────────────────────────────────────────────────────────┐
+│  FEW-SHOT TRAJECTORY EXAMPLES                                │
+│                                                              │
+│  Example: Complete Implementation and Verification           │
+│  User: "Design a 4-bit counter on sky130 and verify it"      │
+│  Assistant (Round 0): Calls query_pdk to find library.       │
+│  Assistant (Round 1): Calls write to save counter.v.          │
+│  Assistant (Round 2): Calls write to save tb_counter.v.       │
+│  Assistant (Round 3): Calls bash to compile/run simulation.  │
+│  Assistant (Round 4): Calls edit/write to fix simulation bug.│
+│  Assistant (Round 5): Calls bash to compile/run simulation.  │
+│  Assistant (Round 6): Outputs final text message summarizing  │
+│  passed results without intermediate conversational halts.    │
+└──────────────────────────────────────────────────────────────┘"""
 
 
 # ── Conversation boundary note ─────────────────
@@ -218,6 +253,78 @@ def _sanitize_messages(raw: list[dict]) -> list[dict]:
         else:
             sanitized.append(msg)
     return sanitized
+
+
+def _prune_message_history(messages: list[dict]) -> list[dict]:
+    """Prune older tool outputs to save token quota and avoid rate-limiting (429)."""
+    pruned = []
+    tool_count = sum(1 for msg in messages if msg.get("role") == "tool")
+    current_tool_idx = 0
+    for msg in messages:
+        if msg.get("role") == "tool":
+            current_tool_idx += 1
+            if current_tool_idx <= tool_count - 6:
+                content = msg.get("content", "")
+                if len(content) > 300:
+                    msg_copy = dict(msg)
+                    msg_copy["content"] = content[:300] + "\n... [Remaining tool output truncated to save API token quota] ..."
+                    pruned.append(msg_copy)
+                    continue
+        pruned.append(msg)
+    return pruned
+
+
+def _sliding_window_rounds(messages: list[dict], limit_rounds: int = 5) -> list[dict]:
+    """Limit the history to the last `limit_rounds` rounds + the initial system/user prompt header.
+    A round starts with a 'user' or 'assistant' message.
+    """
+    main_system = None
+    first_user = None
+    system_directive = None
+    rest = []
+    
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content") or ""
+        
+        if role == "system" and "autonomous VLSI" in content and main_system is None:
+            main_system = msg
+        elif role == "user" and first_user is None:
+            first_user = msg
+        elif role == "system" and "CRITICAL SYSTEM DIRECTIVE" in content and system_directive is None:
+            system_directive = msg
+        else:
+            rest.append(msg)
+            
+    rounds = []
+    current_round = []
+    
+    for msg in rest:
+        role = msg.get("role")
+        if role in ("user", "assistant"):
+            if current_round:
+                rounds.append(current_round)
+            current_round = [msg]
+        else:
+            current_round.append(msg)
+            
+    if current_round:
+        rounds.append(current_round)
+        
+    if len(rounds) > limit_rounds:
+        rounds = rounds[-limit_rounds:]
+        
+    result = []
+    if main_system:
+        result.append(main_system)
+    if first_user:
+        result.append(first_user)
+    if system_directive:
+        result.append(system_directive)
+        
+    for r in rounds:
+        result.extend(r)
+    return result
 
 
 def _env_true(name: str) -> bool:
@@ -253,6 +360,7 @@ def _looks_like_chip_task(text: str) -> bool:
         "cpu", "soc", "microcontroller", "uart", "gpio", "timer", "pwm",
         "adc", "spi", "i2c", "axi", "wishbone", "hardening", "drc", "lvs",
     ))
+
 
 
 def _tool_enforcement_message(user_text: str) -> dict:
@@ -292,7 +400,7 @@ def _strip_needs_input(text: str) -> str:
 def _sanitize_assistant_text(text: str) -> str:
     """Remove implementation internals from text that is visible to users."""
     text = _strip_needs_input(text)
-    text = re.sub(r"\b(read|write|edit|bash|grep|glob|web_search)\s*\([^)]*\)", "a local workspace step", text, flags=re.DOTALL)
+    text = re.sub(r"\b(read|write|edit|bash|grep|glob|web_search|query_pdk)\s*\([^)]*\)", "a local workspace step", text, flags=re.DOTALL)
     text = re.sub(r"\bbash\s*\(\s*\{[^}]*\}\s*\)", "a local EDA step", text, flags=re.IGNORECASE | re.DOTALL)
     lines = []
     for line in text.splitlines():
@@ -324,10 +432,10 @@ def _safe_project_name(path: str) -> str | None:
         "signoff", "openlane", "openroad", "runs",
     }
     if parts and parts[0].lower() in root_sections:
-        return None
+        return ""
     if len(parts) >= 2 and not parts[0].startswith("."):
         return parts[0]
-    return None
+    return ""
 
 
 def _progress_for_tool_call(name: str, args: dict) -> dict:
@@ -346,7 +454,7 @@ def _progress_for_tool_call(name: str, args: dict) -> dict:
         else:
             event = _progress_event("Updating generated artifacts", "WRITE")
         design_name = _safe_project_name(str(args.get("path", "")))
-        if design_name:
+        if design_name is not None:
             event["design_name"] = design_name
         return event
     if lower_name == "edit":
@@ -355,6 +463,8 @@ def _progress_for_tool_call(name: str, args: dict) -> dict:
         return _progress_event("Searching workspace context", lower_name.upper())
     if lower_name == "web_search":
         return _progress_event("Searching the web", "SEARCH")
+    if lower_name == "query_pdk":
+        return _progress_event("Parsing local PDK files", "DISCOVER")
     if lower_name == "bash":
         command = str(args.get("command", "")).lower()
         if any(token in command for token in ("which ", "env ", "pdk", "license", "command -v", "find ")):
@@ -426,7 +536,19 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
 
     full_messages = [{"role": "system", "content": system_prompt}]
     full_messages.extend(_sanitize_messages(messages))
-
+    
+    # Append a high-priority system directive at the end of the history
+    # to break the context bias loop where the agent repeatedly outputs text plans.
+    full_messages.append({
+        "role": "system",
+        "content": (
+            "CRITICAL SYSTEM DIRECTIVE: The user has authorized you to proceed. "
+            "You MUST execute tools (write, edit, bash, read, etc.) now. "
+            "DO NOT write a text response like 'I will begin...' or 'Stay tuned'. "
+            "If you output a text response without tool calls, you will be terminated. "
+            "Call the appropriate tools immediately to execute the task."
+        )
+    })
     base_url = base_url or "https://api.openai.com/v1"
 
     # Auto-detect Azure OpenAI
@@ -443,13 +565,11 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
     else:
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=120)
 
-    max_rounds = 20
-    debug_events = _env_true("AGENTIC_DEBUG_EVENTS")
+    max_rounds = 60
+    debug_events = os.environ.get("AGENTIC_DEBUG_EVENTS", "true").strip().lower() in {"1", "true", "yes", "on"}
     forced_tool_name: str | None = None
     forced_tool_retries = 0
     has_write_call = False
-    user_text = _plain_user_text(messages)
-    should_enforce_tools = _looks_like_chip_task(user_text)
 
     for _round in range(max_rounds):
         if is_cancelled and is_cancelled():
@@ -461,29 +581,60 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                 "status": "cancelled",
             }
             return
-        logger.info("LLM round %d/%d — sending %d messages", _round + 1, max_rounds, len(full_messages))
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=full_messages,
-                tools=TOOL_DEFS,
-                tool_choice=(
-                    {"type": "function", "function": {"name": forced_tool_name}}
-                    if forced_tool_name
-                    else "auto"
-                ),
+        api_messages = list(full_messages)
+        api_messages = _sliding_window_rounds(api_messages, limit_rounds=5)
+        api_messages = _prune_message_history(api_messages)
+        api_messages.append({
+            "role": "system",
+            "content": (
+                "CRITICAL SYSTEM REMINDER: You are in the middle of executing. "
+                "Do NOT write a text response like 'I will begin...' or 'Stay tuned'. "
+                "You MUST continue calling tools (write, edit, bash, read, etc.) until the design task is complete and fully verified. "
+                "Only when you have completed all file edits and successfully compiled/simulated the design, "
+                "you may write the final text summary response to the user."
             )
-            logger.info("LLM round %d/%d — got response", _round + 1, max_rounds)
-        except Exception as e:
-            logger.error("LLM call failed: %s", e)
-            yield {
-                "type": "error",
-                "content": _user_facing_llm_error(e),
-                "label": "Model provider issue",
-                "stage": "model",
-                "status": "failed",
-            }
-            return
+        })
+        # Add a small delay between rounds to prevent hitting rate limits
+        if _round > 0:
+            time.sleep(0.5)
+
+        logger.info("LLM round %d/%d — sending %d messages", _round + 1, max_rounds, len(api_messages))
+        
+        # Call the API with exponential backoff retries for rate limit (429) errors
+        max_retries = 5
+        retry_delay = 2.0
+        response = None
+        for attempt in range(max_retries):
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=api_messages,
+                    tools=TOOL_DEFS,
+                    tool_choice=(
+                        {"type": "function", "function": {"name": forced_tool_name}}
+                        if forced_tool_name
+                        else "auto"
+                    ),
+                )
+                logger.info("LLM round %d/%d — got response", _round + 1, max_rounds)
+                break
+            except Exception as e:
+                err_msg = str(e).lower()
+                is_rate_limit = "429" in err_msg or "too many requests" in err_msg or "rate limit" in err_msg
+                if is_rate_limit and attempt < max_retries - 1:
+                    sleep_time = retry_delay * (2 ** attempt)
+                    logger.warning("Rate limit (429) encountered. Retrying in %.2fs... (Attempt %d/%d)", sleep_time, attempt + 1, max_retries)
+                    time.sleep(sleep_time)
+                else:
+                    logger.error("LLM call failed: %s", e)
+                    yield {
+                        "type": "error",
+                        "content": _user_facing_llm_error(e),
+                        "label": "Model provider issue",
+                        "stage": "model",
+                        "status": "failed",
+                    }
+                    return
 
         choice = response.choices[0]
         msg = choice.message
@@ -495,6 +646,7 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
             if msg.content:
                 if "NEEDS_INPUT:" in msg.content:
                     yield {"type": "needs_input", "content": _sanitize_assistant_text(msg.content)}
+                    return
                 elif debug_events:
                     yield {"type": "reasoning", "content": msg.content}
 
@@ -557,21 +709,30 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                     yield {"type": "tool-result", "content": result[:1500], "state": fn.name.upper()}
                 full_messages.append({"role": "tool", "tool_call_id": tc.id, "content": result[:5000]})
         else:
-            if should_enforce_tools and not has_write_call and forced_tool_retries < 2:
-                logger.info("LLM returned no tool calls for chip task; enforcing a tool-backed retry")
-                yield _progress_event("Starting a tool-backed design run", "DISCOVER")
-                if msg.content:
-                    full_messages.append({"role": "assistant", "content": _sanitize_assistant_text(msg.content)})
-                full_messages.append(_tool_enforcement_message(user_text))
-                forced_tool_name = "write"
-                forced_tool_retries += 1
-                continue
             # No tool calls — this is a final text response
+
+            if msg.content and "NEEDS_INPUT:" in msg.content:
+                yield {"type": "needs_input", "content": _sanitize_assistant_text(msg.content)}
+                return
+
+            user_text = _plain_user_text(messages)
+            if _looks_like_chip_task(user_text) and _round < max_rounds - 1 and forced_tool_retries < 3:
+                forced_tool_name = "glob"
+                forced_tool_retries += 1
+                logger.info("LLM returned text without tools in round %d; forcing '%s' (retry %d/3)", _round, forced_tool_name, forced_tool_retries)
+                full_messages.append({"role": "assistant", "content": msg.content})
+                full_messages.append({
+                    "role": "system",
+                    "content": (
+                        "CRITICAL DIRECTIVE: You did not make any tool calls. A response without tool calls is invalid. "
+                        "You must execute a tool to advance the chip design, implementation, or verification. "
+                        "Forcing tool execution: 'glob'. Call the 'glob' tool (e.g., with pattern '*')."
+                    )
+                })
+                continue
+
             if msg.content:
-                if "NEEDS_INPUT:" in msg.content:
-                    yield {"type": "needs_input", "content": _sanitize_assistant_text(msg.content)}
-                else:
-                    yield {"type": "response", "content": _sanitize_assistant_text(msg.content)}
+                yield {"type": "response", "content": _sanitize_assistant_text(msg.content)}
             else:
                 logger.info("LLM returned empty response with no tool calls")
             logger.info("Agent conversation complete (no tool calls)")

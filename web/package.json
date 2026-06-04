@@ -23,7 +23,8 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "vcdrom": "^1.6.0",
-    "wavedrom": "^3.5.0"
+    "wavedrom": "^3.5.0",
+    "mermaid": "^11.4.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

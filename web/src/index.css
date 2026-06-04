@@ -64,61 +64,55 @@
   --btn-primary-text: #ffffff;
   --briefing-index-bg: #eef2f6;
   --briefing-index-text: #314154;
-
-  /* EDA Lab terminal */
-  --terminal-bg: #0f172a;
-  --terminal-header: #1e293b;
-  --terminal-border: #334155;
-  --terminal-text: #e2e8f0;
-  --terminal-text-dim: #94a3b8;
-  --terminal-btn-bg: #334155;
 }
 
 [data-theme="dark"] {
-  --bg: #000000;
-  --bg-card: #0A0A0A;
-  --bg-hover: #111111;
-  --bg-sidebar: #050505;
+  /* Deep Obsidian Base */
+  --bg: #09090b;
+  --bg-card: #121214;
+  --bg-hover: #18181b;
+  --bg-sidebar: #060607;
   --bg-dark: #000000;
 
-  --border: #151515;
-  --border-mid: #1F1F1F;
-  --border-strong: #333333;
+  /* Semi-transparent borders for graceful blending */
+  --border: rgba(255, 255, 255, 0.08);
+  --border-mid: rgba(255, 255, 255, 0.14);
+  --border-strong: rgba(255, 255, 255, 0.24);
 
-  --accent: #D97040;
-  --accent-light: #E8845A;
-  --accent-soft: rgba(217, 112, 64, 0.12);
-  --accent-glow: rgba(217, 112, 64, 0.22);
+  /* Sophisticated Terracotta Accent */
+  --accent: #E86B35;
+  --accent-light: #F28B5E;
+  --accent-soft: rgba(232, 107, 53, 0.12);
+  --accent-glow: rgba(232, 107, 53, 0.22);
 
-  --text: #E8E8E8;
-  --text-mid: #888888;
-  --text-dim: #555555;
-  --text-inverse: #000000;
+  /* Soft, legible typography */
+  --text: #fafafa;
+  --text-mid: #a1a1aa;
+  --text-dim: #71717a;
+  --text-inverse: #09090b;
 
-  --success: #4ADE80;
-  --success-bg: #0A1F0F;
-  --success-bdr: #1A4D2E;
-  --fail: #F87171;
-  --fail-bg: #2A0A0A;
-  --fail-bdr: #7F1D1D;
+  /* Status Colors with transparent backgrounds */
+  --success: #34d399;
+  --success-bg: rgba(52, 211, 153, 0.1);
+  --success-bdr: rgba(52, 211, 153, 0.2);
+  --fail: #f87171;
+  --fail-bg: rgba(248, 113, 113, 0.1);
+  --fail-bdr: rgba(248, 113, 113, 0.2);
+  --warn: #fbbf24;
+
+  /* Premium deep shadows for dark mode */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.7), 0 4px 16px rgba(0, 0, 0, 0.5);
 
   /* Surface mixing tints */
-  --surface-tint: #111111;
-  --surface-shadow-alpha: 0.4;
 
   /* Component-specific */
   --btn-primary-bg: #E8E8E8;
   --btn-primary-text: #000000;
   --briefing-index-bg: #111111;
   --briefing-index-text: #888888;
-
-  /* EDA Lab terminal */
-  --terminal-bg: #000000;
-  --terminal-header: #0A0A0A;
-  --terminal-border: #151515;
-  --terminal-text: #E8E8E8;
-  --terminal-text-dim: #555555;
-  --terminal-btn-bg: #151515;
 }
 
 /* ── Reset ─────────────────────────────────────────────────────── */
@@ -4803,70 +4797,6 @@ body {
   background: var(--bg-card);
 }
 
-.eda-background {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 1;
-  background-color: var(--bg);
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
-  background-size: 30px 30px;
-  perspective: 1000px;
-  overflow: hidden;
-}
-
-[data-theme='light'] .eda-background {
-  background-image:
-    linear-gradient(rgba(0, 0, 0, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 0, 0, 0.03) 1px, transparent 1px);
-}
-
-.eda-grid-lines {
-  position: absolute;
-  width: 100%;
-  height: 100%;
-  background: radial-gradient(circle at center, transparent 0%, var(--bg) 80%);
-}
-
-.eda-glow-orb {
-  position: absolute;
-  width: 40vw;
-  height: 40vw;
-  background: radial-gradient(circle, var(--accent-glow) 0%, transparent 60%);
-  border-radius: 50%;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  opacity: 0.5;
-  filter: blur(50px);
-  animation: pulse-glow 8s infinite alternate;
-}
-
-.eda-glow-orb.secondary {
-  width: 30vw;
-  height: 30vw;
-  background: radial-gradient(circle, rgba(16, 185, 129, 0.15) 0%, transparent 60%);
-  top: 20%;
-  left: 20%;
-  animation: pulse-glow 10s infinite alternate-reverse;
-}
-
-@keyframes pulse-glow {
-  0% {
-    transform: translate(-50%, -50%) scale(0.9);
-    opacity: 0.3;
-  }
-
-  100% {
-    transform: translate(-50%, -50%) scale(1.1);
-    opacity: 0.6;
-  }
-}
-
 .home-content-z {
   position: relative;
   z-index: 2;
@@ -9412,143 +9342,6 @@ select option:disabled {
   opacity: 0.6;
 }
 
-/* ── Shimmer Button (EDA Lab action buttons) ───────────────────────── */
-.shimmer-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.4rem;
-  border: none;
-  border-radius: 6px;
-  color: #fff;
-  font-family: inherit;
-  font-weight: 600;
-  cursor: pointer;
-  transition: transform 0.12s var(--ease), box-shadow 0.12s var(--ease), opacity 0.12s;
-  position: relative;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.shimmer-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
-}
-
-.shimmer-btn:active:not(:disabled) {
-  transform: translateY(0);
-}
-
-.shimmer-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.shimmer-btn-content {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  position: relative;
-  z-index: 1;
-}
-
-/* ── EDA Lab Panel Classes ─────────────────────────────────────────── */
-.eda-toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0.75rem 1.25rem;
-  border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--bg-card) 90%, transparent);
-  backdrop-filter: blur(8px);
-  flex-shrink: 0;
-}
-
-.eda-panel-header {
-  padding: 0.4rem 1rem;
-  border-bottom: 1px solid var(--border);
-  font-weight: 600;
-  font-size: 0.82rem;
-  color: var(--text-dim);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: color-mix(in srgb, var(--bg-card) 90%, transparent);
-}
-
-.eda-console {
-  flex: 0.8;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--terminal-bg);
-}
-
-.eda-console-header {
-  padding: 0.4rem 1rem;
-  background: var(--terminal-header);
-  border-bottom: 1px solid var(--terminal-border);
-  font-weight: 600;
-  font-size: 0.82rem;
-  color: var(--terminal-text-dim);
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  justify-content: space-between;
-}
-
-.eda-console-body {
-  flex: 1;
-  padding: 0.75rem 1rem;
-  overflow-y: auto;
-  color: var(--terminal-text);
-  font-family: 'Fira Code', monospace;
-  font-size: 0.82rem;
-  white-space: pre-wrap;
-  line-height: 1.6;
-}
-
-.eda-console-clear-btn {
-  background: none;
-  border: none;
-  color: var(--terminal-text-dim);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  padding: 0;
-}
-
-.eda-viewer-panel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--terminal-bg);
-  border-right: 1px solid var(--border);
-}
-
-.eda-viewer-header {
-  padding: 0.45rem 1rem;
-  background: var(--terminal-header);
-  border-bottom: 1px solid var(--terminal-border);
-  font-weight: 600;
-  font-size: 0.82rem;
-  color: var(--terminal-text-dim);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.eda-viewer-close-btn {
-  background: var(--terminal-btn-bg);
-  border: none;
-  border-radius: 4px;
-  color: var(--terminal-text);
-  padding: 0.15rem 0.5rem;
-  cursor: pointer;
-  font-size: 0.72rem;
-}
-
 /* ── Spinner Animation ─────────────────────────────────────────────── */
 .spinner {
   display: inline-block;
@@ -12865,29 +12658,6 @@ body {
 
 .dash-table tr:hover td {
   background: var(--bg-hover);
-}
-
-/* Sleek laboratory dark skin for console output */
-.eda-console {
-  background: #0B0B0C !important;
-  border-left: 1px solid #1A1A1C !important;
-}
-
-.eda-console-header {
-  background: #121214 !important;
-  border-bottom: 1px solid #1A1A1C !important;
-  color: #8E8E93 !important;
-  font-family: var(--font-sans) !important;
-}
-
-.eda-console-body {
-  font-family: 'Fira Code', 'Geist Mono', monospace !important;
-  font-size: 0.85rem !important;
-  line-height: 1.5 !important;
-  color: #D1D1D6 !important;
-  background: #0B0B0C !important;
-  padding: 1.25rem !important;
-  border-radius: 0 0 var(--radius-md) var(--radius-md);
 }
 
 /* Glassmorphic prompt composer */

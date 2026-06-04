@@ -3,6 +3,7 @@ import re
 import urllib.request
 import urllib.parse
 import glob as glob_mod
+import json
 from html.parser import HTMLParser
 
 from local_tools import run_bash, run_bash_stream
@@ -246,6 +247,96 @@ def web_search(query: str, max_results: int = 5) -> str:
         return f"Web search error: {e}"
 
 
+def query_pdk_tool(query_type: str, cell_type: str = "") -> str:
+    pdk_root = os.environ.get("PDK_ROOT")
+    if not pdk_root:
+        common_paths = [
+            os.path.expanduser("~/.volare"),
+            "/usr/share/pdk",
+            "/usr/local/share/pdk",
+            "/opt/pdk",
+            os.path.expanduser("~/pdk")
+        ]
+        for p in common_paths:
+            if os.path.isdir(p):
+                pdk_root = p
+                break
+
+    if not pdk_root or not os.path.isdir(pdk_root):
+        return json.dumps({
+            "status": "DEPENDENCY_MISSING",
+            "missing_component": "PDK"
+        })
+
+    pdks = []
+    try:
+        for entry in os.listdir(pdk_root):
+            if os.path.isdir(os.path.join(pdk_root, entry)) and not entry.startswith("."):
+                pdks.append(entry)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to read PDK_ROOT: {e}"})
+    
+    if not pdks:
+        return json.dumps({"error": f"No PDKs found inside {pdk_root}"})
+    
+    active_pdk = pdks[0]
+    env_pdk = os.environ.get("PDK", "")
+    if env_pdk in pdks:
+        active_pdk = env_pdk
+
+    pdk_path = os.path.join(pdk_root, active_pdk)
+    libs_dir = os.path.join(pdk_path, "libs.ref")
+    
+    if not os.path.isdir(libs_dir):
+        return json.dumps({"error": f"libs.ref not found in {pdk_path}", "available_pdks": pdks})
+
+    if query_type == "list_libraries":
+        try:
+            libraries = [d for d in os.listdir(libs_dir) if os.path.isdir(os.path.join(libs_dir, d))]
+            return json.dumps({"pdk": active_pdk, "libraries": libraries})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    elif query_type == "find_cell":
+        if not cell_type:
+            return json.dumps({"error": "cell_type is required for find_cell"})
+        
+        cell_type_lower = cell_type.lower()
+        found_cells = []
+        
+        try:
+            libraries = [d for d in os.listdir(libs_dir) if os.path.isdir(os.path.join(libs_dir, d))]
+            for lib in libraries:
+                lib_path = os.path.join(libs_dir, lib)
+                lef_dir = os.path.join(lib_path, "lef")
+                if os.path.isdir(lef_dir):
+                    for lef_file in glob_mod.glob(os.path.join(lef_dir, "*.lef")):
+                        try:
+                            with open(lef_file, "r", errors="ignore") as f:
+                                for line in f:
+                                    if line.startswith("MACRO"):
+                                        macro_name = line.split()[1]
+                                        if cell_type_lower in macro_name.lower():
+                                            found_cells.append({"library": lib, "cell": macro_name})
+                                            if len(found_cells) >= 15:
+                                                break
+                        except Exception:
+                            pass
+                if len(found_cells) >= 15:
+                    break
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+            
+        return json.dumps({"pdk": active_pdk, "query": cell_type, "results": found_cells})
+
+    elif query_type == "get_layers":
+        tech_dir = os.path.join(pdk_path, "libs.tech")
+        return json.dumps({"pdk": active_pdk, "info": "Extract routing layers from .tech / .lef", "path": tech_dir})
+
+    else:
+        return json.dumps({"error": f"Unknown query_type: {query_type}"})
+
+
 def dispatch_tool(name: str, args: dict, workspace_root: str, on_output=None, cancel_checker=None) -> str:
     if name == "read":
         return read_file(args["path"], workspace_root)
@@ -263,5 +354,7 @@ def dispatch_tool(name: str, args: dict, workspace_root: str, on_output=None, ca
         return glob_tool(args["pattern"], workspace_root)
     elif name == "web_search":
         return web_search(args["query"], args.get("max_results", 5))
+    elif name == "query_pdk":
+        return query_pdk_tool(args.get("query_type", ""), args.get("cell_type", ""))
     else:
         return f"Error: unknown tool '{name}'"

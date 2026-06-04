@@ -5,6 +5,7 @@ import '../studio-3pane.css';
 import { motion } from 'framer-motion';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
 import Editor from '@monaco-editor/react';
+import { DiagramViewer } from '../components/DiagramViewer';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -24,6 +25,13 @@ import {
   Plus,
   Square,
   Trash2,
+  X,
+  Copy,
+  Edit2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Maximize,
+  Minimize,
 } from 'lucide-react';
 import { BillingModal } from '../components/BillingModal';
 import { api, API_BASE, getSseHeaders } from '../api';
@@ -258,7 +266,7 @@ function artifactLanguage(name: string): string {
 function inferArtifactType(artifact: Artifact): string {
   const name = artifact.name.toLowerCase();
   if (artifact.type) return artifact.type;
-  // Check directory in path — matches "project/rtl/" or just "rtl/" layouts
+    // Check directory in path — matches "project/rtl/" or just "rtl/" layouts
   if (/\/rtl\//.test(name) || name.startsWith('rtl/')) return 'rtl';
   if (/\/tb\//.test(name) || name.startsWith('tb/')) return 'verification';
   if (/\/dv\//.test(name) || name.startsWith('dv/')) return 'verification';
@@ -273,6 +281,7 @@ function inferArtifactType(artifact: Artifact): string {
   if (/\/signoff\//.test(name) || name.startsWith('signoff/')) return 'signoff';
   if (/\/sim\//.test(name) || name.startsWith('sim/')) return 'simulation';
   if (/\/reports\//.test(name) || name.startsWith('reports/')) return 'report';
+  if (/\/scripts\//.test(name) || name.startsWith('scripts/')) return 'script';
   // Fallback to extension-based matching
   if (/\.(v|sv|svh|vh)$/.test(name) && !name.includes('tb')) return 'rtl';
   if (name.includes('tb') || name.endsWith('.sby') || name.includes('formal') || name.endsWith('.vcd')) return 'verification';
@@ -299,7 +308,8 @@ function artifactSections(artifacts: Artifact[]) {
     { label: 'Timing (STA)', types: ['timing'] },
     { label: 'Signoff', types: ['signoff'] },
     { label: 'Simulation', types: ['simulation'] },
-    { label: 'Reports', types: ['report', 'log', 'config', 'script', 'other'] },
+    { label: 'Scripts & Flow', types: ['script', 'config', 'tcl'] },
+    { label: 'Reports', types: ['report', 'log', 'other'] },
   ];
   return sections
     .map((section) => ({
@@ -401,6 +411,8 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
     initialChatRef.current = initialChatState();
   }
   const [prompt, setPrompt] = useState('');
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>(initialChatRef.current.messages);
   const [collapsedMessages, setCollapsedMessages] = useState<Record<string, boolean>>({});
   const [conversations, setConversations] = useState<ChatConversation[]>(initialChatRef.current.conversations);
@@ -414,6 +426,38 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
     if (typeof window === 'undefined') return false;
     return localStorage.getItem(HISTORY_COLLAPSED_STORAGE_KEY) === 'true';
   });
+  const [filesCollapsed, setFilesCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('agentic_files_collapsed') === 'true';
+  });
+  const [workspaceCollapsed, setWorkspaceCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    const stored = localStorage.getItem('agentic_workspace_collapsed');
+    return stored !== null ? stored === 'true' : false;
+  });
+
+  const [chatWidth, setChatWidth] = useState(550);
+  const [inspectorWidth, setInspectorWidth] = useState(280);
+  const [isResizing, setIsResizing] = useState<'chat' | 'inspector' | null>(null);
+
+  useEffect(() => {
+    if (!isResizing) return;
+    const handleMouseMove = (e: MouseEvent) => {
+      if (isResizing === 'chat') {
+        setChatWidth(Math.min(Math.max(200, e.clientX), 800));
+      } else if (isResizing === 'inspector') {
+        setInspectorWidth(Math.min(Math.max(200, window.innerWidth - e.clientX), 800));
+      }
+    };
+    const handleMouseUp = () => setIsResizing(null);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
+
   const [pdkOptions, setPdkOptions] = useState<PdkOption[]>([]);
   const [pdkProfile, setPdkProfile] = useState('');
   const [profile, setProfile] = useState<{ has_byok_key?: boolean } | null>(null);
@@ -563,7 +607,18 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
                 timestamp: data.timestamp,
               });
             } else if (eventType === 'reasoning' || eventType === 'tool-call' || eventType === 'tool-result') {
-              // Raw internals are intentionally hidden from normal users.
+              if (data.content) {
+                // Yield small, summarised reasoning status in the "Thinking" state
+                let msg = '';
+                if (eventType === 'reasoning') {
+                  msg = `Thinking: ${data.content.slice(0, 80)}...`;
+                } else if (eventType === 'tool-call') {
+                  msg = `Executing: ${data.content.split('(')[0]}...`;
+                } else if (eventType === 'tool-result') {
+                  msg = `Completed step: ${data.content.slice(0, 50).replace(/\n/g, ' ')}...`;
+                }
+                setThinking(msg);
+              }
               if (import.meta.env.VITE_AGENTIC_DEBUG_EVENTS === 'true') {
                 console.debug('[agentic:event]', data);
               }
@@ -749,7 +804,7 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
     try {
       const res = await api.get('/workspace/active');
       const activeName = normalizeActiveDesignName(res.data?.active?.name);
-      if (activeName || res.data?.active?.name) {
+      if (res.data?.active && typeof res.data.active.name === 'string') {
         setDesignName(activeName);
         onActiveDesignChange?.(activeName);
         void fetchArtifacts(activeName, true);
@@ -764,7 +819,7 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
       ...event,
       label: cleanUserFacingAgentText(event.label || ''),
     };
-    if (safeEvent.design_name) {
+    if (typeof safeEvent.design_name === 'string') {
       const nextDesignName = normalizeActiveDesignName(safeEvent.design_name);
       setDesignName(nextDesignName);
       onActiveDesignChange?.(nextDesignName);
@@ -928,23 +983,38 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
   }, [messages, thinking]);
 
   return (
-    <div className="codex-vlsi-root">
-      <aside className="codex-vlsi-chat">
+    <div className={`codex-vlsi-root ${workspaceCollapsed ? 'is-workspace-collapsed' : ''} ${isResizing ? 'is-resizing' : ''}`}>
+      <aside className="codex-vlsi-chat" style={!workspaceCollapsed ? { width: chatWidth } : {}}>
         <div className="codex-vlsi-chat-head">
           <div>
             <div className="codex-vlsi-title">AgentIC Studio</div>
             <div className="codex-vlsi-subtitle">{activeConversation?.title || 'Describe the chip. Watch the build.'}</div>
           </div>
-          <button
-            type="button"
-            className="codex-vlsi-icon-button"
-            onClick={startNewConversation}
-            disabled={isBusy}
-            aria-label="New conversation"
-            title="New conversation"
-          >
-            <Plus size={15} />
-          </button>
+          <div style={{ display: 'flex', gap: '0.5rem', marginLeft: 'auto' }}>
+            <button
+              type="button"
+              className="codex-vlsi-icon-button"
+              onClick={() => {
+                const val = !workspaceCollapsed;
+                setWorkspaceCollapsed(val);
+                localStorage.setItem('agentic_workspace_collapsed', String(val));
+              }}
+              aria-label={workspaceCollapsed ? 'Show workspace' : 'Focus chat'}
+              title={workspaceCollapsed ? 'Show workspace' : 'Focus chat'}
+            >
+              {workspaceCollapsed ? <Minimize size={15} /> : <Maximize size={15} />}
+            </button>
+            <button
+              type="button"
+              className="codex-vlsi-icon-button"
+              onClick={startNewConversation}
+              disabled={isBusy}
+              aria-label="New conversation"
+              title="New conversation"
+            >
+              <Plus size={15} />
+            </button>
+          </div>
         </div>
 
         <div className="codex-vlsi-history-strip">
@@ -1027,7 +1097,7 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
                     onClick={() =>
                       setCollapsedMessages((prev) => ({
                         ...prev,
-                        [messageKey]: isCollapsed,
+                        [messageKey]: !isCollapsed,
                       }))
                     }
                     aria-expanded={!isCollapsed}
@@ -1039,7 +1109,33 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
                 {isCollapsed ? (
                   <p className="codex-vlsi-message-preview">{preview}...</p>
                 ) : (
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
+                  <>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
+                    {message.role === 'user' && (
+                      <div className="message-actions" style={{ display: 'flex', gap: '8px', marginTop: '8px', justifyContent: 'flex-end', opacity: 0.8 }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(displayContent);
+                            setCopiedIndex(index);
+                            setTimeout(() => setCopiedIndex(null), 2000);
+                          }}
+                          title="Copy message"
+                          style={{ background: 'var(--c-surface-sunken)', border: '1px solid var(--c-border)', borderRadius: '4px', color: 'var(--c-text-muted)', cursor: 'pointer', padding: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                        >
+                          {copiedIndex === index ? <CheckCircle2 size={14} color="var(--c-success)" /> : <Copy size={14} />}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setPrompt(displayContent); setTimeout(() => inputRef.current?.focus(), 10); }}
+                          title="Edit prompt"
+                          style={{ background: 'var(--c-surface-sunken)', border: '1px solid var(--c-border)', borderRadius: '4px', color: 'var(--c-text-muted)', cursor: 'pointer', padding: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                        >
+                          <Edit2 size={14} />
+                        </button>
+                      </div>
+                    )}
+                  </>
                 )}
               </motion.article>
             );
@@ -1055,30 +1151,35 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
         </div>
 
         <div className="codex-vlsi-composer">
-          <div className="codex-vlsi-routebar">
-            <div className="codex-vlsi-route-label">API Key</div>
+          <div style={{ display: 'flex', gap: '1rem', fontSize: '0.75rem', marginBottom: '0.65rem', paddingLeft: '0.5rem' }}>
             <button
               type="button"
-              className="codex-vlsi-model-chip is-byok"
               onClick={requestByokSetup}
               disabled={isBusy}
               title="Configure API key"
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem',
+                color: hasByok ? 'var(--text-dim)' : 'var(--accent)', padding: 0
+              }}
             >
-              {hasByok ? 'Configured' : 'Configure API key'}
+              {hasByok ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
+              {hasByok ? 'API Configured' : 'Setup API Key'}
             </button>
-            <div className="codex-vlsi-route-label">License</div>
-            <span className={`codex-vlsi-model-chip ${licenseActive ? 'is-byok' : ''}`}>
-              {licenseActive ? 'Active' : 'Required'}
-            </span>
+            {!licenseActive && (
+              <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--fail)' }}>
+                <AlertTriangle size={13} /> License Required
+              </span>
+            )}
           </div>
           <div className="codex-vlsi-input-shell">
             <textarea
+              ref={inputRef}
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
               placeholder="Describe the chip block, interface, target PDK, or next task..."
               rows={3}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault();
                   void handlePrimaryAction();
                 }
@@ -1116,11 +1217,14 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
         </div>
       </aside>
 
+      {!workspaceCollapsed && (
+        <div className={`codex-vlsi-resizer ${isResizing === 'chat' ? 'is-active' : ''}`} onMouseDown={() => setIsResizing('chat')} />
+      )}
       <main className="codex-vlsi-workspace">
         <header className="codex-vlsi-workspace-head">
           <div>
             <div className="codex-vlsi-kicker">Live workspace</div>
-            <h2>{designName || 'No active chip yet'}</h2>
+            <h2>{designName || 'AgentIC Workspace'}</h2>
           </div>
           <div className="codex-vlsi-run-state">
             <span className={`codex-vlsi-state-dot is-${isChatting ? 'running' : 'idle'}`} />
@@ -1135,9 +1239,22 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
           </div>
         </div>
 
-        <div className="codex-vlsi-body">
+        <div className={`codex-vlsi-body ${filesCollapsed ? 'is-files-collapsed' : ''}`}>
           <aside className="codex-vlsi-files">
             <div className="codex-vlsi-files-head">
+              <button
+                type="button"
+                onClick={() => {
+                  const val = !filesCollapsed;
+                  setFilesCollapsed(val);
+                  localStorage.setItem('agentic_files_collapsed', String(val));
+                }}
+                className="codex-vlsi-icon-btn"
+                title={filesCollapsed ? "Expand files pane" : "Collapse files pane"}
+                style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: 0 }}
+              >
+                {filesCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+              </button>
               <span>Files</span>
               <small>{visibleArtifacts.length}</small>
             </div>
@@ -1185,29 +1302,35 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
 
           <section className="codex-vlsi-editor">
             <div className="codex-vlsi-editor-tabs">
-              <div className="codex-vlsi-editor-tab">
-                <Code2 size={14} />
-                <span>{selectedArtifact?.name || 'Workspace preview'}</span>
+              <div className="codex-vlsi-editor-tab" style={{ flex: 1, display: 'flex', justifyContent: 'space-between', paddingRight: '0.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <Code2 size={14} />
+                  <span>{selectedArtifact?.name || 'Workspace preview'}</span>
+                </div>
+                {selectedArtifact && (
+                  <button
+                    type="button"
+                    style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', display: 'grid', placeItems: 'center', opacity: 0.6 }}
+                    onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+                    onMouseLeave={(e) => e.currentTarget.style.opacity = '0.6'}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedArtifact(null);
+                      setArtifactPreview('');
+                    }}
+                    title="Close editor"
+                  >
+                    <X size={14} />
+                  </button>
+                )}
               </div>
             </div>
             <div className="codex-vlsi-editor-content">
               {selectedArtifact ? (
-                <Editor
-                  height="100%"
+                <DiagramViewer
+                  filename={selectedArtifact.name}
+                  content={artifactPreview}
                   language={artifactLanguage(selectedArtifact.name)}
-                  theme="vs-dark"
-                  value={artifactPreview || 'Loading preview...'}
-                  onMount={handleEditorDidMount}
-                  options={{
-                    readOnly: true,
-                    minimap: { enabled: false },
-                    fontSize: 13,
-                    fontFamily: "'Geist Mono', 'Fira Code', monospace",
-                    scrollBeyondLastLine: false,
-                    smoothScrolling: true,
-                    wordWrap: 'on',
-                    padding: { top: 12, bottom: 12 },
-                  }}
                 />
               ) : (
                 <div className="codex-vlsi-editor-empty">
@@ -1220,7 +1343,10 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
         </div>
       </main>
 
-      <aside className="codex-vlsi-inspector">
+      {!workspaceCollapsed && (
+        <div className={`codex-vlsi-resizer ${isResizing === 'inspector' ? 'is-active' : ''}`} onMouseDown={() => setIsResizing('inspector')} />
+      )}
+      <aside className="codex-vlsi-inspector" style={!workspaceCollapsed ? { width: inspectorWidth } : {}}>
         <div className="codex-vlsi-inspector-section">
           <div className="codex-vlsi-inspector-title">PDK</div>
           <div className="codex-vlsi-stage-list">
@@ -1282,6 +1408,16 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
               </span>
             </div>
           </div>
+          <button
+            type="button"
+            className="codex-vlsi-model-chip is-byok"
+            onClick={() => void refreshToolStatus()}
+            style={{ width: '100%', marginTop: '0.65rem' }}
+            title="Probe your local EDA toolchain. Or just ask the agent: 'what EDA tools do I have?'"
+          >
+            <Terminal size={14} />
+            Detect installed tools
+          </button>
           {missingTools.length > 0 && (
             <div className="codex-vlsi-stage-list" style={{ marginTop: '0.75rem' }}>
               {missingTools.slice(0, 3).map((item) => (

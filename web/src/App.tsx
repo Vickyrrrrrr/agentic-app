@@ -14,7 +14,6 @@ import type { LucideIcon } from 'lucide-react';
 import {
   Zap,
   BookOpen,
-  TerminalSquare,
   ClipboardList,
   Settings2,
   Menu,
@@ -23,8 +22,9 @@ import {
 } from 'lucide-react';
 
   const IS_DESKTOP_APP = typeof window !== 'undefined' && 'electronAPI' in window;
-  const AUTH_ENABLED = IS_DESKTOP_APP || Boolean(import.meta.env.VITE_SUPABASE_URL);
-  const IS_LOCAL_MODE = !IS_DESKTOP_APP && !import.meta.env.VITE_API_BASE_URL && !import.meta.env.VITE_SUPABASE_URL;
+  const DEV_NO_AUTH = Boolean(import.meta.env.VITE_DEV_NO_AUTH);
+  const AUTH_ENABLED = !DEV_NO_AUTH && (IS_DESKTOP_APP || Boolean(import.meta.env.VITE_SUPABASE_URL));
+  const IS_LOCAL_MODE = DEV_NO_AUTH || (!IS_DESKTOP_APP && !import.meta.env.VITE_API_BASE_URL && !import.meta.env.VITE_SUPABASE_URL);
   const BUILD_FLAVOR = import.meta.env.DEV ? 'dev' : 'built';
 
 const DesignStudio = lazy(() =>
@@ -36,9 +36,6 @@ const Pricing = lazy(() =>
 const Documentation = lazy(() =>
   import('./pages/Documentation').then((m) => ({ default: m.Documentation }))
 );
-const EDALab = lazy(() =>
-  import('./pages/EDALab').then((m) => ({ default: m.EDALab }))
-);
 const BuildHistory = lazy(() =>
   import('./pages/BuildHistory').then((m) => ({ default: m.BuildHistory }))
 );
@@ -49,7 +46,6 @@ const WorkspaceSettings = lazy(() =>
 type PageKey =
   | 'Design Studio'
   | 'Build History'
-  | 'Manual EDA Lab'
   | 'Documentation'
   | 'Workspace Settings';
 
@@ -115,7 +111,6 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { page: 'Design Studio', label: 'New Conversation', icon: Zap },
       { page: 'Build History', label: 'Conversation History', icon: ClipboardList },
-      { page: 'Manual EDA Lab', label: 'Manual EDA Lab', icon: TerminalSquare },
       { page: 'Documentation', label: 'Documentation', icon: BookOpen },
       { page: 'Workspace Settings', label: 'Settings', icon: Settings2 },
     ],
@@ -130,10 +125,6 @@ const PAGE_META: Record<PageKey, { title: string; subtitle: string }> = {
   'Build History': {
     title: 'Conversation History',
     subtitle: 'Track past builds, states, and execution history',
-  },
-  'Manual EDA Lab': {
-    title: 'Manual EDA Lab',
-    subtitle: 'Run syntax, synthesis, simulation, and waveform analysis directly',
   },
   Documentation: {
     title: 'Technical Documentation',
@@ -183,10 +174,9 @@ const App = () => {
   const refreshLicenseContext = useCallback(async () => {
     const requestSeq = ++licenseRequestSeq.current;
     setLicenseLoading((loading) => loading || !licenseStatus?.active);
-    const [licenseRes, profileRes, toolsRes] = await Promise.allSettled([
+    const [licenseRes, profileRes] = await Promise.allSettled([
       api.get('/license/status'),
       api.get('/profile'),
-      api.get('/tools/status'),
     ]);
     if (requestSeq !== licenseRequestSeq.current) return null;
 
@@ -203,9 +193,6 @@ const App = () => {
     setLicenseStatus(nextLicenseStatus);
     if (profileRes.status === 'fulfilled') {
       setProfile(profileRes.value.data || null);
-    }
-    if (toolsRes.status === 'fulfilled') {
-      setToolsStatus(toolsRes.value.data || null);
     }
     setLicenseLoading(false);
     return nextLicenseStatus;
@@ -364,11 +351,10 @@ const App = () => {
 
     const loadWorkspaceData = async () => {
       const requestSeq = ++licenseRequestSeq.current;
-      const [jobsRes, profileRes, licenseRes, toolsRes] = await Promise.allSettled([
+      const [jobsRes, profileRes, licenseRes] = await Promise.allSettled([
         api.get('/jobs'),
         api.get('/profile'),
         api.get('/license/status'),
-        api.get('/tools/status'),
       ]);
       if (cancelled) return;
 
@@ -383,8 +369,6 @@ const App = () => {
           reason: 'Unable to verify license.',
           source: 'unavailable',
         };
-      const nextTools: ToolStatus | null =
-        toolsRes.status === 'fulfilled' ? toolsRes.value.data || null : null;
 
       let rawDesigns: DesignOption[] = [];
       let activeDesignName = '';
@@ -403,7 +387,6 @@ const App = () => {
       if (requestSeq === licenseRequestSeq.current) {
         setLicenseStatus(nextLicense);
       }
-      setToolsStatus(nextTools);
       if (requestSeq === licenseRequestSeq.current) {
         setLicenseLoading(false);
       }
@@ -646,8 +629,6 @@ const App = () => {
             onActiveDesignChange={setSelectedDesign}
           />
         );
-      case 'Manual EDA Lab':
-        return <EDALab />;
       case 'Documentation':
         return <Documentation />;
       case 'Build History':

@@ -128,10 +128,50 @@ def _safe_license_failure_reason(status_code: int, body: str = "") -> str:
     return "License verification failed. Please try again."
 
 
+def normalize_pem_public_key(key_str: str) -> str:
+    key_str = key_str.strip().strip('"').strip("'")
+    key_str = key_str.replace("\\n", "\n").replace("\\r", "\r")
+    
+    if "-----BEGIN PUBLIC KEY-----" in key_str:
+        parts = key_str.split("-----BEGIN PUBLIC KEY-----")
+        if len(parts) > 1:
+            body_and_footer = parts[1]
+            body_parts = body_and_footer.split("-----END PUBLIC KEY-----")
+            if len(body_parts) > 0:
+                body = body_parts[0]
+                body_clean = "".join(body.split())
+                lines = [body_clean[i:i+64] for i in range(0, len(body_clean), 64)]
+                normalized = "-----BEGIN PUBLIC KEY-----\n" + "\n".join(lines) + "\n-----END PUBLIC KEY-----"
+                return normalized
+    return key_str
+
+
 def _entitlement_verify_key() -> tuple[str, list[str]] | None:
     public_key = os.environ.get("AGENTIC_ENTITLEMENT_PUBLIC_KEY", "").strip()
+    if not public_key:
+        candidates = [
+            os.path.join(os.path.dirname(__file__), "..", "desktop", "resources", "license.json"),  # dev mode
+            os.path.abspath(os.path.join(os.getcwd(), "..", "license.json")),                       # packaged mode
+            os.path.abspath(os.path.join(os.getcwd(), "license.json")),                            # fallback
+        ]
+        for path in candidates:
+            try:
+                if os.path.exists(path):
+                    with open(path, "r") as _f:
+                        _config = json.load(_f)
+                        val = _config.get("entitlement_public_key", "").strip()
+                        if val:
+                            public_key = val
+                            break
+            except Exception:
+                pass
+
     if public_key:
-        return public_key.replace("\\n", "\n"), ["RS256"]
+        try:
+            public_key = normalize_pem_public_key(public_key)
+        except Exception as e:
+            logging.error("Failed to normalize public key: %s", e)
+        return public_key, ["RS256"]
 
     # Development fallback only. Production desktop builds should verify RS256
     # entitlements with AGENTIC_ENTITLEMENT_PUBLIC_KEY.
@@ -145,6 +185,11 @@ def _verify_signed_entitlement(data: dict, source: str) -> dict | None:
     token = data.get("signed_entitlement")
     if not token:
         return None
+    try:
+        unverified_header = jwt.get_unverified_header(token)
+        logging.error("DEBUG: JWT unverified header: %s", unverified_header)
+    except Exception as e:
+        logging.error("DEBUG: Failed to read JWT header: %s", e)
     verify_config = _entitlement_verify_key()
     if not verify_config:
         return None
@@ -157,7 +202,8 @@ def _verify_signed_entitlement(data: dict, source: str) -> dict | None:
             audience="agentic-desktop",
             issuer="agentic-license-server",
         )
-    except jwt.PyJWTError:
+    except jwt.PyJWTError as exc:
+        logging.error("Entitlement verification failed: %s", exc)
         return None
 
     expires_at = _epoch_from(claims.get("exp")) or 0
@@ -522,20 +568,22 @@ def _append_run_event(event: dict) -> None:
         "status": event.get("status"),
         "design_name": event.get("design_name"),
     }
-    safe = {key: value for key, value in safe.items() if value not in (None, "")}
+    safe = {key: value for key, value in safe.items() if value is not None}
     with RUN_EVENTS_PATH.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(safe) + "\n")
 
 
 def _set_active_design(design_name: str | None) -> None:
-    if (
-        not design_name
-        or design_name.startswith(".")
-        or "/" in design_name
-        or "\\" in design_name
-        or design_name.lower() in WORKSPACE_SECTION_DIRS
-    ):
+    if design_name is None:
         return
+    if design_name != "":
+        if (
+            design_name.startswith(".")
+            or "/" in design_name
+            or "\\" in design_name
+            or design_name.lower() in WORKSPACE_SECTION_DIRS
+        ):
+            return
     ACTIVE_DESIGN_PATH.write_text(json.dumps({
         "name": design_name,
         "updated_at": time.time(),
@@ -998,19 +1046,6 @@ async def cancel_run(request: Request, run_id: str):
     }
     _append_run_event(cancel_event)
     return {"status": "cancelling", "run_id": run_id}
-
-
-@app.post("/lab/syntax-check")
-@app.post("/lab/synthesize")
-@app.post("/lab/simulate")
-@app.post("/lab/generate-testbench")
-@app.post("/lab/ai-assist")
-@app.post("/lab/gtkwave")
-async def lab_endpoint_generic():
-    return {
-        "status": "ok",
-        "message": "Lab endpoint available in local mode. Use the Design Studio for agent-driven flows.",
-    }
 
 
 @app.get("/workspace/active")
