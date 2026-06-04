@@ -201,13 +201,15 @@ def _verify_signed_entitlement(data: dict, source: str) -> dict | None:
             algorithms=algorithms,
             audience="agentic-desktop",
             issuer="agentic-license-server",
+            options={"verify_iat": False, "verify_exp": False},
         )
     except jwt.PyJWTError as exc:
         logging.error("Entitlement verification failed: %s", exc)
         return None
 
     expires_at = _epoch_from(claims.get("exp")) or 0
-    if expires_at <= time.time():
+    # Allow 24 hours of local clock drift leeway for expiration checks.
+    if expires_at + 86400 <= time.time():
         return None
 
     limits = claims.get("limits") if isinstance(claims.get("limits"), dict) else {}

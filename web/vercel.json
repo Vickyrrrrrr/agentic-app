@@ -1,9 +1,0 @@
-{
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
-  ],
-  "regions": ["iad1"],
-  "env": {
-    "VITE_API_BASE_URL": "https://api.buildstack.live"
-  }
-}
