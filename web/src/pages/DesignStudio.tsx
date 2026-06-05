@@ -421,6 +421,10 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
   const [artifactPreview, setArtifactPreview] = useState('');
   const [newArtifactNames, setNewArtifactNames] = useState<Set<string>>(new Set());
+  const [attachedFiles, setAttachedFiles] = useState<Artifact[]>([]);
+  const [attachedFilesContent, setAttachedFilesContent] = useState<Record<string, string>>({});
+  const [loadingAttachedFiles, setLoadingAttachedFiles] = useState<Record<string, boolean>>({});
+  const [isDragOver, setIsDragOver] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
   const [historyCollapsed, setHistoryCollapsed] = useState(() => {
     if (typeof window === 'undefined') return false;
@@ -743,11 +747,25 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
       }
       return;
     }
-    if (!text) return;
+    if (!text && attachedFiles.length === 0) return;
 
     setPrompt('');
-    const nextMessages: ChatMessage[] = [...messages, { role: 'user', content: text }];
-    await sendChatMessage(text, nextMessages);
+
+    let textWithAttachments = text;
+    if (attachedFiles.length > 0) {
+      const attachmentsText = attachedFiles.map(file => {
+        const fileContent = attachedFilesContent[file.name] || '';
+        const ext = file.name.split('.').pop() || '';
+        return `\n\n### Attached File: ${file.name}\n\`\`\`${ext}\n${fileContent}\n\`\`\``;
+      }).join('');
+      textWithAttachments = `${text}${attachmentsText}`.trim();
+    }
+
+    setAttachedFiles([]);
+    setAttachedFilesContent({});
+
+    const nextMessages: ChatMessage[] = [...messages, { role: 'user', content: textWithAttachments }];
+    await sendChatMessage(textWithAttachments, nextMessages);
   };
 
   const stopCurrentRun = useCallback(async (notice = 'Run stopped. You can steer the next step.') => {
@@ -766,14 +784,28 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
 
   const handleSteerAction = useCallback(async (text: string) => {
     const guidance = text.trim();
-    if (!guidance) return;
+    if (!guidance && attachedFiles.length === 0) return;
     setPrompt('');
     await stopCurrentRun('');
-    const nextMessages: ChatMessage[] = [...messages, { role: 'user', content: guidance }];
+
+    let guidanceWithAttachments = guidance;
+    if (attachedFiles.length > 0) {
+      const attachmentsText = attachedFiles.map(file => {
+        const fileContent = attachedFilesContent[file.name] || '';
+        const ext = file.name.split('.').pop() || '';
+        return `\n\n### Attached File: ${file.name}\n\`\`\`${ext}\n${fileContent}\n\`\`\``;
+      }).join('');
+      guidanceWithAttachments = `${guidance}${attachmentsText}`.trim();
+    }
+
+    setAttachedFiles([]);
+    setAttachedFilesContent({});
+
+    const nextMessages: ChatMessage[] = [...messages, { role: 'user', content: guidanceWithAttachments }];
     setTimeout(() => {
-      void sendChatMessage(guidance, nextMessages);
+      void sendChatMessage(guidanceWithAttachments, nextMessages);
     }, 250);
-  }, [messages, stopCurrentRun]);
+  }, [messages, stopCurrentRun, attachedFiles, attachedFilesContent]);
 
   const handleEditorDidMount = (editor: any, monaco: any) => {
     editorRef.current = editor;
@@ -1171,7 +1203,90 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
               </span>
             )}
           </div>
-          <div className="codex-vlsi-input-shell">
+          {attachedFiles.length > 0 && (
+            <div className="codex-vlsi-attachments">
+              {attachedFiles.map((file) => (
+                <div key={file.name} className="codex-vlsi-attachment-chip">
+                  <FileText size={12} style={{ opacity: 0.7 }} />
+                  <span style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={file.name}>
+                    {file.name}
+                  </span>
+                  {loadingAttachedFiles[file.name] ? (
+                    <span className="codex-vlsi-spinner" style={{
+                      width: '10px',
+                      height: '10px',
+                      border: '1px solid rgba(255,255,255,0.3)',
+                      borderTopColor: 'var(--accent)',
+                      borderRadius: '50%',
+                    }} />
+                  ) : (
+                    <button
+                      type="button"
+                      className="codex-vlsi-attachment-remove-btn"
+                      onClick={() => {
+                        setAttachedFiles((prev) => prev.filter((f) => f.name !== file.name));
+                        setAttachedFilesContent((prev) => {
+                          const next = { ...prev };
+                          delete next[file.name];
+                          return next;
+                        });
+                      }}
+                      title="Remove attachment"
+                    >
+                      <X size={12} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          <div
+            className={`codex-vlsi-input-shell ${isDragOver ? 'is-drag-over' : ''}`}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDragOver(true);
+            }}
+            onDragLeave={() => {
+              setIsDragOver(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragOver(false);
+              const fileName = e.dataTransfer.getData('text/plain');
+              if (!fileName) return;
+
+              const matched = artifacts.find((a) => a.name === fileName);
+              if (!matched) return;
+
+              if (attachedFiles.some((f) => f.name === matched.name)) {
+                return;
+              }
+
+              if (attachedFiles.length >= 5) {
+                alert("Maximum of 5 files can be attached at a time.");
+                return;
+              }
+
+              setAttachedFiles((prev) => [...prev, matched]);
+              setLoadingAttachedFiles((prevLoading) => ({ ...prevLoading, [matched.name]: true }));
+
+              const endpoint = designName
+                ? `/build/artifacts/${encodeURIComponent(designName)}/${artifactPath(matched.name)}`
+                : `/build/artifacts/file/${artifactPath(matched.name)}`;
+
+              api.get(endpoint)
+                .then((res) => {
+                  const content = typeof res.data === 'string' ? res.data : JSON.stringify(res.data, null, 2);
+                  setAttachedFilesContent((prevContent) => ({ ...prevContent, [matched.name]: content }));
+                })
+                .catch(() => {
+                  setAttachedFilesContent((prevContent) => ({ ...prevContent, [matched.name]: '// Error loading file content' }));
+                })
+                .finally(() => {
+                  setLoadingAttachedFiles((prevLoading) => ({ ...prevLoading, [matched.name]: false }));
+                });
+            }}
+          >
             <textarea
               ref={inputRef}
               value={prompt}
@@ -1189,7 +1304,7 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
               type="button"
               className="codex-vlsi-send"
               onClick={() => void handlePrimaryAction()}
-              disabled={!prompt.trim()}
+              disabled={(!prompt.trim() && attachedFiles.length === 0) || Object.values(loadingAttachedFiles).some(Boolean)}
               aria-label="Send prompt"
               title={isBusy ? 'Stop current run and send guidance' : 'Send prompt'}
             >
@@ -1277,6 +1392,11 @@ export const DesignStudio = ({ licenseStatus, toolStatus, selectedDesign = '', o
                         key={artifact.name}
                         type="button"
                         className={`codex-vlsi-file ${selectedArtifact?.name === artifact.name ? 'active' : ''} ${newArtifactNames.has(artifact.name) ? 'is-new' : ''}`}
+                        draggable={true}
+                        onDragStart={(event) => {
+                          event.dataTransfer.setData('text/plain', artifact.name);
+                          event.dataTransfer.effectAllowed = 'copy';
+                        }}
                         onClick={() => {
                           setArtifactPreview('');
                           setSelectedArtifact(artifact);
