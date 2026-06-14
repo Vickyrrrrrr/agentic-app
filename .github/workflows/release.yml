@@ -6,8 +6,63 @@ on:
   workflow_dispatch:
 
 jobs:
+  prepare-release:
+    name: Prepare buildstack release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          version="$(node -p "require('./apps/agentic-desktop/packages/desktop/package.json').version")"
+          tag="v${version}"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            expected="v${version}"
+            if [[ "${tag}" != "${expected}" ]]; then
+              echo "Tag ${tag} does not match desktop package version ${expected}."
+              exit 1
+            fi
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse buildstack release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "GH_TOKEN is required to publish AgentIC Desktop to Vickyrrrrrr/buildstack releases."
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo Vickyrrrrrr/buildstack >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo Vickyrrrrrr/buildstack \
+              --title "$RELEASE_VERSION" \
+              --latest
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo Vickyrrrrrr/buildstack \
+              --title "$RELEASE_VERSION" \
+              --notes "$RELEASE_TAG" \
+              --latest
+          fi
+
   release:
     name: Build & publish ${{ matrix.platform }}
+    needs: prepare-release
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
