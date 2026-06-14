@@ -6,8 +6,12 @@ build/
 .vite/
 .next/
 coverage/
-apps/
+apps/*
+!apps/agentic-desktop/
+!apps/agentic-desktop/**
 packages/
+!apps/agentic-desktop/packages/
+!apps/agentic-desktop/packages/**
 openhands-backend/
 .env
 .env.*
