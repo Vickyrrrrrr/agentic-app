@@ -164,7 +164,15 @@ export function registerIpcHandlers(deps: Deps) {
   )
 
   ipcMain.on("open-link", (_event: IpcMainEvent, url: string) => {
-    void shell.openExternal(url)
+    if (process.platform === "linux" && (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)) {
+      execFile("cmd.exe", ["/c", "start", "", url], (err) => {
+        if (err) {
+          void shell.openExternal(url)
+        }
+      })
+    } else {
+      void shell.openExternal(url)
+    }
   })
 
   ipcMain.handle("open-path", async (_event: IpcMainInvokeEvent, path: string, app?: string) => {

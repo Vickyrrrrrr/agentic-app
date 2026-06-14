@@ -49,7 +49,7 @@ app = FastAPI(title="AgentIC Local", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["null", *[origin.strip() for origin in os.environ.get("AGENTIC_ALLOWED_ORIGINS", "").split(",") if origin.strip()]],
-    allow_origin_regex=r"^(https?://(localhost|127\.0\.0\.1)(:\d+)?|file://.*|agentic://.*)$",
+    allow_origin_regex=r"^(https?://(localhost|127\.0\.0\.1)(:\d+)?|file://.*|agentic://.*|oc://.*)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -64,6 +64,7 @@ ensure_workspace(WS_ROOT)
 STATE_DIR = Path(WS_ROOT) / ".agentic"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 ENTITLEMENT_PATH = STATE_DIR / "entitlement.json"
+AUTH_SESSION_PATH = STATE_DIR / "auth_session.json"
 USAGE_LOG_PATH = STATE_DIR / "usage.jsonl"
 RUN_EVENTS_PATH = STATE_DIR / "run_events.jsonl"
 ACTIVE_DESIGN_PATH = STATE_DIR / "active_design.json"
@@ -272,6 +273,64 @@ def _write_cached_entitlement(entitlement: dict) -> None:
         ENTITLEMENT_PATH.write_text(json.dumps(entitlement, indent=2), encoding="utf-8")
 
 
+def _write_auth_session(session: dict) -> None:
+    if not session.get("access_token"):
+        return
+    safe_session = {
+        key: value
+        for key, value in session.items()
+        if key in {"access_token", "refresh_token", "expires_at", "expires_in", "token_type", "user"}
+    }
+    AUTH_SESSION_PATH.write_text(json.dumps(safe_session, indent=2), encoding="utf-8")
+
+
+def _clear_auth_session() -> None:
+    try:
+        AUTH_SESSION_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _read_auth_session() -> dict | None:
+    try:
+        session = json.loads(AUTH_SESSION_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return session if isinstance(session, dict) and session.get("access_token") else None
+
+
+def _auth_session_expiring(session: dict) -> bool:
+    expires_at = _epoch_from(session.get("expires_at"))
+    if not expires_at:
+        return False
+    return expires_at <= time.time() + 120
+
+
+def _read_or_refresh_auth_session() -> dict | None:
+    session = _read_auth_session()
+    if not session:
+        return None
+    if not _auth_session_expiring(session):
+        return session
+    refresh_token = str(session.get("refresh_token") or "")
+    if not refresh_token:
+        _clear_auth_session()
+        return None
+    try:
+        refreshed = _forward_license_json(
+            "/auth/refresh",
+            method="POST",
+            payload={"refresh_token": refresh_token},
+            include_auth=False,
+        )
+    except Exception:
+        return session
+    if isinstance(refreshed, dict) and refreshed.get("access_token"):
+        _write_auth_session(refreshed)
+        return refreshed
+    return session
+
+
 def _cached_entitlement_for_temporary_failure(reason: str | None = None) -> dict | None:
     cached = _read_cached_entitlement()
     if not cached:
@@ -284,9 +343,18 @@ def _cached_entitlement_for_temporary_failure(reason: str | None = None) -> dict
 def _authorization_headers(request: Request) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     auth = request.headers.get("authorization")
+    persisted_session = None
+    if not auth:
+        persisted_session = _read_or_refresh_auth_session()
+        token = persisted_session.get("access_token") if persisted_session else None
+        if token:
+            auth = f"Bearer {token}"
     if auth:
         headers["Authorization"] = auth
     email = request.headers.get("x-agentic-user-email")
+    if not email and persisted_session:
+        user = persisted_session.get("user") if isinstance(persisted_session.get("user"), dict) else {}
+        email = user.get("email") if isinstance(user, dict) else None
     if email:
         headers["X-AgentIC-User-Email"] = email
     return headers
@@ -555,6 +623,11 @@ def _forward_license_json(
         auth = request.headers.get("authorization")
         if auth:
             headers["Authorization"] = auth
+        else:
+            session = _read_or_refresh_auth_session()
+            token = session.get("access_token") if session else None
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
 
     data = json.dumps(payload or {}).encode("utf-8") if method.upper() != "GET" else None
     cloud_req = urllib.request.Request(
@@ -821,12 +894,15 @@ async def auth_password_login(request: Request):
     password = str(body.get("password") or "")
     if not email or not password:
         raise HTTPException(400, "Email and password are required.")
-    return _forward_license_json(
+    session = _forward_license_json(
         "/auth/password-login",
         method="POST",
         payload={"email": email, "password": password},
         include_auth=False,
     )
+    if isinstance(session, dict) and session.get("access_token"):
+        _write_auth_session(session)
+    return session
 
 
 @app.post("/auth/signup")
@@ -839,12 +915,15 @@ async def auth_signup(request: Request):
     password = str(body.get("password") or "")
     if not email or not password:
         raise HTTPException(400, "Email and password are required.")
-    return _forward_license_json(
+    session = _forward_license_json(
         "/auth/signup",
         method="POST",
         payload={"email": email, "password": password},
         include_auth=False,
     )
+    if isinstance(session, dict) and session.get("access_token"):
+        _write_auth_session(session)
+    return session
 
 
 @app.post("/auth/refresh")
@@ -856,16 +935,60 @@ async def auth_refresh(request: Request):
     refresh_token = str(body.get("refresh_token") or "")
     if not refresh_token:
         raise HTTPException(400, "Refresh token is required.")
-    return _forward_license_json(
+    session = _forward_license_json(
         "/auth/refresh",
         method="POST",
         payload={"refresh_token": refresh_token},
         include_auth=False,
     )
+    if isinstance(session, dict) and session.get("access_token"):
+        _write_auth_session(session)
+    return session
+
+
+@app.post("/auth/desktop-session")
+async def auth_desktop_session(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict) or not body.get("access_token"):
+        raise HTTPException(400, "Access token is required.")
+    _write_auth_session(body)
+    return {"ok": True}
+
+
+@app.get("/auth/desktop-session")
+async def get_auth_desktop_session():
+    session = _read_or_refresh_auth_session()
+    if not session:
+        return {"authenticated": False}
+    return {
+        "authenticated": True,
+        "expires_at": session.get("expires_at"),
+        "user": session.get("user"),
+    }
+
+
+@app.get("/auth/profile")
+async def auth_profile(request: Request):
+    session = _read_or_refresh_auth_session()
+    if not session:
+        return {
+            "authenticated": False,
+            "license": resolve_license_status(request),
+        }
+    return {
+        "authenticated": True,
+        "expires_at": session.get("expires_at"),
+        "user": session.get("user"),
+        "license": resolve_license_status(request),
+    }
 
 
 @app.post("/auth/logout")
 async def auth_logout():
+    _clear_auth_session()
     return {"ok": True}
 
 
@@ -875,6 +998,15 @@ async def auth_google_start():
     if not license_base:
         raise HTTPException(503, "Google sign-in is not configured.")
     return RedirectResponse(f"{license_base}/auth/google/start")
+
+
+@app.get("/purchase/start")
+async def purchase_start(plan: str = "pro"):
+    license_base = _license_server_base()
+    if not license_base:
+        raise HTTPException(503, "Purchase flow is not configured.")
+    normalized_plan = plan if plan in {"starter", "pro"} else "pro"
+    return RedirectResponse(f"{license_base}/purchase/start?plan={normalized_plan}")
 
 
 @app.post("/usage/build")
@@ -1863,4 +1995,4 @@ if __name__ == "__main__":
     import uvicorn
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
     port = int(os.environ.get("AGENTIC_PORT") or os.environ.get("PORT") or "7860")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_config=None, access_log=False)
+    uvicorn.run(app, host="0.0.0.0", port=port, access_log=True)

@@ -10,6 +10,7 @@ import { SettingsProvidersV2 } from "./providers"
 import { SettingsModelsV2 } from "./models"
 import "./settings-v2.css"
 import { SettingsServersV2 } from "./servers"
+import { SettingsProfileV2 } from "./profile"
 
 export const DialogSettings: Component = () => {
   const language = useLanguage()
@@ -28,6 +29,10 @@ export const DialogSettings: Component = () => {
                     <TabsV2.Trigger value="general">
                       <Icon name="sliders" />
                       {language.t("settings.tab.general")}
+                    </TabsV2.Trigger>
+                    <TabsV2.Trigger value="profile">
+                      <Icon name="providers" />
+                      Profile
                     </TabsV2.Trigger>
                     <TabsV2.Trigger value="shortcuts">
                       <Icon name="keyboard" />
@@ -63,6 +68,9 @@ export const DialogSettings: Component = () => {
         </TabsV2.List>
         <TabsV2.Content value="general" class="settings-v2-panel">
           <SettingsGeneralV2 />
+        </TabsV2.Content>
+        <TabsV2.Content value="profile" class="settings-v2-panel">
+          <SettingsProfileV2 />
         </TabsV2.Content>
         <TabsV2.Content value="shortcuts" class="settings-v2-panel">
           <SettingsKeybinds v2 />
