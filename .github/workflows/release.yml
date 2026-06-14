@@ -70,11 +70,15 @@ jobs:
         working-directory: apps/agentic-desktop/packages/desktop
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           AGENTIC_LOCAL_URL: http://127.0.0.1:7860
           AGENTIC_MODE: advisor
           OPENCODE_DEFAULT_AGENT: agentic-vlsi
           OPENCODE_CHANNEL: prod
         run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "GH_TOKEN is required to publish AgentIC Desktop to Vickyrrrrrr/buildstack releases."
+            exit 1
+          fi
           bunx electron-builder ${{ matrix.package_flag }} --publish always --config electron-builder.config.ts
