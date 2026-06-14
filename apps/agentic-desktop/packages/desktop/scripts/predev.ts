@@ -1,5 +1,7 @@
 import { $ } from "bun"
+import path from "node:path"
 
 await $`bun ./scripts/copy-icons.ts ${process.env.OPENCODE_CHANNEL ?? "dev"}`
 
-await $`cd ../opencode && bun script/build-node.ts`
+const buildNodeScript = path.resolve(import.meta.dir, "../../opencode/script/build-node.ts")
+await $`bun ${buildNodeScript}`

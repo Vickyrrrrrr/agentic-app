@@ -50,12 +50,18 @@ const VERSION = await (async () => {
 const bot = ["actions-user", "opencode", "opencode-agent[bot]"]
 const teamPath = path.resolve(import.meta.dir, "../../../.github/TEAM_MEMBERS")
 const team = [
-  ...(await Bun.file(teamPath)
-    .text()
-    .then((x) => x.split(/\r?\n/).map((x) => x.trim()))
-    .then((x) => x.filter((x) => x && !x.startsWith("#")))),
+  ...(await readTeamMembers(teamPath)),
   ...bot,
 ]
+
+async function readTeamMembers(file: string) {
+  const teamFile = Bun.file(file)
+  if (!(await teamFile.exists())) return ["agentic"]
+  return teamFile
+    .text()
+    .then((x) => x.split(/\r?\n/).map((x) => x.trim()))
+    .then((x) => x.filter((x) => x && !x.startsWith("#")))
+}
 
 export const Script = {
   get channel() {
