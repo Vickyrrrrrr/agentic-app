@@ -7,42 +7,50 @@ This is the core "how I work" loop:
 """
 
 import json
+import hashlib
 import logging
 import os
 import re
 import time
+from urllib.parse import urlparse
 
 from openai import OpenAI, AzureOpenAI
 
 logger = logging.getLogger("agentic.chat_agent")
 
 from agent_tools import dispatch_tool
+from agentic_handoffs import schema_catalog
+from agentic_kernel import build_context_contract, scope_for_turn, validate_tool_call
+from agentic_role_runner import RoleContext, persist_role_results, run_role_pipeline
+from agentic_validators import validation_schema_catalog
+from design_intent import build_or_update_design_intent
+from planning_artifacts import write_approval_plan_artifacts
+from rtl_repair import is_rtl_repair_request, repair_active_rtl
+from session_workflow import classify_session_workflow
+from vlsi_capability_graph import assess_design_readiness
 
 TOOL_DEFS = [
     {"type": "function", "function": {
-        "name": "read", "description": "Read a file from the workspace",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+        "name": "workspace", "description": "Read file content, search for patterns (grep), or list files (glob) in the workspace.",
+        "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["read", "search", "list"]}, "path": {"type": "string", "default": "."}, "pattern": {"type": "string", "default": ""}}, "required": ["action"]}}},
     {"type": "function", "function": {
-        "name": "write", "description": "Write content to a file in the workspace",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
+        "name": "write", "description": "Create new files or surgically edit existing files.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string", "default": ""}, "old_string": {"type": "string", "default": ""}, "new_string": {"type": "string", "default": ""}}, "required": ["path"]}}},
     {"type": "function", "function": {
-        "name": "edit", "description": "Find and replace text in a file",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}}, "required": ["path", "old_string", "new_string"]}}},
+        "name": "bash", "description": "Run ANY local shell command (open-source or proprietary EDA tools). After running, an Auto-Checkpoint engine will parse the EDA log and return a pass/fail verdict.",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "eda_tool": {"type": "string", "description": "The name of the EDA tool (e.g. yosys, genus, iverilog). Optional."}, "stage": {"type": "string", "description": "The flow stage (e.g. synthesis, simulation). Optional."}, "log_file": {"type": "string", "description": "If the tool writes to a file (like Innovus or Genus), pass the log file path here. Optional."}, "timeout": {"type": "integer", "default": 300}}, "required": ["command"]}}},
     {"type": "function", "function": {
-        "name": "bash", "description": "Run local workspace shell commands for EDA discovery, simulation, synthesis, verification, and approved setup tasks.",
-        "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer", "default": 300}}, "required": ["command"]}}},
-    {"type": "function", "function": {
-        "name": "grep", "description": "Search file contents with a regex pattern",
-        "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string", "default": "."}}, "required": ["pattern"]}}},
-    {"type": "function", "function": {
-        "name": "glob", "description": "List files matching a glob pattern",
-        "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}}},
+        "name": "report", "description": "Generate a structured signoff summary of all passed and failed checkpoints for the current active design.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
         "name": "web_search", "description": "Search public web resources for datasheets, PDK docs, tool guides, and application notes without sending private project details.",
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer", "default": 5}}, "required": ["query"]}}},
     {"type": "function", "function": {
-        "name": "query_pdk", "description": "Query the local PDK (Process Design Kit) for standard cells, routing layers, and library details without manually parsing raw files.",
-        "parameters": {"type": "object", "properties": {"query_type": {"type": "string", "enum": ["list_libraries", "find_cell", "get_layers"]}, "cell_type": {"type": "string", "description": "e.g., nand2, dff (used for find_cell)"}}, "required": ["query_type"]}}},
+        "name": "query_pdk", "description": "Query the local PDK/capability graph for libraries, cells, routing layers, memory macros, readiness gates, tool adapters, and flow evidence.",
+        "parameters": {"type": "object", "properties": {"query_type": {"type": "string", "enum": ["list_libraries", "find_cell", "get_layers", "capability_summary", "find_memory", "readiness", "manifest_status", "tool_adapters"]}, "cell_type": {"type": "string", "description": "For find_cell: a cell or macro category. For find_memory: the user's requested memory capacity, width, depth, and port style in their own words."}}, "required": ["query_type"]}}},
+    {"type": "function", "function": {
+        "name": "ledger", "description": "Read or update AgentIC's structured VLSI mental model, typed handoffs, and evidence graph. Use this for durable design facts instead of burying state in prose.",
+        "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["get_state", "record_fact", "record_handoff", "record_evidence"]}, "namespace": {"type": "string"}, "key": {"type": "string"}, "value": {}, "source": {"type": "string"}, "source_role": {"type": "string"}, "target_role": {"type": "string"}, "payload": {"type": "object"}, "kind": {"type": "string"}, "ref": {"type": "string"}, "links": {"type": "array", "items": {"type": "object"}}, "max_events": {"type": "integer", "default": 12}}, "required": ["action"]}}},
 ]
 
 SYSTEM_PROMPT = """You are an autonomous VLSI design engineer agent. You follow the same operating model as OpenCode, but for silicon projects.
@@ -58,34 +66,45 @@ SYSTEM_PROMPT = """You are an autonomous VLSI design engineer agent. You follow 
 │  still satisfies the user's stated intent.                   │
 └──────────────────────────────────────────────────────────────┘
 
-LOCAL TOOLING — 7 primary tools + PDK + guarded public research:
-You have eight tools: read, write, edit, bash, grep, glob, web_search, query_pdk.
+LOCAL TOOLING — workspace, execution, PDK, ledger, and guarded public research:
+You have seven tools: workspace, write, bash, report, web_search, query_pdk, ledger.
 Use them as needed to design, build, and debug chips inside the local workspace.
 - Run local EDA commands, edit workspace files, and search project sources.
-- SURGICAL EDITING RULE: Prefer using the `edit` tool for surgical modifications on existing files instead of overwriting them. This saves token overhead and avoids introducing regression bugs. Only use `write` to create new files or for a complete rewrite of a small file.
+- Use ledger to persist structured design facts, role handoffs, and evidence nodes.
+- SURGICAL EDITING RULE: Use `write` with `old_string` and `new_string` for surgical modifications. Only provide `content` to overwrite or create new files.
+- AUTO-CHECKPOINT RULE: Your `bash` tool is completely unrestricted. You can run ANY open-source or proprietary tool. When you run an EDA tool, you MUST pass the `eda_tool` parameter. The backend will automatically parse the tool's log output and return a structured JSON verdict `{pass: bool, errors: [...]}` along with a truncated snippet of the log. You MUST base your next actions on this verdict. If `pass` is false, you must fix the errors.
+- If the tool writes its log to a file (like Genus, Innovus, or Calibre), you MUST pass the `log_file` parameter to `bash` so the checkpoint engine can read it.
+- SDC/CONSTRAINT RULE: Passing STA is meaningless without correct SDC files. You must explicitly generate and validate constraints.
+- CAPABILITY GRAPH RULE: Before instantiating SRAMs, ROMs, pads, macros, PDK cells, floorplan constraints, signoff scripts, or selecting a toolchain, query local capability evidence. Use `query_pdk(tool_adapters)`, `query_pdk(capability_summary)`, `query_pdk(find_memory, cell_type=...)`, `query_pdk(readiness)`, or `query_pdk(manifest_status)` as appropriate. Never invent macro/cell names, tool availability, license state, or signoff readiness without graph/checkpoint evidence.
+- COMPLETION RULE: Before outputting a final summary, you MUST call `report()` to generate the signoff report. Your final message to the user must reference actual checkpoint data, not your own assessment.
 - IMPORTANT LLM RULE: NEVER announce that you are "starting to work" or "I will update you shortly" in a message. If you output a text message to the user, your turn ends immediately and you CANNOT execute any more tools. You must execute your tool calls immediately. Only message the user when you are completely finished or need their explicit input.
 - ANTI-HALLUCINATION RULE: NEVER claim to have created, saved, or simulated a file unless you have ACTUALLY executed the `write` or `bash` tool to do so. Do not output a summary of work you *plan* to do as if it is already done. You must actually generate every single file using the `write` tool.
 - AUTONOMY RULE: You are an autonomous agent with `bash` and `write` tools. NEVER ask the user to run commands for you (like `chmod`, `mkdir`, etc). If a script or simulation fails because a file or module is missing (e.g., missing RTL modules), DO NOT ask the user "Should I generate the missing modules?". YOU ARE THE DESIGNER. You must instantly use the `write` tool to generate the missing RTL modules or fix the script yourself. Do not ask for permission to do your job. Only use NEEDS_INPUT for high-level design decisions (like architecture choices), never for fixing your own bugs or missing files!
 - Choose the EDA stack, flow, and methodology from the user's goal and available local setup.
+- TOOLCHAIN POLICY: Do not bias toward open-source tools. If the user has licensed proprietary tools
+  and a local PDK/script stack that supports them, prefer those tools. Mixed flows are allowed:
+  for example proprietary simulation/synthesis plus open-source PnR, or open-source RTL flow plus
+  proprietary signoff, when that is the best available path. Only suggest installing open-source
+  alternatives when the needed user/proprietary tool or license is absent, and pause for approval.
 - DISCOVER EDA TOOLS ON DEMAND: do not assume a precomputed list. When you need to
-  know what is installed, use bash() to probe: `which yosys verilator iverilog openroad
-  opensta magic klayout netgen gtkwave make python3 docker` and capture exit codes;
+  know what is installed, use bash() to probe: `which yosys verilator iverilog vcs xrun vsim
+  questasim genus dc_shell openroad opensta tempus pt_shell magic klayout netgen calibre
+  gtkwave make python3 docker` and capture exit codes;
   or `command -v <tool>` / `<tool> --version` for one-off checks. Only probe when
   the answer actually matters for the next step — do not waste calls on idle startup.
 - web_search is guarded for IP safety. Use local files first. Only search public,
   non-confidential terms such as public PDK names, public tool docs, or generic
   error categories. Never include local paths, license details, private cell names,
   customer project names, full logs, or proprietary source snippets in a web query.
-- If a required tool, license, script, or PDK is missing: use NEEDS_INPUT
-  and ask whether to install, use Docker, configure a path, or continue
-  with a reduced flow. The user decides what they want to use.
+- If a required tool, license, script, or PDK is missing: use NEEDS_INPUT and ask whether to install or configure. NEVER assume or guess tool availability. Always probe using `which` or `command -v` to check what open-source or proprietary tools (VCS, Genus, Innovus, Calibre, etc.) are available, and adapt your flow to use whatever tools the user has. If no tools are available, present a clear plan of both open-source and proprietary alternatives, and ask the user for approval or input to install the necessary packages. The user decides what they want to target.
 
 STRICT EXECUTION RULE:
 You must call tools in every response. A response without tool calls is invalid.
 If you output text instead of calling tools, you will be treated as having completed nothing.
 The ONLY valid text output is:
+- A design plan (see PLANNING PHASE below) on the FIRST message of a new design task.
 - A final summary after ALL design and verification stages pass.
-- NEEDS_INPUT for a genuine architectural decision or missing PDK dependency (never for simulation, compilation, or linting errors).
+- A direct conversational question for a genuine architectural decision or missing PDK dependency (never for simulation, compilation, or linting errors).
 
 VERIFICATION LOOP (MANDATORY):
 After each RTL write or edit, you MUST compile and simulate the design using the available simulation tools (e.g. iverilog/vvp).
@@ -98,12 +117,40 @@ You cannot output a final text summary response until the simulation PASSES.
 │                                                              │
 │  STEP 1 — UNDERSTAND + DISCOVER:                            │
 │    Preserve user intent. Inspect workspace and environment.  │
-│      bash("env | sort")                                      │
+│      bash("ls -d */ 2>/dev/null || true")                     │
 │      bash("find . -maxdepth 3 -type f | sort | head -300")   │
-│      glob("**/{Makefile,*.mk,*.tcl,*.sdc,*.ys,*.sh,*.cfg}")  │
 │    Read existing scripts before inventing new flows.         │
 │    Probe PDK via PDK_ROOT, PDKPATH, PDK_HOME, user paths.   │
 │    Use web_search() only for public, non-confidential docs. │
+│                                                              │
+│  STEP 1.5 — PLANNING PHASE (FIRST MESSAGE ONLY):            │
+│    When this is the FIRST user message about a new design:   │
+│    You MUST present a structured design plan BEFORE writing  │
+│    any code. Use NEEDS_INPUT: to pause for user approval.    │
+│    The plan MUST include:                                    │
+│                                                              │
+│    a) **Design Specification**: Module name, interface       │
+│       signals, parameters, clock/reset convention            │
+│    b) **Architecture Diagram**: A Mermaid block diagram      │
+│       showing the internal structure (use ```mermaid block)  │
+│    c) **Directory & File Plan**: Exact directory name and    │
+│       every file to be created with a one-line description   │
+│       The directory name must be specific to the chip/block  │
+│       and must include the full project structure: rtl, tb,  │
+│       constraints, synth, sim, hardening/pnr, sta, signoff,  │
+│       scripts, logs, and reports as applicable.              │
+│    d) **Verification Strategy**: What testbench/simulation   │
+│       approach will be used                                  │
+│    e) **Tool Flow**: Which detected/user tools will be used  │
+│       and why; include proprietary tools first if available  │
+│       and licensed, otherwise list the open-source fallback. │
+│                                                              │
+│    Format the plan as markdown with the Mermaid diagram      │
+│    inline. End with: "Approve this plan to begin execution." │
+│    Wait for user approval before writing ANY files.          │
+│                                                              │
+│    For FOLLOW-UP messages (fixes, additions, questions),     │
+│    skip the planning phase and execute immediately.          │
 │                                                              │
 │  STEP 2 — CHOOSE FLOW + PLAN FILES:                         │
 │    Pick the flow that matches user intent and available      │
@@ -130,7 +177,7 @@ TCL ERROR DEBUG PROTOCOL — Follow when a Tcl script fails:
 1. Read the log — find the failing command and line number
 2. Read the Tcl script around line N
 3. Identify PDK variables, library names, cell names, and paths in the Tcl
-4. Use bash/grep/glob to search local PDK files for those references
+4. Use workspace search/list/read or bash to search local PDK files for those references
 5. Cross-reference: does the PDK actually have what the Tcl expects?
 6. If public web search is enabled, search only sanitized public terms
 7. Fix the Tcl based on actual evidence from logs + PDK files + web search
@@ -149,7 +196,7 @@ CROSS-REFERENCE RULE — Web search + local PDK together:
 When fixing PDK-related errors, always verify web documentation against
 the actual PDK files on the user's system. A cell or library mentioned
 online may not exist in the user's PDK version. Always check local files
-with bash/grep/read before writing a fix.
+with workspace search/read or bash before writing a fix.
 
 IP SAFETY RULE:
 Do not send chip source, local file paths, private PDK details, license details,
@@ -176,7 +223,18 @@ NEVER use generic folder names like `design`, `project`, `soc_project`, or `rtl_
 Do not create root-level rtl/, tb/, sim/, synth/, pnr/, hardening/, signoff/, or reports/
 folders unless the user is continuing an existing root-level workspace layout.
 These are conventions, not constraints. If the user's proprietary/customer flow has a different
-layout, discover it with glob/read/grep and follow that layout.
+layout, discover it with workspace list/search/read and follow that layout.
+
+SINGLE DIRECTORY RULE (CRITICAL):
+Before creating a new project directory, you MUST ALWAYS run bash('ls -d */ 2>/dev/null || true')
+to list existing directories. If a directory already exists for the same design concept,
+RE-USE IT. NEVER create duplicate variant directories for the same design.
+Examples of violations:
+  - Creating `axi_to_apb_bridge/` when `axi4lite_to_apb_bridge/` already exists
+  - Creating `counter_v2/` when `counter/` already exists
+  - Creating `spi_master_new/` when `spi_master/` already exists
+If continuing an existing conversation about a design, the project directory name MUST
+match EXACTLY what was used before. Check the workspace first.
 
 FILE QUALITY RULES:
 - Write readable, deterministic source files with consistent indentation and a final newline.
@@ -185,7 +243,7 @@ FILE QUALITY RULES:
 - Do not write one-line HDL/Tcl blobs; structure modules, tasks, always blocks, and scripts clearly.
 - For hardening, preserve each tool's native folder expectations if using OpenLane/OpenROAD/Innovus/ICC2/etc.
 - If visual diagrams are requested or needed (Mermaid block diagrams or WaveDrom timing diagrams):
-  - Save them under the reports/ directory as architecture.mermaid or timing.json.
+  - Save them under the reports/ directory with a descriptive, request-derived filename.
   - Mermaid syntax strictly requires newlines (\n). You MUST format the file with proper newlines. DO NOT write the diagram on a single line. Do not use markdown backticks in the file.
   - CRITICAL MERMAID SYNTAX RULES:
     1. ALWAYS quote node labels to prevent parse errors! e.g., A["Core (CPU)"]
@@ -201,8 +259,8 @@ RTL RULES (applies to ALL chips — counter, CPU, accelerator, anything):
 BEHAVIORAL POLICIES:
 1. DEPENDENCY POLICY: If any tool returns a JSON status like `DEPENDENCY_MISSING` (e.g., missing PDK or tool), you must IMMEDIATELY halt the workflow. Do not hallucinate physics or try to fake the missing data. Reply with `NEEDS_INPUT:` to explain the missing component and offer resolution options to the user (e.g., "Would you like me to install Volare?").
 2. TRACEABILITY POLICY: The user's original request is the supreme contract. If your code fails timing, area, or DRC, you CANNOT secretly change the user's specs (like lowering the clock speed or bus width) just to pass the test. You must optimize the design or use `NEEDS_INPUT:` to ask for permission to relax constraints.
-3. HUMAN-IN-THE-LOOP POLICY: Execute the complete implementation and verification flow (writing RTL, testbenches, running simulation, and running synthesis) in a single continuous loop. Do NOT pause and ask for approval between spec, RTL writing, and simulation/synthesis/validation. Execute the complete task autonomously. Only pause and use `NEEDS_INPUT:` if you encounter a missing PDK dependency or tool installation issue.
-4. ERROR HANDLING & AUTONOMOUS FIXES: When any simulation, compilation, linting, or synthesis tool returns an error or warning, you must immediately resolve it using all available tools (read, write, edit, grep, glob, bash, query_pdk). Never output a conversational progress report, plan-only text response, or use NEEDS_INPUT to ask the user how to fix it. `NEEDS_INPUT:` is ONLY for missing PDK dependencies or tool installation issues. Simulation failures, synthesis errors, lint warnings — these are BUGS to be fixed, not blockers to ask about. You MUST fix them yourself. Re-run the verification tool immediately after every fix to confirm resolution.
+3. HUMAN-IN-THE-LOOP POLICY: For the FIRST message of a new chip design task, you MUST present a structured design plan and wait for user approval (see STEP 1.5 in BUILD ALGORITHM). After the user approves the plan, execute the complete implementation and verification flow (writing RTL, testbenches, running simulation, and running synthesis) in a single continuous loop without further pauses. For follow-up messages (edits, fixes, additions), execute immediately without a planning phase. Only pause mid-execution and use `NEEDS_INPUT:` if you encounter a missing PDK dependency or tool installation issue.
+4. ERROR HANDLING & AUTONOMOUS FIXES: When any simulation, compilation, linting, or synthesis tool returns an error or warning, you must immediately resolve it using all available tools (workspace, write, bash, query_pdk, web_search when safe). Never output a conversational progress report, plan-only text response, or use NEEDS_INPUT to ask the user how to fix it. `NEEDS_INPUT:` is ONLY for missing PDK dependencies or tool installation issues. Simulation failures, synthesis errors, lint warnings — these are BUGS to be fixed, not blockers to ask about. You MUST fix them yourself. Re-run the verification tool immediately after every fix to confirm resolution.
 
 CLEANUP — user asks to "clear", "clean", "delete", "reset", "remove":
 1. bash("ls") to list what exists in workspace
@@ -213,22 +271,40 @@ CLEANUP — user asks to "clear", "clean", "delete", "reset", "remove":
 COMPLETION:
 - Summarize what you built
 - List all created file paths organized by directory
-- Report which EDA tool stages ran and whether they passed, but never include raw commands,
+- Report which EDA tool stages ran and whether they passed, including RTL compile/simulation,
+  synthesis, constraints/STA, hardening/PnR, GDSII generation, DRC/LVS/signoff when available,
+  but never include raw commands,
   tool-call JSON, full logs, or stack traces in the final user-facing response.
 
 ┌──────────────────────────────────────────────────────────────┐
 │  FEW-SHOT TRAJECTORY EXAMPLES                                │
 │                                                              │
-│  Example: Complete Implementation and Verification           │
+│  Example 1: Plan-then-Execute (First Message)                │
 │  User: "Design a 4-bit counter on sky130 and verify it"      │
-│  Assistant (Round 0): Calls query_pdk to find library.       │
-│  Assistant (Round 1): Calls write to save counter.v.          │
-│  Assistant (Round 2): Calls write to save tb_counter.v.       │
-│  Assistant (Round 3): Calls bash to compile/run simulation.  │
-│  Assistant (Round 4): Calls edit/write to fix simulation bug.│
-│  Assistant (Round 5): Calls bash to compile/run simulation.  │
-│  Assistant (Round 6): Outputs final text message summarizing  │
+│  Assistant (Round 0): Calls bash('ls -d */ 2>/dev/null')     │
+│    to check existing dirs, then calls query_pdk.             │
+│  Assistant (Round 1): Outputs NEEDS_INPUT: with a plan:      │
+│    - Design spec (4-bit sync counter, clk, rst, en, out)     │
+│    - Mermaid block diagram (```mermaid graph TD ...```)       │
+│    - File list: counter/rtl/counter.v, counter/tb/tb.sv,     │
+│      counter/sim/ (output dir)                               │
+│    - Verification: iverilog + vvp simulation                 │
+│    - Ends with "Approve this plan to begin execution."       │
+│  [User approves: "Yes, proceed."]                            │
+│  Assistant (Round 2): Calls write to save counter.v.          │
+│  Assistant (Round 3): Calls write to save tb_counter.v.       │
+│  Assistant (Round 4): Calls bash to compile/run simulation.  │
+│  Assistant (Round 5): Calls edit/write to fix simulation bug.│
+│  Assistant (Round 6): Calls bash to compile/run simulation.  │
+│  Assistant (Round 7): Outputs final text message summarizing  │
 │  passed results without intermediate conversational halts.    │
+│                                                              │
+│  Example 2: Follow-up (Immediate Execution)                  │
+│  User: "Add a testbench for the overflow flag"               │
+│  Assistant (Round 0): Calls workspace(read) to check code.   │
+│  Assistant (Round 1): Calls write to add overflow_tb.sv.      │
+│  Assistant (Round 2): Calls bash to compile/run.             │
+│  (No planning phase — this is a follow-up, not a new design) │
 └──────────────────────────────────────────────────────────────┘"""
 
 
@@ -349,17 +425,246 @@ def _is_simple_greeting(text: str) -> bool:
     )
 
 
-def _looks_like_chip_task(text: str) -> bool:
-    lowered = (text or "").lower()
-    if len(lowered.split()) >= 18:
+def _looks_like_approval(text: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9\s]", "", text.lower()).strip()
+    tokens = set(normalized.split())
+    approval_words = {
+        "yes", "y", "ok", "okay", "approved", "approve", "go ahead",
+        "proceed", "continue", "start", "do it", "begin", "execute",
+    }
+    approval_phrases = (
+        "go ahead", "do it", "start execution", "yes proceed", "yes continue",
+        "ok proceed", "okay proceed", "approve it", "approved proceed",
+    )
+    if normalized in approval_words or any(phrase in normalized for phrase in approval_phrases):
         return True
-    return any(token in lowered for token in (
-        "rtl", "verilog", "systemverilog", "vhdl", "testbench", "simulate",
-        "synthesis", "synthesize", "yosys", "openroad", "openlane", "gds",
-        "pdks", "pdk", "sky130", "gf180", "asap7", "risc-v", "riscv",
-        "cpu", "soc", "microcontroller", "uart", "gpio", "timer", "pwm",
-        "adc", "spi", "i2c", "axi", "wishbone", "hardening", "drc", "lvs",
+    return bool(tokens & {"yes", "ok", "okay", "approved", "approve"}) and bool(
+        tokens & {"proceed", "continue", "start", "begin", "execute"}
+    )
+
+
+def _previous_assistant_requested_approval(messages: list[dict]) -> bool:
+    for msg in reversed(messages[:-1]):
+        if msg.get("role") != "assistant":
+            continue
+        content = str(msg.get("content") or "").lower()
+        return "approve this plan" in content or "needs_input" in content or "begin execution" in content
+    return False
+
+
+def _has_approved_plan_turn(messages: list[dict]) -> bool:
+    for idx, msg in enumerate(messages):
+        if msg.get("role") != "assistant":
+            continue
+        content = str(msg.get("content") or "").lower()
+        if "approve this plan" not in content and "begin execution" not in content:
+            continue
+        for later in messages[idx + 1:]:
+            if later.get("role") == "user" and _looks_like_approval(str(later.get("content") or "")):
+                return True
+    return False
+
+
+def _is_followup_edit_request(text: str) -> bool:
+    lowered = (text or "").lower()
+    followup_terms = (
+        "fix", "change", "update", "modify", "add testbench", "add a testbench",
+        "add tests", "debug", "repair", "rerun", "re-run", "continue from",
+        "improve timing", "resolve", "clean up",
+    )
+    return any(term in lowered for term in followup_terms)
+
+
+def _is_new_build_request(text: str) -> bool:
+    lowered = (text or "").lower()
+    new_build_terms = (
+        "build", "implement", "create rtl", "write rtl", "generate rtl",
+        "make chip", "make a chip", "create chip", "design a", "design an",
+        "harden", "generate gds", "gdsii", "rtl to gds",
+    )
+    return any(term in lowered for term in new_build_terms)
+
+
+def _asks_for_diagram_artifact(text: str) -> bool:
+    lowered = (text or "").lower()
+    if any(term in lowered for term in ("do not save", "don't save", "dont save", "only inline", "chat only")):
+        return False
+    diagram_terms = ("diagram", "mermaid", "flowchart", "block diagram", "architecture picture")
+    return any(term in lowered for term in diagram_terms)
+
+
+def _asks_to_repair_diagram_artifact(text: str) -> bool:
+    lowered = (text or "").lower()
+    repair_terms = ("fix", "repair", "syntax", "parse error", "not showing", "broken", "doesn't render", "doesnt render")
+    diagram_terms = ("mermaid", "diagram", "flowchart")
+    if any(term in lowered for term in repair_terms) and any(term in lowered for term in diagram_terms):
+        return True
+    return any(term in lowered for term in ("syntax error", "syntax errro", "parse error")) and len(lowered.split()) <= 8
+
+
+def _has_concrete_chip_spec(text: str) -> bool:
+    lowered = (text or "").lower()
+    block_terms = (
+        "uart", "spi", "i2c", "axi", "wishbone", "gpio", "timer", "pwm",
+        "counter", "fifo", "dma", "riscv", "risc-v", "cpu", "soc",
+        "accelerator", "mac", "fir", "fft", "aes", "sha", "noc",
+        "controller", "bridge", "arbiter", "decoder", "encoder", "alu",
+        "sram", "cache", "pll", "adc", "dac",
+    )
+    vague_terms = ("best chip", "world best", "most complex", "anything", "whatever", "something")
+    if any(term in lowered for term in vague_terms) and not any(term in lowered for term in block_terms):
+        return False
+    return any(term in lowered for term in block_terms) or bool(re.search(r"\b\d+\s*[- ]?bit\b", lowered))
+
+
+def _needs_spec_clarification(user_text: str) -> bool:
+    lowered = (user_text or "").lower()
+    if not _is_new_build_request(lowered):
+        return False
+    if _is_followup_edit_request(lowered):
+        return False
+    if not _has_concrete_chip_spec(lowered):
+        return True
+    missing_target = not any(term in lowered for term in ("130nm", "sky130", "gf180", "asap7", "pdk", "tsmc", "gf", "node"))
+    wants_physical = any(term in lowered for term in ("gds", "gdsii", "harden", "pnr", "place", "route", "tapeout"))
+    return wants_physical and missing_target
+
+
+def _execution_is_authorized(user_text: str, messages: list[dict]) -> bool:
+    """True only when the latest turn is an approval or a scoped edit after approval."""
+    if _looks_like_approval(user_text) and _previous_assistant_requested_approval(messages):
+        return True
+    return _has_approved_plan_turn(messages) and _is_followup_edit_request(user_text)
+
+
+def _deterministic_intent(user_text: str, messages: list[dict]) -> str | None:
+    """Fast local guardrail for requests that should never enter the build loop."""
+    text = (user_text or "").strip().lower()
+    if not text:
+        return "INFORMATIONAL"
+    if _looks_like_approval(text) and _previous_assistant_requested_approval(messages):
+        return "DESIGN_TASK"
+    if _has_approved_plan_turn(messages) and _is_followup_edit_request(text):
+        return "DESIGN_TASK"
+
+    diagram_terms = ("diagram", "mermaid", "flowchart", "block diagram", "architecture picture")
+    file_action_terms = ("save", "write file", "create file", "put it in", "export", "generate files")
+    build_terms = (
+        "build", "implement", "write rtl", "generate rtl", "create rtl",
+        "simulate", "compile", "synthesize", "synthesis", "harden", "openlane",
+        "openroad", "pnr", "place", "route", "sta", "drc", "lvs", "gds",
+        "gdsii", "make chip", "make a chip", "create chip", "design and verify",
+    )
+    advice_terms = (
+        "suggest", "recommend", "what", "which", "explain", "tell me", "can you",
+        "will you", "would you", "best", "compare", "list", "show me", "give me",
+    )
+
+    asks_for_diagram = any(term in text for term in diagram_terms)
+    asks_to_save_diagram = asks_for_diagram and any(term in text for term in file_action_terms)
+    if asks_to_save_diagram:
+        return "DESIGN_TASK"
+    if asks_for_diagram and not asks_to_save_diagram:
+        return "INFORMATIONAL"
+
+    if _contains_word_or_phrase(text, build_terms) or re.search(r"\b(make|create|build|design|implement|generate)\b.{0,80}\b(chip|soc|core|rtl|gdsii?)\b", text):
+        return "DESIGN_TASK"
+
+    if any(term in text for term in advice_terms):
+        return "INFORMATIONAL"
+
+    return None
+
+
+def _contains_word_or_phrase(text: str, terms: tuple[str, ...]) -> bool:
+    tokens = set(re.findall(r"[a-z0-9][a-z0-9_+-]*", text or ""))
+    for term in terms:
+        if " " in term or "-" in term:
+            if term in text:
+                return True
+        elif term in tokens:
+            return True
+    return False
+
+
+def _classify_user_intent(user_text: str, client, model: str) -> str:
+    """Uses a fast, deterministic micro-completion to categorize query intent."""
+    router_prompt = (
+        "You are a VLSI design assistant router. Classify the user's input into one of two categories:\n"
+        "1. \"DESIGN_TASK\": The user explicitly asks to create/edit/save files, implement RTL/testbenches/scripts, run tools, simulate, synthesize, harden, generate GDSII, or proceed after approving a plan.\n"
+        "2. \"INFORMATIONAL\": The user asks for advice, recommendations, explanation, feasibility, comparison, or an inline Mermaid/block diagram without asking to save files or run tools.\n\n"
+        "Important: 'make/give/show a Mermaid diagram' is INFORMATIONAL unless the user asks to save it as a file or execute a build.\n"
+        "Important: vague superlative requests like 'best chip', 'most complex chip', or 'what can be made on 130nm' are INFORMATIONAL until the user gives a concrete block/spec and asks to build.\n"
+        "Output ONLY the category name (\"DESIGN_TASK\" or \"INFORMATIONAL\") with no other text or explanation."
+    )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": router_prompt},
+                {"role": "user", "content": user_text}
+            ],
+            max_tokens=10,
+            temperature=0.0
+        )
+        intent = response.choices[0].message.content.strip().upper()
+        logger.info("SOTA Intent Router: classified query intent as %s", intent)
+        if "DESIGN_TASK" in intent:
+            return "DESIGN_TASK"
+    except Exception as e:
+        logger.warning("SOTA Intent Router: classification failed, falling back to INFORMATIONAL: %s", e)
+    return "INFORMATIONAL"
+
+
+def _non_execution_system_prompt(context_packet: dict) -> str:
+    return (
+        "You are AgentIC's VLSI advisor mode. Answer the user's latest question directly. "
+        "Do not claim to run tools, create files, simulate, synthesize, or save artifacts. "
+        "The AgentIC harness may persist safe documentation artifacts after your response. "
+        "If `public_web_research` is present in the context, use those results as the "
+        "only public web evidence and say when the search was blocked or unavailable. "
+        "If the user asks for a Mermaid diagram, provide a valid fenced ```mermaid block. "
+        "If the user asks what chip is best for 130nm, give a practical recommendation and tradeoffs. "
+        "Use concise engineering language.\n\n"
+        "Compact local context for grounding:\n"
+        f"{json.dumps(context_packet, indent=2)[:12000]}"
+    )
+
+
+def _asks_for_public_web_research(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(phrase in lowered for phrase in (
+        "search web",
+        "search the web",
+        "web search",
+        "read web",
+        "browse",
+        "look up",
+        "latest",
+        "from internet",
+        "from the internet",
     ))
+
+
+def _public_web_query_from_user_text(text: str) -> str:
+    query = re.sub(r"(?i)\b(search|web|browse|internet|look up|read web|latest|please|can you|tell me|read)\b", " ", text or "")
+    query = re.sub(r"(?i)(/home|/mnt|\\\\wsl\.localhost|[a-z]:\\)[^\s]+", " ", query)
+    query = re.sub(r"(?i)\b(license|token|api[_-]?key|secret|customer|proprietary)\b[^\s]*", " ", query)
+    query = re.sub(r"\s+", " ", query).strip()
+    return query[:240] or (text or "")[:240]
+
+
+def _spec_clarification_message(user_text: str, flow_decision: dict) -> str:
+    selected = (flow_decision.get("selected_pdk") or {}).get("name") or "the selected/local PDK"
+    return (
+        "I should not start a chip build from that request yet because the chip itself is not defined enough.\n\n"
+        "Please specify:\n\n"
+        "1. **Block type**: e.g. UART, SPI, RISC-V MCU, DSP accelerator, AES core, NoC router, SRAM controller.\n"
+        "2. **Interface**: ports/bus, clock/reset, data width, memory map if any.\n"
+        "3. **Target**: PDK/node and goal, e.g. RTL only, simulation, synthesis, or RTL-to-GDSII.\n"
+        "4. **Constraints**: target clock, area/power priority, and any special IP/macros.\n\n"
+        f"Current flow context points to `{selected}`. Once you give the block/spec, I will create a structured plan first and wait for approval before writing files or running tools."
+    )
 
 
 
@@ -369,7 +674,7 @@ def _tool_enforcement_message(user_text: str) -> dict:
         "content": (
             "The previous response did not use tools. This is an AgentIC build task, "
             "so continue by using tools now. First inspect the workspace and available "
-            "flow context with glob/grep/bash/read as appropriate, then write a concise "
+            "flow context with workspace list/search/read or bash as appropriate, then write a concise "
             "project plan under a project reports directory derived from the user's chip "
             "request. Continue into RTL/testbench/scripts if the request is specific. "
             "Use web_search only for public, non-confidential terms. Do not answer only "
@@ -393,6 +698,76 @@ def _user_facing_llm_error(error: Exception) -> str:
     return "The model provider could not complete the request. Check the key, model name, and OpenAI-compatible base URL."
 
 
+def _llm_error_category(error: Exception) -> str:
+    text = str(error).lower()
+    if any(token in text for token in ("content_filter", "responsibleaipolicyviolation", "content management policy")):
+        return "provider_safety_filter"
+    if any(token in text for token in ("401", "unauthorized", "authentication", "invalid api key", "incorrect api key")):
+        return "authentication"
+    if any(token in text for token in ("404", "model", "not found", "does not exist")):
+        return "model_or_endpoint_not_found"
+    if any(token in text for token in ("rate limit", "quota", "billing", "insufficient_quota", "429")):
+        return "rate_limit_or_quota"
+    if any(token in text for token in ("base_url", "connection", "connect", "dns", "ssl", "timeout", "timed out")):
+        return "network_or_timeout"
+    if any(token in text for token in ("400", "bad request", "invalid_request", "tool", "schema")):
+        return "request_schema_or_provider_compatibility"
+    if any(token in text for token in ("500", "502", "503", "504", "server error", "service unavailable")):
+        return "provider_server_error"
+    return "provider_request_failed"
+
+
+def _provider_label(base_url: str | None) -> str:
+    if not base_url:
+        return "default OpenAI-compatible endpoint"
+    try:
+        parsed = urlparse(base_url)
+        host = parsed.netloc or parsed.path
+    except Exception:
+        host = str(base_url)
+    if not host:
+        return "configured OpenAI-compatible endpoint"
+    return host.split("@")[-1]
+
+
+def _llm_failure_summary(
+    error: Exception,
+    *,
+    phase: str,
+    model: str,
+    base_url: str | None,
+    round_index: int | None = None,
+    max_rounds: int | None = None,
+    attempt: int | None = None,
+    max_retries: int | None = None,
+    is_planning_round: bool | None = None,
+    tool_call_count: int | None = None,
+) -> str:
+    category = _llm_error_category(error)
+    location = []
+    if round_index is not None and max_rounds is not None:
+        location.append(f"LLM round {round_index}/{max_rounds}")
+    if attempt is not None and max_retries is not None:
+        location.append(f"retry attempt {attempt}/{max_retries}")
+    location_text = ", ".join(location) or phase
+    mode = "planning" if is_planning_round else "execution" if is_planning_round is False else "advisor"
+    raw = str(error).strip().replace("\n", " ")
+    raw = re.sub(r"(?i)(api[-_ ]?key|authorization|bearer)\s*[:=]\s*[A-Za-z0-9._~-]+", r"\1=[redacted]", raw)
+    if len(raw) > 420:
+        raw = raw[:420] + "..."
+    return (
+        "The model call failed, so AgentIC stopped this run instead of looping silently.\n\n"
+        f"- **Where:** {location_text}\n"
+        f"- **Phase:** {phase} (`{mode}` mode)\n"
+        f"- **Model:** `{model or 'not set'}`\n"
+        f"- **Provider:** `{_provider_label(base_url)}`\n"
+        f"- **Failure type:** `{category}`\n"
+        f"- **Tool calls completed before failure:** {tool_call_count if tool_call_count is not None else 0}\n"
+        f"- **Provider message:** {raw or 'No provider details were returned.'}\n\n"
+        f"**Likely fix:** {_user_facing_llm_error(error)}"
+    )
+
+
 def _strip_needs_input(text: str) -> str:
     return re.sub(r"^\s*NEEDS_INPUT:\s*", "", text or "", flags=re.IGNORECASE).strip()
 
@@ -414,6 +789,206 @@ def _sanitize_assistant_text(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _extract_mermaid(text: str) -> str:
+    """Extract a Mermaid diagram from assistant text without depending on one phrasing."""
+    if not text:
+        return ""
+    fenced = re.search(r"```(?:mermaid)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    if fenced:
+        return fenced.group(1).strip()
+
+    lines = text.splitlines()
+    start = None
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if re.match(r"^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram-v2|erDiagram|journey|gantt|pie|mindmap|timeline)\b", stripped):
+            start = idx
+            break
+    if start is None:
+        return ""
+
+    diagram = []
+    for line in lines[start:]:
+        stripped = line.rstrip()
+        if not stripped and diagram:
+            break
+        if diagram and re.match(r"^\s*(here|this|notes?|explanation|why|tradeoffs?)\b", stripped, re.IGNORECASE):
+            break
+        diagram.append(stripped)
+    return "\n".join(diagram).strip()
+
+
+def _safe_mermaid_id(raw_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_]", "_", raw_id or "").strip("_")
+    if not safe:
+        safe = "Node"
+    if not re.match(r"^[A-Za-z_]", safe):
+        safe = f"N_{safe}"
+    return safe
+
+
+def _quote_mermaid_labels(line: str) -> str:
+    """Quote labels that commonly break Mermaid when left bare."""
+    def repl(match: re.Match) -> str:
+        node_id, label = match.group(1), match.group(2).strip()
+        if not label or label.startswith(('"', "'", "`")):
+            return match.group(0)
+        if re.search(r"[^A-Za-z0-9_ ]", label):
+            escaped = label.replace('"', r"\"")
+            return f'{node_id}["{escaped}"]'
+        return match.group(0)
+
+    return re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)\[([^\]\n]+)\]", repl, line)
+
+
+def _normalize_mermaid(mermaid: str) -> str:
+    """Normalize common LLM Mermaid mistakes without changing graph semantics."""
+    mermaid = (mermaid or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if mermaid.startswith("```"):
+        mermaid = _extract_mermaid(mermaid)
+    if not mermaid:
+        return ""
+
+    id_map: dict[str, str] = {}
+    # IDs immediately before a node label, e.g. I/O[Fabric].
+    for match in re.finditer(r"(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9_./:-]*)\s*(?=[\[\(\{])", mermaid):
+        raw = match.group(1)
+        safe = _safe_mermaid_id(raw)
+        if raw != safe:
+            id_map[raw] = safe
+
+    # IDs around arrows, e.g. I/O --> PMU.
+    for match in re.finditer(r"(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9_./:-]*)\s*(?=-{1,3}>|==>|--)", mermaid):
+        raw = match.group(1)
+        safe = _safe_mermaid_id(raw)
+        if raw != safe:
+            id_map[raw] = safe
+    for match in re.finditer(r"(?:-{1,3}>|==>|--)\s*([A-Za-z][A-Za-z0-9_./:-]*)(?![A-Za-z0-9_])", mermaid):
+        raw = match.group(1)
+        safe = _safe_mermaid_id(raw)
+        if raw != safe:
+            id_map[raw] = safe
+
+    normalized = mermaid
+    for raw, safe in sorted(id_map.items(), key=lambda item: len(item[0]), reverse=True):
+        normalized = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(raw)}(?![A-Za-z0-9_])",
+            safe,
+            normalized,
+        )
+
+    lines = []
+    for line in normalized.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("subgraph ") and "[" not in stripped and '"' in stripped:
+            lines.append(line)
+            continue
+        lines.append(_quote_mermaid_labels(line.rstrip()))
+    return "\n".join(lines).strip() + "\n"
+
+
+def _persist_advisor_diagram_artifact(content: str, user_text: str, workspace_root: str, design_name: str) -> list[str]:
+    """Persist safe documentation-only artifacts for advisor diagram requests."""
+    mermaid = _normalize_mermaid(_extract_mermaid(content))
+    if not mermaid:
+        return []
+    slug_source = re.sub(r"[^a-z0-9]+", "_", (user_text or "").lower()).strip("_")
+    slug = (slug_source or "diagram")[:48].strip("_") or "diagram"
+    stamp = int(time.time() * 1000)
+    mermaid_path = f"docs/diagrams/{slug}_{stamp}.mermaid"
+    markdown_path = f"docs/diagrams/{slug}_{stamp}.md"
+    md = (
+        "# Architecture Diagram\n\n"
+        f"Prompt: {user_text.strip()[:500]}\n\n"
+        "```mermaid\n"
+        f"{mermaid}"
+        "```\n"
+    )
+    written = []
+    for path, body in (
+        (mermaid_path, mermaid),
+        (markdown_path, md),
+    ):
+        result = dispatch_tool(
+            "write",
+            {"path": path, "content": body},
+            workspace_root,
+            design_name,
+        )
+        if result.startswith("File written") or result.startswith("File edited"):
+            written.append(path)
+        else:
+            logger.warning("Advisor artifact write failed for %s: %s", path, result)
+    return written
+
+
+def _mermaid_artifacts(workspace_root: str) -> list[str]:
+    candidates = []
+    for relative_root in ("docs/diagrams", "reports"):
+        artifact_root = os.path.join(workspace_root, relative_root)
+        if not os.path.isdir(artifact_root):
+            continue
+        for root_dir, _dirs, files in os.walk(artifact_root):
+            for file_name in files:
+                if file_name.lower().endswith((".mermaid", ".mmd")):
+                    full = os.path.join(root_dir, file_name)
+                    candidates.append((os.path.getmtime(full), os.path.relpath(full, workspace_root)))
+    candidates.sort(reverse=True)
+    return [path for _mtime, path in candidates]
+
+
+def _repair_mermaid_artifacts(workspace_root: str, design_name: str) -> tuple[list[str], str]:
+    paths = _mermaid_artifacts(workspace_root)
+    if not paths:
+        return [], "No Mermaid artifact was found in this chat workspace."
+
+    written = []
+    failures = []
+    for path in paths:
+        full = os.path.join(workspace_root, path)
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                original = fh.read()
+        except Exception as exc:
+            failures.append(f"`{path}` read failed: {exc}")
+            continue
+
+        fixed = _normalize_mermaid(original)
+        if not fixed:
+            failures.append(f"`{path}` did not contain repairable Mermaid syntax.")
+            continue
+
+        result = dispatch_tool("write", {"path": path, "content": fixed}, workspace_root, design_name)
+        if result.startswith("File written") or result.startswith("File edited"):
+            written.append(path)
+
+        md_path = re.sub(r"\.(mermaid|mmd)$", ".md", path, flags=re.IGNORECASE)
+        md_full = os.path.join(workspace_root, md_path)
+        if os.path.isfile(md_full):
+            try:
+                with open(md_full, "r", encoding="utf-8", errors="replace") as fh:
+                    md_content = fh.read()
+                if "```mermaid" in md_content:
+                    md_fixed = re.sub(
+                        r"```mermaid\s*[\s\S]*?```",
+                        f"```mermaid\n{fixed}```",
+                        md_content,
+                        count=1,
+                        flags=re.IGNORECASE,
+                    )
+                else:
+                    md_fixed = md_content.rstrip() + f"\n\n```mermaid\n{fixed}```\n"
+                md_result = dispatch_tool("write", {"path": md_path, "content": md_fixed}, workspace_root, design_name)
+                if md_result.startswith("File written") or md_result.startswith("File edited"):
+                    written.append(md_path)
+            except Exception as exc:
+                logger.warning("Paired markdown Mermaid repair failed for %s: %s", md_path, exc)
+
+    if not written:
+        return [], "Found Mermaid artifacts, but failed to write repaired diagrams. " + " ".join(failures[:3])
+    return written, f"Repaired Mermaid syntax in {len([path for path in written if path.endswith(('.mermaid', '.mmd'))])} diagram artifact(s)."
+
+
 def _progress_event(label: str, stage: str = "WORKING", status: str = "running") -> dict:
     return {
         "type": "progress",
@@ -424,10 +999,33 @@ def _progress_event(label: str, stage: str = "WORKING", status: str = "running")
     }
 
 
+def _thought_event(label: str, stage: str = "THINKING", status: str = "running") -> dict:
+    return {
+        "type": "thought",
+        "content": label,
+        "label": label,
+        "stage": stage,
+        "status": status,
+    }
+
+
+def _status_from_assistant_text(text: str) -> str:
+    lowered = (text or "").lower()
+    if "plan" in lowered:
+        return "Preparing the design plan"
+    if any(term in lowered for term in ("simulate", "testbench", "verification")):
+        return "Checking verification work"
+    if any(term in lowered for term in ("synth", "place", "route", "gds", "timing")):
+        return "Coordinating the implementation flow"
+    if any(term in lowered for term in ("fix", "error", "warning", "debug")):
+        return "Reviewing a tool issue"
+    return "Reasoning over the next safe step"
+
+
 def _safe_project_name(path: str) -> str | None:
     parts = [part for part in (path or "").replace("\\", "/").split("/") if part and part not in {".", ".."}]
     root_sections = {
-        "rtl", "tb", "dv", "sim", "synth", "pnr", "sta", "reports",
+        "docs", "rtl", "tb", "dv", "sim", "synth", "pnr", "sta", "reports",
         "constraints", "formal", "layout", "logs", "scripts", "hardening",
         "signoff", "openlane", "openroad", "runs",
     }
@@ -436,6 +1034,77 @@ def _safe_project_name(path: str) -> str | None:
     if len(parts) >= 2 and not parts[0].startswith("."):
         return parts[0]
     return ""
+
+
+def _execution_guard_error(label: str, content: str) -> dict:
+    return {
+        "type": "error",
+        "content": content,
+        "label": label,
+        "stage": "GUARD",
+        "status": "failed",
+    }
+
+
+def _tool_signature(name: str, args: dict) -> str:
+    payload = json.dumps(_stable_tool_payload(name, args), sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _stable_tool_payload(name: str, args: dict) -> dict:
+    if name == "write":
+        content = str(args.get("content") or "")
+        old_string = str(args.get("old_string") or "")
+        new_string = str(args.get("new_string") or "")
+        return {
+            "name": name,
+            "path": args.get("path"),
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest() if content else "",
+            "old_sha256": hashlib.sha256(old_string.encode("utf-8")).hexdigest() if old_string else "",
+            "new_sha256": hashlib.sha256(new_string.encode("utf-8")).hexdigest() if new_string else "",
+        }
+    if name == "bash":
+        return {
+            "name": name,
+            "command": " ".join(str(args.get("command") or "").split()),
+            "eda_tool": args.get("eda_tool"),
+            "stage": args.get("stage"),
+            "log_file": args.get("log_file"),
+        }
+    if name == "ledger":
+        return {
+            "name": name,
+            "action": args.get("action"),
+            "namespace": args.get("namespace"),
+            "key": args.get("key"),
+            "kind": args.get("kind"),
+            "ref": args.get("ref"),
+        }
+    if name == "workspace":
+        return {
+            "name": name,
+            "action": args.get("action"),
+            "path": args.get("path"),
+            "pattern": args.get("pattern"),
+        }
+    return {"name": name, "args": args}
+
+
+def _tool_error_signature(result: str) -> str:
+    text = result[:2000]
+    try:
+        if result.startswith("Error:"):
+            raw = result.split("Error:", 1)[1].strip()
+            data = json.loads(raw)
+            text = json.dumps({
+                "status": data.get("status"),
+                "path": data.get("path"),
+                "reason": data.get("reason"),
+                "required_action": data.get("required_action"),
+            }, sort_keys=True)
+    except Exception:
+        pass
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _progress_for_tool_call(name: str, args: dict) -> dict:
@@ -453,9 +1122,7 @@ def _progress_for_tool_call(name: str, args: dict) -> dict:
             event = _progress_event("Updating the build summary", "WRITE")
         else:
             event = _progress_event("Updating generated artifacts", "WRITE")
-        design_name = _safe_project_name(str(args.get("path", "")))
-        if design_name is not None:
-            event["design_name"] = design_name
+        # Do not override design_name based on path.
         return event
     if lower_name == "edit":
         return _progress_event("Fixing generated files", "EDIT")
@@ -465,6 +1132,8 @@ def _progress_for_tool_call(name: str, args: dict) -> dict:
         return _progress_event("Searching the web", "SEARCH")
     if lower_name == "query_pdk":
         return _progress_event("Parsing local PDK files", "DISCOVER")
+    if lower_name == "ledger":
+        return _progress_event("Updating structured design memory", "LEDGER")
     if lower_name == "bash":
         command = str(args.get("command", "")).lower()
         if any(token in command for token in ("which ", "env ", "pdk", "license", "command -v", "find ")):
@@ -513,66 +1182,459 @@ def _progress_for_bash_output(line: str) -> dict:
     return _progress_event("Local EDA step is running", "RUN")
 
 
-def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
+def converse_stream(messages: list[dict], api_key: str, workspace_root: str, design_name: str,
                     base_url: str | None = None, model: str = "gpt-4o",
-                    event_pusher=None, is_cancelled=None):
+                    event_pusher=None, is_cancelled=None, pdk_profile: str = ""):
     """Yields event dicts for SSE streaming. One call = one agent interaction.
     event_pusher: optional callable(event_dict) to push events mid-dispatch (for bash streaming)."""
 
-    if _is_simple_greeting(_plain_user_text(messages)):
+    user_text = _plain_user_text(messages)
+    if _is_simple_greeting(user_text):
         yield {
             "type": "response",
             "content": "Hi. Tell me the chip block, interface, target PDK or tool flow, and what you want AgentIC to produce.",
         }
         return
 
-    system_prompt = SYSTEM_PROMPT
-    system_prompt += IMMUNE_INSTRUCTION
-    # Add environment info
-    from local_tools import detect_environment
-    env = detect_environment()
-    env_info = json.dumps(env, indent=2)
-    system_prompt += f"\n\n## System environment\n{env_info}"
+    from vlsi_state import DesignStateStore
+    state_store = DesignStateStore(workspace_root, design_name)
 
-    full_messages = [{"role": "system", "content": system_prompt}]
-    full_messages.extend(_sanitize_messages(messages))
-    
-    # Append a high-priority system directive at the end of the history
-    # to break the context bias loop where the agent repeatedly outputs text plans.
-    full_messages.append({
-        "role": "system",
-        "content": (
-            "CRITICAL SYSTEM DIRECTIVE: The user has authorized you to proceed. "
-            "You MUST execute tools (write, edit, bash, read, etc.) now. "
-            "DO NOT write a text response like 'I will begin...' or 'Stay tuned'. "
-            "If you output a text response without tool calls, you will be terminated. "
-            "Call the appropriate tools immediately to execute the task."
-        )
-    })
     base_url = base_url or "https://api.openai.com/v1"
 
-    # Auto-detect Azure OpenAI
+    # Auto-detect Azure OpenAI and initialize the client before heavyweight
+    # environment discovery, so fast advisor/router turns stay responsive.
     if "azure.com" in base_url.lower():
-        # Extract azure_endpoint from base_url
         match = re.match(r"(https://[^.]+\.openai\.azure\.com)", base_url)
         azure_endpoint = match.group(1) if match else base_url
         api_version = "2024-02-15-preview"
-        # If full URL includes api-version, extract it
         ver_match = re.search(r"api-version=([\d-]+)", base_url)
         if ver_match:
             api_version = ver_match.group(1)
-        client = AzureOpenAI(api_key=api_key, api_version=api_version, azure_endpoint=azure_endpoint, timeout=120)
+        client = AzureOpenAI(api_key=api_key, api_version=api_version, azure_endpoint=azure_endpoint, timeout=300)
     else:
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=120)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=300)
 
-    max_rounds = 60
-    debug_events = os.environ.get("AGENTIC_DEBUG_EVENTS", "true").strip().lower() in {"1", "true", "yes", "on"}
+    # Detect if this is a design request dynamically. This must be based on the
+    # latest user turn, not inherited from earlier tool calls in the thread.
+    yield _thought_event("Understanding whether this is a question, diagram, plan, or build task", "INTENT")
+    workflow_decision = classify_session_workflow(user_text, messages)
+    if workflow_decision.confidence >= 0.8 or workflow_decision.intent == "INFORMATIONAL":
+        intent = workflow_decision.intent
+        logger.info(
+            "Session Workflow Router: mode=%s intent=%s confidence=%.2f reason=%s",
+            workflow_decision.mode,
+            workflow_decision.intent,
+            workflow_decision.confidence,
+            workflow_decision.reason,
+        )
+    else:
+        deterministic_intent = _deterministic_intent(user_text, messages)
+        if deterministic_intent:
+            intent = deterministic_intent
+            logger.info("Intent Router: local guard classified query intent as %s", intent)
+        else:
+            intent = _classify_user_intent(user_text, client, model)
+
+    is_design_task = workflow_decision.requires_design_kernel or (intent == "DESIGN_TASK")
+    execution_authorized = workflow_decision.execution_authorized or _execution_is_authorized(user_text, messages)
+    is_planning_round = workflow_decision.planning_round if is_design_task else False
+    needs_spec_clarification = not execution_authorized and _needs_spec_clarification(user_text)
+
+    if _asks_to_repair_diagram_artifact(user_text):
+        repair_scope = scope_for_turn(
+            is_design_task=False,
+            is_planning_round=False,
+            execution_authorized=False,
+            wants_diagram_artifact=False,
+            repairs_artifact=True,
+        )
+        repair_contract = build_context_contract(user_text, repair_scope).to_dict()
+        try:
+            state_store.set_context_contract(repair_contract)
+            state_store.record_handoff("principal", "debug_engineer", {
+                "intent_digest": repair_contract.get("turn_digest"),
+                "scope": repair_scope.name,
+                "inputs": ["latest reports/*.mermaid artifacts"],
+                "outputs": ["repaired Mermaid artifact"],
+                "evidence_refs": [],
+                "open_risks": [],
+            })
+        except Exception:
+            pass
+        yield _thought_event("Repairing Mermaid diagram artifacts in this chat workspace", "ARTIFACTS")
+        written, message = _repair_mermaid_artifacts(workspace_root, design_name)
+        if written:
+            yield {
+                "type": "progress",
+                "content": "Repaired Mermaid artifact",
+                "label": "Repaired Mermaid artifact",
+                "stage": "ARTIFACTS",
+                "status": "completed",
+                "design_name": design_name,
+            }
+            yield {
+                "type": "response",
+                "content": (
+                    f"{message}\n\nUpdated workspace artifacts:\n"
+                    + "\n".join(f"- `{path}`" for path in written)
+                ),
+                "label": "Diagram repaired",
+                "stage": "ARTIFACTS",
+                "status": "completed",
+                "design_name": design_name,
+            }
+        else:
+            yield {
+                "type": "needs_input",
+                "content": message,
+                "label": "Diagram artifact not found",
+                "stage": "ARTIFACTS",
+                "status": "needs_input",
+                "design_name": design_name,
+            }
+        return
+
+    if is_rtl_repair_request(user_text, messages):
+        logger.info("RTL repair router: applying deterministic workspace repair")
+        yield _thought_event("Repairing the owned RTL file as a workspace artifact", "RTL_REPAIR")
+        try:
+            repair_result = repair_active_rtl(workspace_root, design_name, user_text)
+            try:
+                state_store.record_handoff("rtl_repair_kernel", "verification_engineer", {
+                    "module": repair_result.module_name,
+                    "artifact": repair_result.artifact_path,
+                    "report": repair_result.report_path,
+                    "lint_passed": repair_result.lint_passed,
+                    "quality_accepted": repair_result.quality_accepted,
+                })
+            except Exception:
+                pass
+            yield {
+                "type": "progress",
+                "content": "Updated RTL artifact in workspace",
+                "label": "Updated RTL artifact in workspace",
+                "stage": "ARTIFACTS",
+                "status": "completed",
+                "design_name": design_name,
+                "artifact_path": repair_result.artifact_path,
+                "artifacts": [repair_result.artifact_path, repair_result.report_path],
+            }
+            yield repair_result.to_event_payload(design_name)
+            return
+        except Exception as exc:
+            logger.exception("Deterministic RTL repair failed")
+            yield {
+                "type": "error",
+                "content": f"RTL repair failed before producing a safe workspace patch: {exc}",
+                "label": "RTL repair failed",
+                "stage": "RTL_REPAIR",
+                "status": "failed",
+                "design_name": design_name,
+            }
+            return
+
+    if not is_design_task:
+        logger.info("Intent Router: answering in fast non-execution advisor mode")
+        yield _thought_event("Answering directly without scanning local EDA tools", "ADVISOR")
+        fast_context_packet = {
+            "schema_version": "agentic.fast_advisor_context.v1",
+            "design_name": design_name,
+            "intent": intent,
+            "workflow": workflow_decision.to_record(),
+            "environment_scan": "skipped_for_non_execution_turn",
+            "workspace": "active chat workspace",
+            "routing_rule": "No local build, file execution, PDK scan, or EDA tool discovery is required for this turn.",
+        }
+        if _asks_for_public_web_research(user_text):
+            public_query = _public_web_query_from_user_text(user_text)
+            yield _thought_event("Searching public sources with a sanitized query", "SEARCH")
+            fast_context_packet["public_web_research"] = {
+                "query": public_query,
+                "ip_safety": "local paths, license text, private PDK identifiers, and proprietary details removed before search",
+                "results": dispatch_tool(
+                    "web_search",
+                    {"query": public_query, "max_results": 5},
+                    workspace_root,
+                    design_name,
+                ),
+            }
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": _non_execution_system_prompt(fast_context_packet)},
+                    *_sanitize_messages(messages),
+                ],
+            )
+            content = response.choices[0].message.content or ""
+            sanitized = _sanitize_assistant_text(content) or "I can help with that."
+            if _asks_for_diagram_artifact(user_text):
+                yield _thought_event("Saving the diagram as a safe workspace artifact", "ARTIFACTS")
+                written = _persist_advisor_diagram_artifact(sanitized, user_text, workspace_root, design_name)
+                if written:
+                    yield {
+                        "type": "progress",
+                        "content": "Saved diagram artifact",
+                        "label": "Saved diagram artifact",
+                        "stage": "ARTIFACTS",
+                        "status": "completed",
+                        "design_name": design_name,
+                    }
+                    sanitized = (
+                        f"{sanitized}\n\n"
+                        "Saved workspace artifacts:\n"
+                        + "\n".join(f"- `{path}`" for path in written)
+                    )
+                else:
+                    sanitized = (
+                        f"{sanitized}\n\n"
+                        "I did not save a diagram artifact because no valid Mermaid diagram block was found in the model response."
+                    )
+            yield {
+                "type": "response",
+                "content": sanitized,
+                "label": "Diagram ready" if _asks_for_diagram_artifact(user_text) else "Response ready",
+                "stage": "ADVISOR",
+                "status": "completed",
+                "design_name": design_name if _asks_for_diagram_artifact(user_text) else None,
+            }
+            return
+        except Exception as e:
+            logger.error("Fast non-execution LLM call failed: %s", e)
+            yield {
+                "type": "error",
+                "content": _llm_failure_summary(
+                    e,
+                    phase="advisor response",
+                    model=model,
+                    base_url=base_url,
+                    is_planning_round=None,
+                    tool_call_count=0,
+                ),
+                "label": "Model call failed",
+                "stage": "model",
+                "status": "failed",
+            }
+            return
+
+    system_prompt = SYSTEM_PROMPT
+    system_prompt += IMMUNE_INSTRUCTION
+    # Heavyweight VLSI context is built only for design/planning/execution turns.
+    from context_engine import build_agent_context_packet
+    from local_tools import detect_environment
+    from flow_runtime import recommend_flow
+    env = detect_environment()
+    flow_decision = recommend_flow(env, requested_pdk=pdk_profile)
+    try:
+        state_store.set_intent(user_text, pdk_profile)
+        state_store.upsert_design_fact("session_workflow", workflow_decision.mode, workflow_decision.to_record(), source="session_workflow_router")
+        state_store.set_flow_decision(flow_decision)
+    except Exception:
+        pass
+    context_packet = build_agent_context_packet(
+        workspace_root=workspace_root,
+        design_name=design_name,
+        user_text=user_text,
+        env=env,
+        flow_decision=flow_decision,
+    )
+    system_prompt += (
+        "\n\n## AgentIC compact context packet\n"
+        f"{json.dumps(context_packet, indent=2)}\n\n"
+        "RUNTIME CONTRACT:\n"
+        "- Treat AgentIC's flow_decision as the authoritative starting point for methodology selection.\n"
+        "- Do not assume open-source flows are preferred. Use detected licensed proprietary stacks first when they satisfy the user's PDK and deliverables.\n"
+        "- If proprietary tools are detected but licensing or PDK scripts are missing, ask the user to configure them; then offer open-source fallback installation only with approval.\n"
+        "- Use env.pdk_index for PDK facts; do not guess standard-cell libraries, corners, routing layers, or deck availability.\n"
+        "- Use env.capability_index for local capability facts: SRAM/ROM macros, pad cells, timing corners, stdcell helper cells, and selected tool adapters. Never invent macro names; bind only to indexed local collateral or ask for user configuration/compiler output.\n"
+        "- Use env.capability_graph for cross-cutting PDK/IP/tool readiness. For SRAM or macro needs, bind through query_pdk(find_memory) and obey the returned integration_contract before writing RTL wrappers or floorplan constraints.\n"
+        "- If query_pdk(readiness) reports blocked gates, stop the affected implementation stage and explain the missing PDK/tool/IP evidence instead of faking progress.\n"
+        "- Prefer structured configs for OpenLane 2 (JSON/YAML) when available; use legacy flow.tcl only for OpenLane 1 repository flows.\n"
+        "- For ORFS, generate/modify config.mk and invoke make from the detected ORFS flow root or with DESIGN_CONFIG.\n"
+        "- For proprietary flows, use existing local foundry/customer scripts first and generate Tcl only from local evidence.\n"
+        "- Project artifacts must live under one precise project root with canonical docs/plans, docs/diagrams, rtl, tb, dv, constraints, scripts, sim/runs, synth, pnr, sta, signoff, reports, and logs directories as the task requires.\n"
+        "- Mermaid diagrams and approval documents belong under docs/diagrams and docs/plans. Never place diagrams inside rtl/ or as loose workspace-root files.\n"
+        "- Use workspace(read/search/list), query_pdk, and bash to retrieve exact context on demand. Do not ask for or paste entire repositories, PDKs, or logs into the conversation.\n"
+        "- For existing large files, use surgical write edits with old_string/new_string; large whole-file rewrites may be rejected by the harness.\n"
+        "- Every final answer must be backed by checkpoint/report/design-state evidence generated through AgentIC tools.\n"
+    )
+
+    full_messages = [{"role": "system", "content": system_prompt}]
+    full_messages.extend(_sanitize_messages(messages))
+    kernel_scope = scope_for_turn(
+        is_design_task=is_design_task,
+        is_planning_round=is_planning_round,
+        execution_authorized=execution_authorized,
+        wants_diagram_artifact=_asks_for_diagram_artifact(user_text),
+        repairs_artifact=False,
+    )
+    kernel_contract = build_context_contract(user_text, kernel_scope).to_dict()
+    try:
+        state_store.set_context_contract(kernel_contract)
+        state_store.record_handoff("principal", "context_librarian", {
+            "intent_digest": kernel_contract.get("turn_digest"),
+            "scope": kernel_scope.name,
+            "inputs": ["design_state", "repo_map", "flow_decision", "environment_summary"],
+            "outputs": ["role_scoped_context_packet"],
+            "evidence_refs": [],
+            "open_risks": [],
+        })
+        yield _thought_event("Running structured role passes for spec, flow, verification, and signoff context", "ROLES")
+        role_ctx = RoleContext(
+            user_text=user_text,
+            workspace_root=workspace_root,
+            design_name=design_name,
+            context_contract=kernel_contract,
+            flow_decision=flow_decision,
+            env=env,
+            design_state=state_store.load(),
+            needs_spec_clarification=needs_spec_clarification,
+        )
+        role_results = run_role_pipeline(role_ctx)
+        role_counts = persist_role_results(state_store, role_results)
+        design_intent = build_or_update_design_intent(
+            workspace_root=workspace_root,
+            design_name=design_name,
+            user_text=user_text,
+            flow_decision=flow_decision,
+            role_results=role_results,
+            env=env,
+            previous=state_store.load(),
+        )
+        state_store.set_design_intent(design_intent.model_dump(mode="json"))
+        readiness = assess_design_readiness(design_intent.model_dump(mode="json"), env.get("capability_graph") or {})
+        state_store.record_evidence("design_readiness", design_intent.intent_id, readiness)
+        state_store.upsert_design_fact("readiness", design_intent.intent_id, readiness, source="capability_graph")
+        try:
+            state_store.record_file(f"{design_intent.project_root}/PROJECT_MANIFEST.json", action="intent_manifest")
+        except Exception:
+            pass
+        state_store.record_evidence("role_pipeline", kernel_scope.name, {
+            "roles": [result.role for result in role_results],
+            "counts": role_counts,
+            "risks": [risk for result in role_results for risk in result.risks][:20],
+            "intent_id": design_intent.intent_id,
+            "project_root": design_intent.project_root,
+        })
+    except Exception:
+        pass
+    context_packet = build_agent_context_packet(
+        workspace_root=workspace_root,
+        design_name=design_name,
+        user_text=user_text,
+        env=env,
+        flow_decision=flow_decision,
+        context_contract=kernel_contract,
+    )
+    full_messages.append({
+        "role": "system",
+        "content": (
+            "## AgentIC kernel context contract\n"
+            f"{json.dumps(kernel_contract, indent=2)}\n\n"
+            "## AgentIC typed handoff schema catalog\n"
+            f"{json.dumps(schema_catalog(), indent=2)[:8000]}\n\n"
+            "## AgentIC strict validation schema catalog\n"
+            f"{json.dumps(validation_schema_catalog(), indent=2)[:12000]}\n\n"
+            "You must obey this permission scope. If a needed action is outside scope, output NEEDS_INPUT with the missing approval/configuration."
+        ),
+    })
+
+    if needs_spec_clarification:
+        logger.info("Spec gate: requesting chip details before planning/execution")
+        yield _thought_event("Checking that the chip spec is concrete enough before any build", "SPEC")
+        yield {
+            "type": "needs_input",
+            "content": _spec_clarification_message(user_text, flow_decision),
+            "label": "Chip specification needed",
+            "stage": "SPEC",
+            "status": "needs_input",
+        }
+        return
+
+    if is_planning_round:
+        yield _thought_event("Preparing an approval plan before writing files or running tools", "PLAN")
+        try:
+            plan_artifact = write_approval_plan_artifacts(
+                workspace_root=workspace_root,
+                design_name=design_name,
+                user_text=user_text,
+                flow_decision=flow_decision,
+                role_results=role_results,
+                env=env,
+                design_intent=design_intent,
+            )
+            for rel_path in plan_artifact.artifacts:
+                try:
+                    state_store.record_file(rel_path, action="plan_artifact")
+                except Exception:
+                    pass
+            yield {
+                "type": "progress",
+                "content": "Saved approval plan and architecture diagram",
+                "label": "Saved approval plan and architecture diagram",
+                "stage": "PLAN",
+                "status": "completed",
+                "design_name": design_name,
+            }
+            yield {
+                "type": "needs_input",
+                "content": plan_artifact.content,
+                "label": "Plan approval needed",
+                "stage": "PLAN",
+                "status": "needs_input",
+                "design_name": design_name,
+                "options": plan_artifact.actions,
+                "artifacts": plan_artifact.artifacts,
+                "project_root": plan_artifact.project_root,
+            }
+            return
+        except Exception as exc:
+            logger.warning("Structured planning artifact generation failed; falling back to model plan: %s", exc)
+        # First design message: instruct the agent to output a plan
+        full_messages.append({
+            "role": "system",
+            "content": (
+                "PLANNING PHASE DIRECTIVE: The user has asked for a chip design task, but execution is not approved yet. "
+                "You MUST first run bash('ls -d */ 2>/dev/null || true') to check existing directories, "
+                "then output a comprehensive design plan using NEEDS_INPUT: format. "
+                "The plan must include: (1) Design Specification, (2) a Mermaid architecture diagram "
+                "(use ```mermaid ... ``` code blocks), (3) Directory & File Plan, "
+                "(4) Verification Strategy, (5) Tool Flow. "
+                "Use the canonical project structure: docs/plans, docs/diagrams, rtl, tb, dv, constraints, scripts, sim/runs, synth, pnr, sta, signoff, reports, logs. "
+                "End the plan with: 'Approve this plan to begin execution.' "
+                "Do NOT write any RTL files yet. Only present the plan and wait for approval."
+            )
+        })
+    else:
+        yield _thought_event("Using the approved plan to run the local VLSI workflow", "EXECUTE")
+        # Follow-up message: proceed with execution
+        full_messages.append({
+            "role": "system",
+            "content": (
+                "CRITICAL SYSTEM DIRECTIVE: The user has authorized you to proceed. "
+                "You MUST execute tools (write, edit, bash, read, etc.) now. "
+                "Along with your tool calls, briefly state in 1-2 sentences what you are planning to do "
+                "so the user can follow your execution. Do not write long text without tool calls, "
+                "but always provide a brief explanation of your current action."
+            )
+        })
+
+    max_rounds = int(os.environ.get("AGENTIC_MAX_LLM_ROUNDS", "34" if not is_planning_round else "8"))
+    max_tool_calls = int(os.environ.get("AGENTIC_MAX_TOOL_CALLS", "52" if not is_planning_round else "8"))
+    max_identical_tool_calls = int(os.environ.get("AGENTIC_MAX_IDENTICAL_TOOL_CALLS", "2"))
+    max_writes_per_path = int(os.environ.get("AGENTIC_MAX_WRITES_PER_PATH", "3"))
+    debug_events = os.environ.get("AGENTIC_DEBUG_EVENTS", "false").strip().lower() in {"1", "true", "yes", "on"}
     forced_tool_name: str | None = None
     forced_tool_retries = 0
-    has_write_call = False
+    planning_discovery_done = False
+    tool_call_count = 0
+    tool_signature_counts: dict[str, int] = {}
+    write_path_counts: dict[str, int] = {}
+    repeated_error_counts: dict[str, int] = {}
 
     for _round in range(max_rounds):
         if is_cancelled and is_cancelled():
+            logger.info("Cancellation detected at the beginning of LLM round %d", _round + 1)
             yield {
                 "type": "cancelled",
                 "content": "Run stopped.",
@@ -584,16 +1646,27 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
         api_messages = list(full_messages)
         api_messages = _sliding_window_rounds(api_messages, limit_rounds=5)
         api_messages = _prune_message_history(api_messages)
-        api_messages.append({
-            "role": "system",
-            "content": (
-                "CRITICAL SYSTEM REMINDER: You are in the middle of executing. "
-                "Do NOT write a text response like 'I will begin...' or 'Stay tuned'. "
-                "You MUST continue calling tools (write, edit, bash, read, etc.) until the design task is complete and fully verified. "
-                "Only when you have completed all file edits and successfully compiled/simulated the design, "
-                "you may write the final text summary response to the user."
-            )
-        })
+        # Round-level system reminder — adapt for planning vs execution
+        if is_planning_round:
+            api_messages.append({
+                "role": "system",
+                "content": (
+                    "PLANNING PHASE: If discovery has not been done, first check existing directories with "
+                    "bash('ls -d */ 2>/dev/null || true') or workspace(action='list'). "
+                    "then output a detailed design plan using NEEDS_INPUT: prefix. "
+                    "Include a Mermaid architecture diagram and the canonical project structure. Do NOT write RTL, testbench, scripts, or EDA outputs during planning."
+                )
+            })
+        else:
+            api_messages.append({
+                "role": "system",
+                "content": (
+                    "CRITICAL SYSTEM REMINDER: You are in the middle of executing. "
+                    "Continue executing tools (write, edit, bash, read, etc.) until the design task is complete and fully verified. "
+                    "Along with your tool calls, always provide a brief 1-2 sentence status/explanation of your current step "
+                    "so the user is aware of what you are doing in the background."
+                )
+            })
         # Add a small delay between rounds to prevent hitting rate limits
         if _round > 0:
             time.sleep(0.5)
@@ -605,6 +1678,16 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
         retry_delay = 2.0
         response = None
         for attempt in range(max_retries):
+            if is_cancelled and is_cancelled():
+                logger.info("Cancellation detected inside LLM retry loop")
+                yield {
+                    "type": "cancelled",
+                    "content": "Run stopped.",
+                    "label": "Run stopped",
+                    "stage": "cancelled",
+                    "status": "cancelled",
+                }
+                return
             try:
                 response = client.chat.completions.create(
                     model=model,
@@ -629,8 +1712,19 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                     logger.error("LLM call failed: %s", e)
                     yield {
                         "type": "error",
-                        "content": _user_facing_llm_error(e),
-                        "label": "Model provider issue",
+                        "content": _llm_failure_summary(
+                            e,
+                            phase="planning" if is_planning_round else "execution",
+                            model=model,
+                            base_url=base_url,
+                            round_index=_round + 1,
+                            max_rounds=max_rounds,
+                            attempt=attempt + 1,
+                            max_retries=max_retries,
+                            is_planning_round=is_planning_round,
+                            tool_call_count=tool_call_count,
+                        ),
+                        "label": "Model call failed",
                         "stage": "model",
                         "status": "failed",
                     }
@@ -645,10 +1739,18 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
 
             if msg.content:
                 if "NEEDS_INPUT:" in msg.content:
-                    yield {"type": "needs_input", "content": _sanitize_assistant_text(msg.content)}
+                    yield {
+                        "type": "needs_input" if is_planning_round else "response",
+                        "content": _sanitize_assistant_text(msg.content).replace("NEEDS_INPUT:", "").strip(),
+                        "label": "Plan approval needed" if is_planning_round else "Response ready",
+                        "stage": "PLAN" if is_planning_round else "WORKING",
+                        "status": "needs_input" if is_planning_round else "completed",
+                    }
                     return
                 elif debug_events:
                     yield {"type": "reasoning", "content": msg.content}
+                else:
+                    yield _thought_event(_status_from_assistant_text(msg.content))
 
             full_messages.append({"role": "assistant", "content": None, "tool_calls": [
                 {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
@@ -662,8 +1764,49 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                     args = {}
 
                 logger.info("Tool call: %s args=%s", fn.name, json.dumps(args)[:200])
+                tool_call_count += 1
+                if tool_call_count > max_tool_calls:
+                    yield _execution_guard_error(
+                        "Execution budget exhausted",
+                        (
+                            f"Stopped after {tool_call_count - 1} tool calls without reaching signoff. "
+                            "The run is likely cycling; inspect the latest failing artifact/checkpoint before continuing."
+                        ),
+                    )
+                    return
+                signature = _tool_signature(fn.name, args)
+                tool_signature_counts[signature] = tool_signature_counts.get(signature, 0) + 1
+                if tool_signature_counts[signature] > max_identical_tool_calls:
+                    yield _execution_guard_error(
+                        "Repeated tool loop stopped",
+                        (
+                            f"Stopped after repeating the same `{fn.name}` action "
+                            f"{tool_signature_counts[signature]} times. "
+                            "The agent must change strategy or repair the underlying manifest/spec before retrying."
+                        ),
+                    )
+                    return
                 if fn.name == "write":
-                    has_write_call = True
+                    write_path = str(args.get("path") or "")
+                    write_path_counts[write_path] = write_path_counts.get(write_path, 0) + 1
+                    if write_path and write_path_counts[write_path] > max_writes_per_path:
+                        yield _execution_guard_error(
+                            "Repeated file rewrite stopped",
+                            (
+                                f"Stopped after {write_path_counts[write_path]} writes to `{write_path}` in one run. "
+                                "This indicates patch churn; the agent must inspect the file/checkpoint and make a targeted edit."
+                            ),
+                        )
+                        return
+                tool_decision = validate_tool_call(kernel_scope, fn.name, args)
+                if not tool_decision.allowed:
+                    result = tool_decision.to_tool_result()
+                    full_messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                    if debug_events:
+                        yield {"type": "tool-result", "content": result, "state": fn.name.upper()}
+                    continue
+                if is_planning_round and fn.name in {"workspace", "bash", "query_pdk"}:
+                    planning_discovery_done = True
                 yield _progress_for_tool_call(fn.name, args)
                 if debug_events:
                     yield {"type": "tool-call", "content": f"{fn.name}({json.dumps(args)[:300]})", "state": fn.name.upper()}
@@ -685,6 +1828,7 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                             event_pusher(event)
 
                 if is_cancelled and is_cancelled():
+                    logger.info("Cancellation detected before executing tool %s", fn.name)
                     yield {
                         "type": "cancelled",
                         "content": "Run stopped.",
@@ -698,6 +1842,7 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                     fn.name,
                     args,
                     workspace_root,
+                    design_name,
                     on_output=on_bash_output if fn.name == "bash" else None,
                     cancel_checker=is_cancelled,
                 )
@@ -705,6 +1850,28 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
 
                 logger.info("Tool %s completed in %.1fs (result length: %d)", fn.name, elapsed, len(result))
                 yield _progress_for_tool_result(result)
+                if result.startswith("Error:"):
+                    error_key = _tool_error_signature(result)
+                    repeated_error_counts[error_key] = repeated_error_counts.get(error_key, 0) + 1
+                    if repeated_error_counts[error_key] >= 3:
+                        yield _execution_guard_error(
+                            "Repeated tool error stopped",
+                            (
+                                "The same tool error repeated three times. "
+                                "Stopping this run so the harness does not loop while hiding the root cause."
+                            ),
+                        )
+                        return
+                if fn.name == "write" and result.startswith(("File written", "File edited")):
+                    yield {
+                        "type": "progress",
+                        "content": "Refreshing generated artifacts",
+                        "label": "Refreshing generated artifacts",
+                        "stage": "ARTIFACTS",
+                        "status": "completed",
+                        "design_name": design_name,
+                        "artifact_path": str(args.get("path") or ""),
+                    }
                 if debug_events:
                     yield {"type": "tool-result", "content": result[:1500], "state": fn.name.upper()}
                 full_messages.append({"role": "tool", "tool_call_id": tc.id, "content": result[:5000]})
@@ -716,8 +1883,29 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                 return
 
             user_text = _plain_user_text(messages)
-            if _looks_like_chip_task(user_text) and _round < max_rounds - 1 and forced_tool_retries < 3:
-                forced_tool_name = "glob"
+
+            # If this is a planning round and the agent output a plan text, treat it as needs_input
+            if is_planning_round and msg.content and len(msg.content.strip()) > 100:
+                if not planning_discovery_done and forced_tool_retries < 3:
+                    forced_tool_name = "workspace"
+                    forced_tool_retries += 1
+                    full_messages.append({"role": "assistant", "content": msg.content})
+                    full_messages.append({
+                        "role": "system",
+                        "content": (
+                            "Before presenting the plan, inspect the existing project directories. "
+                            "Call workspace with action='list' and pattern='*' or bash with 'ls -d */ 2>/dev/null || true'. "
+                            "Do not write files during planning."
+                        )
+                    })
+                    continue
+                plan_content = _sanitize_assistant_text(msg.content)
+                logger.info("Planning phase: agent output a design plan (%d chars)", len(plan_content))
+                yield {"type": "needs_input", "content": plan_content}
+                return
+
+            if is_design_task and _round < max_rounds - 1 and forced_tool_retries < 3:
+                forced_tool_name = "workspace"
                 forced_tool_retries += 1
                 logger.info("LLM returned text without tools in round %d; forcing '%s' (retry %d/3)", _round, forced_tool_name, forced_tool_retries)
                 full_messages.append({"role": "assistant", "content": msg.content})
@@ -726,14 +1914,22 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str,
                     "content": (
                         "CRITICAL DIRECTIVE: You did not make any tool calls. A response without tool calls is invalid. "
                         "You must execute a tool to advance the chip design, implementation, or verification. "
-                        "Forcing tool execution: 'glob'. Call the 'glob' tool (e.g., with pattern '*')."
+                        "Forcing tool execution: 'workspace'. Call the 'workspace' tool (e.g., with action='list', path='.') to list/search files."
                     )
                 })
                 continue
 
             if msg.content:
-                yield {"type": "response", "content": _sanitize_assistant_text(msg.content)}
+                yield {"type": "response", "content": _sanitize_assistant_text(msg.content) or "Step completed."}
             else:
                 logger.info("LLM returned empty response with no tool calls")
+                yield {"type": "response", "content": "Task executed. I have no further updates."}
             logger.info("Agent conversation complete (no tool calls)")
             return
+    yield _execution_guard_error(
+        "Execution round budget exhausted",
+        (
+            f"Stopped after {max_rounds} LLM rounds without a verified final summary. "
+            "The run did not converge; inspect current artifacts and checkpoint evidence before retrying."
+        ),
+    )

@@ -4,7 +4,7 @@ from pathlib import Path
 
 DEFAULT_ROOT = os.path.expanduser("~/AgentIC-workspace")
 WORKSPACE_SECTION_DIRS = {
-    "rtl", "tb", "dv", "sim", "synth", "pnr", "sta", "reports",
+    "docs", "rtl", "tb", "dv", "sim", "synth", "pnr", "sta", "reports",
     "constraints", "formal", "layout", "logs", "scripts", "hardening",
     "signoff", "openlane", "openroad", "runs",
 }

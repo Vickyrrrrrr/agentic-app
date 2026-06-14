@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process"
+import { existsSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
@@ -12,6 +13,7 @@ const signScript = path.join(rootDir, "script", "sign-windows.ps1")
 async function signWindows(configuration: { path: string }) {
   if (process.platform !== "win32") return
   if (process.env.GITHUB_ACTIONS !== "true") return
+  if (!existsSync(signScript)) return
 
   await execFileAsync(
     "pwsh",
@@ -39,6 +41,11 @@ const getBase = (): Configuration => ({
       to: "native/",
       filter: ["index.js", "index.d.ts", "build/Release/mac_window.node", "swift-build/**"],
     },
+    {
+      from: "resources/backend/",
+      to: "backend/",
+      filter: ["**/*"],
+    },
   ],
   mac: {
     category: "public.app-category.developer-tools",
@@ -47,11 +54,11 @@ const getBase = (): Configuration => ({
     gatekeeperAssess: false,
     entitlements: "resources/entitlements.plist",
     entitlementsInherit: "resources/entitlements.plist",
-    notarize: channel === "prod",
+    notarize: channel === "prod" && process.env.AGENTIC_NOTARIZE === "1",
     target: ["dmg", "zip"],
   },
   dmg: {
-    sign: channel === "prod",
+    sign: channel === "prod" && process.env.AGENTIC_SIGN_MAC === "1",
   },
   protocols: {
     name: "AgentIC",
@@ -96,7 +103,7 @@ function getConfig() {
         appId: "live.buildstack.agentic.desktop.beta",
         productName: "AgentIC Beta",
         protocols: { name: "AgentIC Beta", schemes: ["agentic"] },
-        publish: { provider: "github", owner: "buildstack-live", repo: "agentic-desktop-beta", channel: "latest" },
+        publish: { provider: "github", owner: "Vickyrrrrrr", repo: "agentic-app", channel: "beta" },
         rpm: { packageName: "agentic-beta" },
       }
     }
@@ -106,7 +113,7 @@ function getConfig() {
         appId: "live.buildstack.agentic.desktop",
         productName: "AgentIC",
         protocols: { name: "AgentIC", schemes: ["agentic"] },
-        publish: { provider: "github", owner: "buildstack-live", repo: "agentic-desktop", channel: "latest" },
+        publish: { provider: "github", owner: "Vickyrrrrrr", repo: "agentic-app", channel: "latest" },
         rpm: { packageName: "agentic" },
       }
     }

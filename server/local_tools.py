@@ -1,7 +1,9 @@
+import copy
 import os
 import platform
 import shutil
 import subprocess
+import time
 
 if hasattr(subprocess, "CREATE_NO_WINDOW"):
     _NO_WINDOW = subprocess.CREATE_NO_WINDOW
@@ -12,6 +14,13 @@ else:
 
 import threading
 from pathlib import Path
+
+from capability_index import build_capability_index
+from capability_manifest import load_capability_manifests, manifest_env_names
+from flow_runtime import detect_flows, recommend_flow
+from pdk_index import build_pdk_index
+from tool_adapters import adapter_command_names, capability_matrix, license_env_names
+from vlsi_capability_graph import build_capability_graph
 
 
 EDA_TOOLS = (
@@ -29,14 +38,27 @@ EDA_TOOLS = (
     "netgen",
     "make",
     "python3",
+    # Proprietary tools
+    "vcs",
+    "xrun",
+    "irun",
+    "vsim",
+    "questasim",
+    "dc_shell",
+    "genus",
+    "innovus",
+    "icc2_shell",
+    "tempus",
+    "pt_shell",
+    "calibre",
 )
 
 CAPABILITY_TOOL_ENVS = {
-    "simulation": ("AGENTIC_SIM_TOOLS", ("iverilog", "verilator")),
-    "synthesis": ("AGENTIC_SYNTH_TOOLS", ("yosys",)),
-    "pnr": ("AGENTIC_PNR_TOOLS", ("openroad",)),
-    "sta": ("AGENTIC_STA_TOOLS", ("opensta", "openroad")),
-    "physical_verification": ("AGENTIC_PHYSICAL_VERIFY_TOOLS", ("magic", "klayout", "netgen")),
+    "simulation": ("AGENTIC_SIM_TOOLS", ("iverilog", "verilator", "vcs", "xrun", "irun", "vsim", "questasim")),
+    "synthesis": ("AGENTIC_SYNTH_TOOLS", ("yosys", "dc_shell", "genus")),
+    "pnr": ("AGENTIC_PNR_TOOLS", ("openroad", "innovus", "icc2_shell")),
+    "sta": ("AGENTIC_STA_TOOLS", ("opensta", "openroad", "tempus", "pt_shell")),
+    "physical_verification": ("AGENTIC_PHYSICAL_VERIFY_TOOLS", ("magic", "klayout", "netgen", "calibre")),
 }
 
 CAPABILITY_INSTALL_ENVS = {
@@ -48,6 +70,14 @@ CAPABILITY_INSTALL_ENVS = {
     "basic": "AGENTIC_BASIC_INSTALL_COMMAND",
 }
 
+ENV_CACHE_DEFAULT_TTL_SECONDS = 180.0
+_ENV_CACHE_LOCK = threading.Lock()
+_ENV_CACHE: dict[str, object] = {
+    "key": None,
+    "expires_at": 0.0,
+    "value": None,
+}
+
 
 def configured_eda_tools() -> tuple[str, ...]:
     extra = [
@@ -55,7 +85,7 @@ def configured_eda_tools() -> tuple[str, ...]:
         for item in os.environ.get("AGENTIC_EDA_TOOLS", "").split(",")
         if item.strip()
     ]
-    return tuple(dict.fromkeys((*EDA_TOOLS, *extra)))
+    return tuple(dict.fromkeys((*EDA_TOOLS, *adapter_command_names(), *extra)))
 
 
 def install_command_for(capability: str) -> str:
@@ -73,8 +103,48 @@ def configured_tools_for(capability: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys((*defaults, *extra)))
 
 
+def _environment_cache_ttl() -> float:
+    raw = os.environ.get("AGENTIC_ENV_CACHE_TTL_SECONDS", str(ENV_CACHE_DEFAULT_TTL_SECONDS)).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return ENV_CACHE_DEFAULT_TTL_SECONDS
+
+
+def _environment_cache_key() -> tuple[tuple[str, str], ...]:
+    watched = {
+        "PATH",
+        "PDK",
+        "PDK_ROOT",
+        "PDKPATH",
+        "PDK_HOME",
+        "AGENTIC_PDK_SEARCH_PATHS",
+        "AGENTIC_FLOW_SEARCH_PATHS",
+        "AGENTIC_TOOL_SEARCH_PATHS",
+        "AGENTIC_OPENLANE_ROOT",
+        "AGENTIC_ORFS_ROOT",
+        "AGENTIC_EDA_TOOLS",
+        *manifest_env_names(),
+        *CAPABILITY_INSTALL_ENVS.values(),
+        *(env_name for env_name, _defaults in CAPABILITY_TOOL_ENVS.values()),
+        "LM_LICENSE_FILE",
+        "CDS_LIC_FILE",
+        "SNPSLMD_LICENSE_FILE",
+        "MGLS_LICENSE_FILE",
+        *license_env_names(),
+    }
+    return tuple(sorted((name, os.environ.get(name, "")) for name in watched if name))
+
+
+def clear_environment_cache() -> None:
+    with _ENV_CACHE_LOCK:
+        _ENV_CACHE["key"] = None
+        _ENV_CACHE["expires_at"] = 0.0
+        _ENV_CACHE["value"] = None
+
+
 def _license_env_status() -> dict:
-    keys = ("LM_LICENSE_FILE", "CDS_LIC_FILE", "SNPSLMD_LICENSE_FILE", "MGLS_LICENSE_FILE")
+    keys = ("LM_LICENSE_FILE", "CDS_LIC_FILE", "SNPSLMD_LICENSE_FILE", "MGLS_LICENSE_FILE", *license_env_names())
     return {key: bool(os.environ.get(key)) for key in keys}
 
 
@@ -99,6 +169,10 @@ def _wsl_status() -> dict:
 def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_line=None, cancel_checker=None) -> dict:
     """Run a command, streaming each output line via on_line callback. Returns same dict as run_bash."""
     try:
+        kwargs = {}
+        if os.name != "nt":
+            kwargs["preexec_fn"] = os.setsid
+
         process = subprocess.Popen(
             command,
             shell=True,
@@ -107,6 +181,7 @@ def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_li
             text=True,
             creationflags=_NO_WINDOW,
             cwd=workspace_root,
+            **kwargs
         )
 
         output_lines = []
@@ -123,10 +198,21 @@ def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_li
         thread = threading.Thread(target=reader, daemon=True)
         thread.start()
         elapsed = 0.0
+
+        def kill_process():
+            if os.name != "nt":
+                import signal
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except Exception:
+                    process.kill()
+            else:
+                process.kill()
+
         while thread.is_alive() and elapsed < timeout:
             if cancel_checker and cancel_checker():
-                process.kill()
-                thread.join(timeout=5)
+                kill_process()
+                thread.join(timeout=2)
                 full_output = "\n".join(output_lines)
                 return {
                     "success": False,
@@ -138,8 +224,8 @@ def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_li
             elapsed += 0.2
 
         if thread.is_alive():
-            process.kill()
-            thread.join(timeout=5)
+            kill_process()
+            thread.join(timeout=2)
 
         process.wait(timeout=5)
         full_output = "\n".join(output_lines)
@@ -157,6 +243,10 @@ def run_bash(command: str, workspace_root: str, timeout: int = 300, cancel_check
     if cancel_checker:
         return run_bash_stream(command, workspace_root, timeout=timeout, cancel_checker=cancel_checker)
     try:
+        kwargs = {}
+        if os.name != "nt":
+            kwargs["preexec_fn"] = os.setsid
+
         result = subprocess.run(
             command,
             shell=True,
@@ -165,6 +255,7 @@ def run_bash(command: str, workspace_root: str, timeout: int = 300, cancel_check
             creationflags=_NO_WINDOW,
             timeout=timeout,
             cwd=workspace_root,
+            **kwargs
         )
         return {
             "success": result.returncode == 0,
@@ -197,6 +288,18 @@ def _version_for(tool: str) -> str | None:
         "docker": ["docker", "--version"],
         "make": ["make", "--version"],
         "python3": ["python3", "--version"],
+        "vcs": ["vcs", "-platform"],
+        "xrun": ["xrun", "-version"],
+        "irun": ["irun", "-version"],
+        "vsim": ["vsim", "-version"],
+        "questasim": ["questasim", "-version"],
+        "dc_shell": ["dc_shell", "-version"],
+        "genus": ["genus", "-version"],
+        "innovus": ["innovus", "-version"],
+        "icc2_shell": ["icc2_shell", "-version"],
+        "tempus": ["tempus", "-version"],
+        "pt_shell": ["pt_shell", "-version"],
+        "calibre": ["calibre", "-version"],
     }.get(tool)
     if not version_args:
         return None
@@ -252,7 +355,20 @@ def _has_openlane_image(images: list[str]) -> bool:
     return any(("openlane" in image.lower() or "openroad" in image.lower()) for image in images)
 
 
-def detect_environment() -> dict:
+def detect_environment(force_refresh: bool = False) -> dict:
+    cache_ttl = _environment_cache_ttl()
+    cache_key = _environment_cache_key()
+    now = time.monotonic()
+    if not force_refresh and cache_ttl > 0:
+        with _ENV_CACHE_LOCK:
+            cached_value = _ENV_CACHE.get("value")
+            if (
+                cached_value is not None
+                and _ENV_CACHE.get("key") == cache_key
+                and float(_ENV_CACHE.get("expires_at") or 0.0) > now
+            ):
+                return copy.deepcopy(cached_value)
+
     tools = {}
     versions = {}
     paths = {}
@@ -265,6 +381,9 @@ def detect_environment() -> dict:
 
     images = _docker_images()
     pdk_dirs = _pdk_dirs()
+    pdk_index = build_pdk_index()
+    capability_manifests = load_capability_manifests()
+    exposed_pdk_index = _augment_pdk_index_with_manifests(pdk_index, capability_manifests)
     wsl = _wsl_status()
     has_sim = any(tools.get(tool) for tool in configured_tools_for("simulation"))
     has_synth = any(tools.get(tool) for tool in configured_tools_for("synthesis"))
@@ -279,18 +398,39 @@ def detect_environment() -> dict:
         "sta": any(tools.get(tool) for tool in configured_tools_for("sta")),
         "waveform": bool(tools.get("gtkwave")),
         "physical_verification": has_physical_verify,
-        "pdk": bool(pdk_dirs),
+        "pdk": bool(pdk_dirs or (capability_manifests.get("pdks") or [])),
         "docker": bool(tools.get("docker")),
         "wsl": wsl["available"],
     }
 
+    flows = detect_flows(tools, images)
+    adapter_matrix = capability_matrix(tools)
+    capability_index = build_capability_index(
+        pdk_index=pdk_index,
+        tools=tools,
+        flows=flows,
+        adapter_matrix=adapter_matrix,
+    )
+    capability_graph = build_capability_graph({
+        "capability_index": capability_index,
+        "flows": flows,
+        "tool_adapters": adapter_matrix,
+        "capability_manifests": capability_manifests,
+    })
+    for capability in ("simulation", "synthesis", "pnr", "sta", "physical_verification"):
+        capabilities[capability] = bool(capabilities.get(capability) or (adapter_matrix.get(capability) or {}).get("available"))
+
     missing = []
-    if not has_sim:
-        missing.append({"capability": "simulation", "tools": list(configured_tools_for("simulation"))})
-    if not has_synth:
-        missing.append({"capability": "synthesis", "tools": list(configured_tools_for("synthesis"))})
-    if not capabilities["pnr"]:
-        missing.append({"capability": "pnr", "tools": [*configured_tools_for("pnr"), "dockerized flow"]})
+    for capability in ("simulation", "synthesis", "pnr", "sta", "physical_verification"):
+        if not (adapter_matrix.get(capability) or {}).get("available") and not capabilities.get(capability):
+            missing.append({
+                "capability": capability,
+                "tools": [
+                    command
+                    for candidate in (adapter_matrix.get(capability) or {}).get("candidates", [])
+                    for command in candidate.get("commands", [])
+                ] or list(configured_tools_for(capability)),
+            })
     if not capabilities["pdk"]:
         missing.append({"capability": "pdk", "tools": ["PDK_ROOT", "PDKPATH", "AGENTIC_PDK_SEARCH_PATHS"]})
 
@@ -303,7 +443,7 @@ def detect_environment() -> dict:
     else:
         tier = "setup_required"
 
-    return {
+    env = {
         "platform": platform.system().lower(),
         "tools": tools,
         "versions": versions,
@@ -314,8 +454,15 @@ def detect_environment() -> dict:
             "$PDKPATH",
             "$PDK_HOME",
             "$AGENTIC_PDK_SEARCH_PATHS",
+            "$AGENTIC_CAPABILITY_MANIFESTS",
         ],
         "existing_pdk_dirs": pdk_dirs,
+        "pdk_index": exposed_pdk_index,
+        "capability_index": capability_index,
+        "capability_manifests": capability_manifests,
+        "capability_graph": capability_graph,
+        "flows": flows,
+        "tool_adapters": adapter_matrix,
         "adapters": {
             capability: {
                 "env": env_name,
@@ -330,3 +477,37 @@ def detect_environment() -> dict:
         "missing": missing,
         "capability_tier": tier,
     }
+    env["recommended_flow"] = recommend_flow(env, requested_pdk=os.environ.get("PDK", ""))
+    if cache_ttl > 0:
+        with _ENV_CACHE_LOCK:
+            _ENV_CACHE["key"] = cache_key
+            _ENV_CACHE["expires_at"] = time.monotonic() + cache_ttl
+            _ENV_CACHE["value"] = copy.deepcopy(env)
+    return env
+
+
+def _augment_pdk_index_with_manifests(pdk_index: dict, manifests: dict) -> dict:
+    augmented = copy.deepcopy(pdk_index)
+    entries = augmented.setdefault("pdks", [])
+    existing = {str(item.get("name") or "").lower() for item in entries if isinstance(item, dict)}
+    for pdk in manifests.get("pdks") or []:
+        name = str(pdk.get("name") or "").strip()
+        if not name or name.lower() in existing:
+            continue
+        entries.append({
+            "name": name,
+            "path": pdk.get("path"),
+            "family": pdk.get("family"),
+            "node_nm": pdk.get("node_nm"),
+            "class": pdk.get("class") or "commercial_or_custom",
+            "preferred_open_flow": None,
+            "openlane": {"has_pdk_config": False, "config_tcl": None, "active_scl": pdk.get("active_scl")},
+            "orfs": {"platform_aliases": [name]},
+            "libraries": [],
+            "tech": pdk.get("physical_decks") or {},
+            "readiness": pdk.get("readiness") or {},
+            "source": "capability_manifest",
+        })
+        existing.add(name.lower())
+    augmented["count"] = len(entries)
+    return augmented

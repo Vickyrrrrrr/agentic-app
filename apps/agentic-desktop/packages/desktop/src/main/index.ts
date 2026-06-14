@@ -12,6 +12,7 @@ import { Deferred, Effect, Fiber } from "effect"
 import contextMenu from "electron-context-menu"
 
 import type { ServerReadyData } from "../preload/types"
+import { startAgenticBackend, stopAgenticBackend } from "./agentic-backend"
 import { checkAppExists, resolveAppPath } from "./apps"
 import { CHANNEL } from "./constants"
 import { registerIpcHandlers, sendDeepLinks, sendMenuCommand } from "./ipc"
@@ -158,6 +159,7 @@ const main = Effect.gen(function* () {
   const stopSidecars = async () => {
     await killSidecar()
     wslServers.stopAll()
+    stopAgenticBackend()
   }
   const relaunch = () => {
     void stopSidecars().finally(() => {
@@ -239,6 +241,7 @@ const main = Effect.gen(function* () {
   const serverReady = Deferred.makeUnsafe<ServerReadyData, unknown>()
 
   yield* Effect.promise(() => app.whenReady())
+  yield* Effect.promise(() => startAgenticBackend())
 
   if (!TEST_ONBOARDING) migrate()
   app.setAsDefaultProtocolClient("opencode")

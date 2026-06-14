@@ -4,9 +4,19 @@ import urllib.request
 import urllib.parse
 import glob as glob_mod
 import json
+import hashlib
+import shutil
+import subprocess
+import tempfile
 from html.parser import HTMLParser
 
 from local_tools import run_bash, run_bash_stream
+from artifact_kernel import evaluate_artifact_write
+from design_intent import evaluate_write_against_intent, intent_from_state_or_manifest
+from pdk_index import build_pdk_index, select_pdk
+from rtl_quality import evaluate_rtl_quality
+from vlsi_state import DesignStateStore
+from vlsi_capability_graph import assess_design_readiness, bind_memory_requirement, compact_capability_graph
 
 
 class _DDGResultParser(HTMLParser):
@@ -69,7 +79,7 @@ ALLOWED_READ_EXTENSIONS = {
     ".cfg", ".json", ".md", ".txt", ".log", ".rpt", ".lib", ".lef", ".def",
     ".gds", ".tcl", ".py", ".c", ".cpp", ".h", ".sh", ".makefile", ".mk",
     ".yml", ".yaml", ".toml", ".ini", ".cfg", ".sdf", ".spi", ".lvs",
-    ".drce", ".mag", ".magic", ".tcl",
+    ".drce", ".mag", ".magic", ".tcl", ".mermaid", ".mmd",
 }
 
 
@@ -77,8 +87,10 @@ TEXT_WRITE_EXTENSIONS = {
     ".v", ".sv", ".vh", ".svh", ".vhd", ".vhdl", ".tcl", ".sdc", ".sby",
     ".ys", ".cfg", ".json", ".md", ".txt", ".log", ".rpt", ".lib", ".lef",
     ".def", ".py", ".c", ".cpp", ".h", ".sh", ".mk", ".makefile", ".yml",
-    ".yaml", ".toml", ".ini", ".csv", ".sp", ".spi", ".lvs",
+    ".yaml", ".toml", ".ini", ".csv", ".sp", ".spi", ".lvs", ".mermaid", ".mmd",
 }
+
+SURGICAL_REWRITE_LIMIT = 12000
 
 
 def _safe_workspace_path(path: str, workspace_root: str) -> str | None:
@@ -157,23 +169,6 @@ def edit_file(path: str, old_string: str, new_string: str, workspace_root: str) 
         return f"Error editing file: {e}"
 
 
-def bash_tool(command: str, workspace_root: str, timeout: int = 300, on_output=None, cancel_checker=None) -> str:
-    if on_output:
-        result = run_bash_stream(command, workspace_root, timeout=timeout, on_line=on_output, cancel_checker=cancel_checker)
-    else:
-        result = run_bash(command, workspace_root, timeout=timeout, cancel_checker=cancel_checker)
-    output = ""
-    if result["stdout"]:
-        output += result["stdout"]
-    if result["stderr"]:
-        if output:
-            output += "\n"
-        output += result["stderr"]
-    if not result["success"]:
-        output = f"Exit code {result['code']}\n{output}"
-    return output.strip() or "(no output)"
-
-
 def grep_tool(pattern: str, path: str, workspace_root: str) -> str:
     full = _safe_workspace_path(path, workspace_root)
     if not full:
@@ -222,6 +217,137 @@ def glob_tool(pattern: str, workspace_root: str) -> str:
         return f"Error globbing: {e}"
 
 
+def workspace_tool(action: str, workspace_root: str, path: str = ".", pattern: str = "") -> str:
+    if action == "read":
+        return read_file(path, workspace_root)
+    elif action == "search":
+        return grep_tool(pattern, path, workspace_root)
+    elif action == "list":
+        return glob_tool(pattern, workspace_root)
+    else:
+        return f"Error: unknown action '{action}' for workspace tool. Use read, search, or list."
+
+
+def write_tool_combined(path: str, workspace_root: str, design_name: str = "scratch", content: str = "", old_string: str = "", new_string: str = "") -> str:
+    state = DesignStateStore(workspace_root, design_name).load()
+    artifact_decision = evaluate_artifact_write(
+        workspace_root=workspace_root,
+        design_name=design_name,
+        path=path,
+        state=state,
+        content=content or new_string or "",
+        old_string=old_string or "",
+    )
+    if not artifact_decision.allowed:
+        return "Error: " + json.dumps({
+            "status": "ARTIFACT_OWNERSHIP_VIOLATION",
+            "reason": artifact_decision.reason,
+            "path": artifact_decision.path,
+            "project_root": artifact_decision.project_root,
+            "stage": artifact_decision.stage,
+            "kind": artifact_decision.kind,
+            "logical_key": artifact_decision.logical_key,
+            "canonical_path": artifact_decision.canonical_path,
+            "required_action": artifact_decision.required_action,
+        }, indent=2)
+    decision = evaluate_write_against_intent(
+        workspace_root=workspace_root,
+        design_name=design_name,
+        path=path,
+        content=content or new_string or "",
+        old_string=old_string or "",
+    )
+    if not decision.allowed:
+        return "Error: " + json.dumps({
+            "status": "INTENT_OWNERSHIP_VIOLATION",
+            "reason": decision.reason,
+            "module_name": decision.module_name,
+            "owner_file": decision.owner_file,
+            "required_action": decision.required_action,
+        }, indent=2)
+    preflight = _rtl_quality_preflight(path, workspace_root, design_name, content, old_string, new_string)
+    if preflight:
+        return preflight
+    if old_string:
+        return edit_file(path, old_string, new_string, workspace_root)
+    full = _safe_workspace_path(path, workspace_root)
+    if full and os.path.isfile(full) and _is_text_source_path(path):
+        try:
+            existing = open(full, "r", errors="replace").read()
+        except OSError:
+            existing = ""
+        if len(existing) > SURGICAL_REWRITE_LIMIT and len(content or "") > SURGICAL_REWRITE_LIMIT:
+            return (
+                "Error: whole-file rewrite rejected for a large existing source file. "
+                "Use old_string/new_string with enough surrounding context for a surgical edit."
+            )
+    return write_file(path, content, workspace_root)
+
+
+def bash_tool(command: str, workspace_root: str, design_name: str, timeout: int = 300, eda_tool: str = "", stage: str = "", log_file: str = "", on_output=None, cancel_checker=None) -> str:
+    if on_output:
+        result = run_bash_stream(command, workspace_root, timeout=timeout, on_line=on_output, cancel_checker=cancel_checker)
+    else:
+        result = run_bash(command, workspace_root, timeout=timeout, cancel_checker=cancel_checker)
+
+    output = ""
+    if result["stdout"]:
+        output += result["stdout"]
+    if result["stderr"]:
+        if output:
+            output += "\n"
+        output += result["stderr"]
+
+    exit_code = result["code"]
+    raw_log = output.strip() or "(no output)"
+    try:
+        DesignStateStore(workspace_root, design_name).record_command(
+            command,
+            tool=eda_tool or "shell",
+            stage=stage or "execution",
+            exit_code=exit_code,
+        )
+    except Exception:
+        pass
+
+    # If this isn't flagged as an EDA run, just return standard bash output
+    if not eda_tool:
+        if exit_code != 0:
+            return f"Exit code {exit_code}\n{raw_log}"
+        return raw_log
+
+    # Auto-Checkpoint logic
+    from checkpoint_engine import CheckpointEngine
+    engine = CheckpointEngine(design_name, workspace_root)
+
+    full_log_file = os.path.join(workspace_root, log_file) if log_file else ""
+    checkpoint_result = engine.evaluate(
+        tool=eda_tool,
+        stage=stage or "execution",
+        exit_code=exit_code,
+        stdout_log=raw_log,
+        log_file=full_log_file
+    )
+    checkpoint_result["verdict"]["artifact_hashes"] = _artifact_hashes_from_command(command, workspace_root)
+
+    verdict = checkpoint_result["verdict"]
+    truncated_log = checkpoint_result["truncated_log"]
+    try:
+        DesignStateStore(workspace_root, design_name).record_checkpoint(
+            eda_tool,
+            stage or "execution",
+            verdict,
+        )
+    except Exception:
+        pass
+
+    return json.dumps({
+        "bash_exit_code": exit_code,
+        "checkpoint_verdict": verdict,
+        "log_snippet": truncated_log
+    }, indent=2)
+
+
 def web_search(query: str, max_results: int = 5) -> str:
     web_setting = os.environ.get("AGENTIC_ENABLE_WEB_SEARCH", "true").strip().lower()
     if web_setting in {"0", "false", "no", "off"}:
@@ -247,63 +373,85 @@ def web_search(query: str, max_results: int = 5) -> str:
         return f"Web search error: {e}"
 
 
-def query_pdk_tool(query_type: str, cell_type: str = "") -> str:
-    pdk_root = os.environ.get("PDK_ROOT")
-    if not pdk_root:
-        common_paths = [
-            os.path.expanduser("~/.volare"),
-            "/usr/share/pdk",
-            "/usr/local/share/pdk",
-            "/opt/pdk",
-            os.path.expanduser("~/pdk")
-        ]
-        for p in common_paths:
-            if os.path.isdir(p):
-                pdk_root = p
-                break
+def query_pdk_tool(query_type: str, cell_type: str = "", workspace_root: str = "", design_name: str = "scratch") -> str:
+    if query_type in {"capability_summary", "find_memory", "readiness", "manifest_status", "tool_adapters"}:
+        from local_tools import detect_environment
+        env = detect_environment()
+        graph = env.get("capability_graph") or {}
+        manifests = env.get("capability_manifests") or {}
+        if query_type == "tool_adapters":
+            from tool_adapters import normalized_adapter_summary
+            return json.dumps({
+                "status": "OK",
+                "tool_adapters": normalized_adapter_summary(env.get("tools") or {}),
+                "recommended_flow": env.get("recommended_flow") or {},
+                "capability_graph": compact_capability_graph(graph),
+            }, indent=2)
+        if query_type == "capability_summary":
+            return json.dumps({
+                "status": "OK",
+                "capability_graph": compact_capability_graph(graph),
+                "recommended_flow": env.get("recommended_flow") or {},
+                "missing": env.get("missing") or [],
+                "manifest_status": {
+                    "files": manifests.get("files") or [],
+                    "validation_error_count": len(manifests.get("validation_errors") or []),
+                },
+            }, indent=2)
+        if query_type == "manifest_status":
+            return json.dumps({
+                "status": "OK",
+                "manifest_status": manifests,
+            }, indent=2)
+        if query_type == "find_memory":
+            requirement = _memory_query_from_text(cell_type)
+            target_pdk = os.environ.get("PDK", "").strip() or None
+            return json.dumps({
+                "status": "OK",
+                "query": cell_type,
+                "requirement": requirement,
+                "binding": bind_memory_requirement(requirement, graph, target_pdk=target_pdk),
+            }, indent=2)
+        if query_type == "readiness":
+            state = DesignStateStore(workspace_root, design_name).load() if workspace_root else {}
+            intent = state.get("design_intent") if isinstance(state, dict) else None
+            return json.dumps({
+                "status": "OK",
+                "readiness": assess_design_readiness(intent, graph),
+            }, indent=2)
 
-    if not pdk_root or not os.path.isdir(pdk_root):
+    index = build_pdk_index()
+    active = select_pdk(index, os.environ.get("PDK", ""))
+    if not active:
         return json.dumps({
             "status": "DEPENDENCY_MISSING",
             "missing_component": "PDK"
         })
-
-    pdks = []
-    try:
-        for entry in os.listdir(pdk_root):
-            if os.path.isdir(os.path.join(pdk_root, entry)) and not entry.startswith("."):
-                pdks.append(entry)
-    except Exception as e:
-        return json.dumps({"error": f"Failed to read PDK_ROOT: {e}"})
-    
-    if not pdks:
-        return json.dumps({"error": f"No PDKs found inside {pdk_root}"})
-    
-    active_pdk = pdks[0]
-    env_pdk = os.environ.get("PDK", "")
-    if env_pdk in pdks:
-        active_pdk = env_pdk
-
-    pdk_path = os.path.join(pdk_root, active_pdk)
+    pdks = [pdk["name"] for pdk in index.get("pdks", [])]
+    active_pdk = active["name"]
+    pdk_path = active["path"]
     libs_dir = os.path.join(pdk_path, "libs.ref")
-    
+
     if not os.path.isdir(libs_dir):
         return json.dumps({"error": f"libs.ref not found in {pdk_path}", "available_pdks": pdks})
 
     if query_type == "list_libraries":
-        try:
-            libraries = [d for d in os.listdir(libs_dir) if os.path.isdir(os.path.join(libs_dir, d))]
-            return json.dumps({"pdk": active_pdk, "libraries": libraries})
-        except Exception as e:
-            return json.dumps({"error": str(e)})
+        libraries = [lib["name"] for lib in active.get("libraries", [])]
+        return json.dumps({
+            "pdk": active_pdk,
+            "libraries": libraries,
+            "readiness": active.get("readiness", {}),
+            "openlane": active.get("openlane", {}),
+            "orfs": active.get("orfs", {}),
+        })
 
     elif query_type == "find_cell":
         if not cell_type:
             return json.dumps({"error": "cell_type is required for find_cell"})
-        
+
         cell_type_lower = cell_type.lower()
         found_cells = []
-        
+
         try:
             libraries = [d for d in os.listdir(libs_dir) if os.path.isdir(os.path.join(libs_dir, d))]
             for lib in libraries:
@@ -326,35 +474,237 @@ def query_pdk_tool(query_type: str, cell_type: str = "") -> str:
                     break
         except Exception as e:
             return json.dumps({"error": str(e)})
-            
+
         return json.dumps({"pdk": active_pdk, "query": cell_type, "results": found_cells})
 
     elif query_type == "get_layers":
-        tech_dir = os.path.join(pdk_path, "libs.tech")
-        return json.dumps({"pdk": active_pdk, "info": "Extract routing layers from .tech / .lef", "path": tech_dir})
+        return json.dumps({
+            "pdk": active_pdk,
+            "layers": active.get("tech", {}).get("sample_routing_layers", []),
+            "tech": active.get("tech", {}),
+            "path": os.path.join(pdk_path, "libs.tech"),
+        })
 
     else:
         return json.dumps({"error": f"Unknown query_type: {query_type}"})
 
 
-def dispatch_tool(name: str, args: dict, workspace_root: str, on_output=None, cancel_checker=None) -> str:
-    if name == "read":
-        return read_file(args["path"], workspace_root)
+def ledger_tool(action: str, workspace_root: str, design_name: str, **kwargs) -> str:
+    store = DesignStateStore(workspace_root, design_name)
+    if action == "get_state":
+        return json.dumps(store.summary(max_events=int(kwargs.get("max_events") or 12)), indent=2, default=str)
+    if action == "record_fact":
+        namespace = str(kwargs.get("namespace") or "").strip()
+        key = str(kwargs.get("key") or "").strip()
+        if not namespace or not key:
+            return "Error: ledger.record_fact requires namespace and key"
+        state = store.upsert_design_fact(namespace, key, kwargs.get("value"), source=str(kwargs.get("source") or "agent"))
+        return json.dumps({"ok": True, "namespace": namespace, "key": key, "updated_at": state.get("updated_at")}, indent=2)
+    if action == "record_handoff":
+        source_role = str(kwargs.get("source_role") or "").strip()
+        target_role = str(kwargs.get("target_role") or "").strip()
+        payload = kwargs.get("payload") or {}
+        if not source_role or not target_role or not isinstance(payload, dict):
+            return "Error: ledger.record_handoff requires source_role, target_role, and object payload"
+        state = store.record_handoff(source_role, target_role, payload)
+        return json.dumps({"ok": True, "handoff_count": len(state.get("handoffs", []))}, indent=2)
+    if action == "record_evidence":
+        kind = str(kwargs.get("kind") or "").strip()
+        ref = str(kwargs.get("ref") or "").strip()
+        payload = kwargs.get("payload") or {}
+        links = kwargs.get("links") or []
+        if not kind or not ref or not isinstance(payload, dict):
+            return "Error: ledger.record_evidence requires kind, ref, and object payload"
+        if not isinstance(links, list):
+            links = []
+        state = store.record_evidence(kind, ref, payload, links=links)
+        graph = state.get("evidence_graph") or {}
+        return json.dumps({"ok": True, "evidence_count": len(graph.get("nodes", {}))}, indent=2)
+    return f"Error: unknown ledger action '{action}'"
+
+
+def dispatch_tool(name: str, args: dict, workspace_root: str, design_name: str = "scratch", on_output=None, cancel_checker=None) -> str:
+    if name == "workspace":
+        return workspace_tool(args.get("action", ""), workspace_root, args.get("path", "."), args.get("pattern", ""))
     elif name == "write":
-        return write_file(args["path"], args["content"], workspace_root)
-    elif name == "edit":
-        return edit_file(args["path"], args["old_string"], args["new_string"], workspace_root)
+        path = args.get("path", "")
+        result = write_tool_combined(path, workspace_root, design_name, args.get("content", ""), args.get("old_string", ""), args.get("new_string", ""))
+        if result.startswith("File written") or result.startswith("File edited"):
+            try:
+                store = DesignStateStore(workspace_root, design_name)
+                state = store.record_file(
+                    path,
+                    action="edit" if args.get("old_string") else "write",
+                )
+                if _is_rtl_path(path):
+                    full_path = _safe_workspace_path(path, workspace_root)
+                    if full_path and os.path.isfile(full_path):
+                        content = open(full_path, "r", errors="replace").read()
+                        intent = intent_from_state_or_manifest(workspace_root, state)
+                        quality = evaluate_rtl_quality(path, content, intent)
+                        store.record_evidence("rtl_quality", path, quality.to_record())
+                        if not quality.accepted:
+                            return "Error: " + json.dumps({
+                                "status": "RTL_QUALITY_REJECTED",
+                                "path": path,
+                                "issues": [issue.model_dump(mode="json") for issue in quality.issues],
+                                "metrics": quality.metrics,
+                            }, indent=2)
+            except Exception:
+                pass
+        return result
     elif name == "bash":
         timeout = args.get("timeout", 300)
-        return bash_tool(args["command"], workspace_root, timeout=timeout, on_output=on_output, cancel_checker=cancel_checker)
-    elif name == "grep":
-        path = args.get("path", ".")
-        return grep_tool(args["pattern"], path, workspace_root)
-    elif name == "glob":
-        return glob_tool(args["pattern"], workspace_root)
+        return bash_tool(args["command"], workspace_root, design_name, timeout=timeout, eda_tool=args.get("eda_tool", ""), stage=args.get("stage", ""), log_file=args.get("log_file", ""), on_output=on_output, cancel_checker=cancel_checker)
+    elif name == "report":
+        from checkpoint_engine import CheckpointEngine
+        engine = CheckpointEngine(design_name, workspace_root)
+        report = engine.signoff_report()
+        try:
+            report["design_state"] = DesignStateStore(workspace_root, design_name).summary()
+        except Exception:
+            pass
+        return json.dumps(report, indent=2)
     elif name == "web_search":
         return web_search(args["query"], args.get("max_results", 5))
     elif name == "query_pdk":
-        return query_pdk_tool(args.get("query_type", ""), args.get("cell_type", ""))
+        return query_pdk_tool(args.get("query_type", ""), args.get("cell_type", ""), workspace_root, design_name)
+    elif name == "ledger":
+        ledger_args = dict(args)
+        action = ledger_args.pop("action", "")
+        return ledger_tool(action, workspace_root, design_name, **ledger_args)
     else:
         return f"Error: unknown tool '{name}'"
+
+
+def _is_rtl_path(path: str) -> bool:
+    lower = str(path or "").lower()
+    wrapped = f"/{lower}"
+    if any(section in wrapped for section in ("/tb/", "/dv/", "/verification/", "/formal/")):
+        return False
+    return "/rtl/" in wrapped or lower.endswith((".v", ".sv", ".vh", ".svh"))
+
+
+def _rtl_quality_preflight(path: str, workspace_root: str, design_name: str, content: str, old_string: str, new_string: str) -> str:
+    if not _is_rtl_path(path):
+        return ""
+    final_content = content or ""
+    if old_string:
+        full_path = _safe_workspace_path(path, workspace_root)
+        if not full_path or not os.path.isfile(full_path):
+            return ""
+        try:
+            existing = open(full_path, "r", errors="replace").read()
+        except OSError:
+            return ""
+        if old_string not in existing:
+            return ""
+        final_content = existing.replace(old_string, new_string, 1)
+    if not final_content:
+        return ""
+    try:
+        state = DesignStateStore(workspace_root, design_name).load()
+        intent = intent_from_state_or_manifest(workspace_root, state)
+        quality = evaluate_rtl_quality(path, final_content, intent)
+        if not quality.accepted:
+            try:
+                DesignStateStore(workspace_root, design_name).record_evidence("rtl_quality_rejected", path, quality.to_record())
+            except Exception:
+                pass
+            return "Error: " + json.dumps({
+                "status": "RTL_QUALITY_REJECTED",
+                "path": path,
+                "issues": [issue.model_dump(mode="json") for issue in quality.issues],
+                "metrics": quality.metrics,
+            }, indent=2)
+        syntax_error = _rtl_syntax_preflight(path, final_content)
+        if syntax_error:
+            return syntax_error
+    except Exception:
+        return ""
+    return ""
+
+
+def _rtl_syntax_preflight(path: str, content: str) -> str:
+    tool = shutil.which("verilator")
+    if not tool:
+        return ""
+    suffix = os.path.splitext(path)[1] or ".v"
+    try:
+        with tempfile.TemporaryDirectory(prefix="agentic_rtl_lint_") as tmp:
+            tmp_path = os.path.join(tmp, "candidate" + suffix)
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                fh.write(_normalize_text_content(path, content))
+            proc = subprocess.run(
+                [tool, "--lint-only", tmp_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=20,
+            )
+            if proc.returncode == 0:
+                return ""
+            return "Error: " + json.dumps({
+                "status": "RTL_SYNTAX_REJECTED",
+                "path": path,
+                "tool": "verilator",
+                "exit_code": proc.returncode,
+                "log_snippet": (proc.stdout + "\n" + proc.stderr).strip()[:3000],
+            }, indent=2)
+    except Exception:
+        return ""
+
+
+def _artifact_hashes_from_command(command: str, workspace_root: str) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for token in re.findall(r"(?<!['\"])([A-Za-z0-9_./-]+\.(?:v|sv|vh|svh|vhd|vhdl|sdc|tcl|ys|json|md))(?!['\"])", command or ""):
+        full = _safe_workspace_path(token, workspace_root)
+        if not full or not os.path.isfile(full):
+            continue
+        try:
+            with open(full, "rb") as fh:
+                hashes[token] = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            continue
+    return hashes
+
+
+def _memory_query_from_text(text: str) -> dict[str, object]:
+    lowered = (text or "").lower()
+    dims = _memory_dims_from_text(lowered)
+    kind = "rom" if "rom" in lowered else "fifo" if "fifo" in lowered else "cache" if "cache" in lowered else "sram"
+    ports = "rom" if kind == "rom" else "2rw" if re.search(r"\b(2rw|dual\s*port|two\s*port)\b", lowered) else "1r1w" if "1r1w" in lowered else "1rw" if re.search(r"\b(1rw|single\s*port|one\s*port)\b", lowered) else "unspecified"
+    return {
+        "name": "queried_memory",
+        "kind": kind,
+        "width_bits": dims.get("width_bits"),
+        "depth_words": dims.get("depth_words"),
+        "capacity_bits": dims.get("capacity_bits"),
+        "ports": ports,
+        "implementation_preference": "pdk_macro",
+    }
+
+
+def _memory_dims_from_text(text: str) -> dict[str, int | None]:
+    explicit = re.search(r"(\d+)\s*[x×]\s*(\d+)", text or "")
+    if explicit:
+        depth = int(explicit.group(1))
+        width = int(explicit.group(2))
+        return {"depth_words": depth, "width_bits": width, "capacity_bits": depth * width}
+    capacity = re.search(r"(\d+)\s*(kb|kib|mb|mib|bits?|bytes?)", text or "")
+    width = re.search(r"(\d+)\s*[- ]?bit", text or "")
+    width_bits = int(width.group(1)) if width else None
+    capacity_bits = None
+    if capacity:
+        value = int(capacity.group(1))
+        unit = capacity.group(2)
+        if unit in {"kb", "kib"}:
+            capacity_bits = value * 1024 * 8
+        elif unit in {"mb", "mib"}:
+            capacity_bits = value * 1024 * 1024 * 8
+        elif unit.startswith("byte"):
+            capacity_bits = value * 8
+        else:
+            capacity_bits = value
+    depth_words = capacity_bits // width_bits if capacity_bits and width_bits else None
+    return {"depth_words": depth_words, "width_bits": width_bits, "capacity_bits": capacity_bits}

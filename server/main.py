@@ -11,18 +11,40 @@ import uuid
 from pathlib import Path
 
 import jwt
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from openai import AzureOpenAI, OpenAI
 from sse_starlette.sse import EventSourceResponse
 
-from models import ChatRequest, ToolInstallPlanRequest, ToolInstallRequest, UsageBuildRequest
+from models import (
+    ChatRequest,
+    OpenCodeDesktopMessageRequest,
+    OpenCodeDesktopSessionRequest,
+    OpenCodeRuntimeStartRequest,
+    OpenCodeSessionRequest,
+    OpenCodeToolRequest,
+    ToolInstallPlanRequest,
+    ToolInstallRequest,
+    UsageBuildRequest,
+)
 from workspace import list_artifacts, list_designs, read_artifact, read_workspace_artifact, ensure_workspace
 from chat_agent import converse_stream
+from flow_runtime import recommend_flow
 from local_tools import detect_environment, install_command_for, run_bash
+from vlsi_state import DesignStateStore
 
-app = FastAPI(title="AgentIC Local")
+SHUTDOWN_REQUESTED = False
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    global SHUTDOWN_REQUESTED
+    SHUTDOWN_REQUESTED = True
+    logging.info("Server shutdown requested. Flagging all runs as cancelled.")
+
+app = FastAPI(title="AgentIC Local", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,9 +67,11 @@ ENTITLEMENT_PATH = STATE_DIR / "entitlement.json"
 USAGE_LOG_PATH = STATE_DIR / "usage.jsonl"
 RUN_EVENTS_PATH = STATE_DIR / "run_events.jsonl"
 ACTIVE_DESIGN_PATH = STATE_DIR / "active_design.json"
+OPENCODE_SESSIONS_PATH = STATE_DIR / "opencode_sessions.json"
 CANCELLED_RUNS: set[str] = set()
+ACTIVE_RUNS: dict[str, float] = {}
 WORKSPACE_SECTION_DIRS = {
-    "rtl", "tb", "dv", "sim", "synth", "pnr", "sta", "reports",
+    "docs", "rtl", "tb", "dv", "sim", "synth", "pnr", "sta", "reports",
     "constraints", "formal", "layout", "logs", "scripts", "hardening",
     "signoff", "openlane", "openroad", "runs",
 }
@@ -373,7 +397,7 @@ def _install_plan_for(capability: str, requested_platform: str | None = None) ->
     capability = capability.lower().strip()
 
     if capability in {"pnr", "openlane", "openroad"}:
-        image = os.environ.get("AGENTIC_PNR_DOCKER_IMAGE", "").strip()
+        image = os.environ.get("AGENTIC_PNR_DOCKER_IMAGE", "").strip() or "efabless/openlane:latest"
         command = install_command_for("pnr") or (f"docker pull {image}" if image else "")
         return {
             "capability": "pnr",
@@ -383,8 +407,9 @@ def _install_plan_for(capability: str, requested_platform: str | None = None) ->
             "target": "User-selected native tool or Docker image",
             "requires_admin": False,
             "purpose": (
-                "No PnR path is assumed. Configure AGENTIC_PNR_DOCKER_IMAGE for an open-source Docker flow, "
-                "or install/configure your proprietary PnR tool and expose it on PATH."
+                "No physical design (PnR) tool is detected in your PATH. You can pull an open-source Docker image "
+                "like OpenLane to run standard cells placement/routing, or configure paths to proprietary PnR tools "
+                "such as Cadence Innovus or Synopsys ICC2 by adding them to your system PATH."
             ),
             "options": [
                 {"key": "configure", "label": "Configure tool path", "description": "Add your PnR binary to PATH or set AGENTIC_PNR_TOOLS."},
@@ -396,7 +421,12 @@ def _install_plan_for(capability: str, requested_platform: str | None = None) ->
 
     if capability in {"simulation", "synthesis", "basic"}:
         normalized = "basic" if capability == "basic" else capability
-        command = install_command_for(normalized) or install_command_for("basic")
+        default_cmds = {
+            "simulation": "sudo apt-get update && sudo apt-get install -y iverilog verilator",
+            "synthesis": "sudo apt-get update && sudo apt-get install -y yosys",
+            "basic": "sudo apt-get update && sudo apt-get install -y make python3-pip"
+        }
+        command = install_command_for(normalized) or install_command_for("basic") or default_cmds.get(normalized, "")
         return {
             "capability": normalized,
             "tool": f"{normalized.title()} capability",
@@ -405,8 +435,9 @@ def _install_plan_for(capability: str, requested_platform: str | None = None) ->
             "target": "User-selected native tool, proprietary flow, open-source tool, or Docker image",
             "requires_admin": False,
             "purpose": (
-                "No EDA tool is assumed. Configure tools on PATH, set AGENTIC_EDA_TOOLS and capability env vars, "
-                "or provide an install command through AGENTIC_*_INSTALL_COMMAND."
+                "No simulation, synthesis, or basic compilation tools are detected. You can install open-source defaults "
+                "(iverilog, verilator, yosys) using the package manager, or expose your proprietary tools (Synopsys VCS / Design Compiler, "
+                "Cadence Xrun / Genus, Siemens Questasim) on PATH and configure license variables."
             ),
             "options": [
                 {"key": "configure", "label": "Configure existing tools", "description": "Expose your tools on PATH or set AGENTIC_EDA_TOOLS plus AGENTIC_SIM_TOOLS / AGENTIC_SYNTH_TOOLS."},
@@ -609,6 +640,144 @@ def _get_active_design() -> dict | None:
     return {"name": latest["name"], "updated_at": latest.get("updated_at")}
 
 
+def _require_opencode_bridge(request: Request) -> None:
+    token = os.environ.get("AGENTIC_OPENCODE_BRIDGE_TOKEN", "").strip()
+    if not token:
+        return
+    supplied = request.headers.get("x-agentic-bridge-token", "").strip()
+    if supplied != token:
+        raise HTTPException(401, "AgentIC OpenCode bridge token is invalid.")
+
+
+def _safe_workspace_root(candidate: str | None) -> str:
+    root = os.path.abspath(os.path.normpath(candidate or WS_ROOT))
+    if root == os.path.abspath(os.sep):
+        root = os.path.abspath(os.path.normpath(WS_ROOT))
+    try:
+        os.makedirs(root, exist_ok=True)
+    except PermissionError:
+        root = os.path.abspath(os.path.normpath(WS_ROOT))
+        os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _read_opencode_sessions() -> dict:
+    try:
+        data = json.loads(OPENCODE_SESSIONS_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_opencode_sessions(data: dict) -> None:
+    tmp = OPENCODE_SESSIONS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(OPENCODE_SESSIONS_PATH)
+
+
+def _session_hash(session_id: str) -> str:
+    import hashlib
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:8]
+
+
+def _looks_like_design_request_for_name(text: str) -> bool:
+    lowered = (text or "").lower()
+    return bool(re.search(r"\b(chip|soc|rtl|gds|gdsii|core|accelerator|controller|uart|spi|risc|aes|sram|fifo|noc)\b", lowered))
+
+
+def _normalize_agentic_mode(value: str | None) -> str:
+    return "builder" if str(value or "").strip().lower() == "builder" else "advisor"
+
+
+def _advisor_write_allowed(path: str) -> bool:
+    normalized = os.path.normpath(str(path or "").strip()).replace("\\", "/").lstrip("/")
+    if not normalized or normalized.startswith("../") or normalized == "..":
+        return False
+    top = normalized.split("/", 1)[0].lower()
+    ext = os.path.splitext(normalized.lower())[1]
+    return top in {"docs", "reports", "diagrams"} or ext in {".md", ".markdown", ".mermaid", ".mmd"}
+
+
+def _advisor_tool_guard(name: str, args: dict, mode: str) -> str | None:
+    if _normalize_agentic_mode(mode) != "advisor":
+        return None
+    if name == "bash":
+        return (
+            "Error: AgentIC is in advisor mode. Advisor mode can inspect/query context and prepare docs, "
+            "plans, diagrams, or reports, but it cannot run shell/EDA commands. Switch to builder mode to execute."
+        )
+    if name == "write" and not _advisor_write_allowed(str(args.get("path") or "")):
+        return (
+            "Error: AgentIC is in advisor mode. Advisor mode may only write documentation artifacts "
+            "under docs/, reports/, diagrams/, or markdown/mermaid files. Switch to builder mode to edit design sources."
+        )
+    return None
+
+
+def _slugify_design_text(text: str, fallback: str) -> str:
+    text = re.sub(r"`[^`]+`", " ", text or "")
+    text = re.sub(
+        r"(?i)\b(attached file|approve this plan|begin execution|workspace|please|make|create|build|design|proper|planning)\b",
+        " ",
+        text,
+    )
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", text.lower()).strip("_")
+    slug = re.sub(r"_+", "_", slug)[:44].strip("_")
+    if not slug:
+        slug = fallback
+    if slug.lower() in WORKSPACE_SECTION_DIRS or slug.startswith("."):
+        slug = f"design_{fallback}"
+    return slug
+
+
+def _resolve_opencode_mapping(req: OpenCodeSessionRequest) -> dict:
+    session_id = (req.session_id or "").strip()
+    if not session_id:
+        raise HTTPException(400, "AgentIC runtime session_id is required.")
+    workspace_root = _safe_workspace_root(req.workspace_root)
+    data = _read_opencode_sessions()
+    existing = data.get(session_id) if isinstance(data.get(session_id), dict) else {}
+    fallback = _session_hash(session_id)
+    requested_design = (req.design_name or "").strip()
+    if requested_design:
+        design_name = _slugify_design_text(requested_design, fallback)
+    elif existing.get("design_name") and not (
+        str(existing.get("design_name")).startswith("session_")
+        and _looks_like_design_request_for_name(req.user_text)
+    ):
+        design_name = str(existing["design_name"])
+    else:
+        if _looks_like_design_request_for_name(req.user_text):
+            design_name = _slugify_design_text(req.user_text, f"design_{fallback}")
+            if not design_name.startswith(("design_", "session_")) and len(design_name) < 8:
+                design_name = f"design_{design_name}_{fallback[:4]}"
+        else:
+            design_name = f"session_{fallback}"
+    design_root = os.path.join(workspace_root, design_name)
+    os.makedirs(design_root, exist_ok=True)
+    run_id = str(existing.get("run_id") or f"oc_{fallback}")
+    now = time.time()
+    mapping = {
+        "schema_version": "agentic.opencode.session.v1",
+        "session_id": session_id,
+        "message_id": req.message_id,
+        "agent": req.agent or "agentic-vlsi",
+        "agentic_mode": _normalize_agentic_mode(req.agentic_mode or existing.get("agentic_mode")),
+        "workspace_root": workspace_root,
+        "design_name": design_name,
+        "design_root": design_root,
+        "run_id": run_id,
+        "pdk_profile": req.pdk_profile or existing.get("pdk_profile") or "",
+        "created_at": existing.get("created_at") or now,
+        "updated_at": now,
+        "last_user_text": req.user_text or existing.get("last_user_text") or "",
+    }
+    data[session_id] = mapping
+    _write_opencode_sessions(data)
+    _set_active_design(design_name)
+    return mapping
+
+
 def _read_run_events(limit: int = 200, run_id: str | None = None) -> list[dict]:
     try:
         lines = RUN_EVENTS_PATH.read_text(encoding="utf-8").splitlines()
@@ -744,6 +913,497 @@ async def get_tools_status():
     return detect_environment()
 
 
+@app.get("/tools/adapters")
+async def get_tool_adapters(force_refresh: bool = False):
+    from tool_adapters import normalized_adapter_summary
+    env = detect_environment(force_refresh=force_refresh)
+    return {
+        "status": "OK",
+        "tool_adapters": normalized_adapter_summary(env.get("tools") or {}),
+        "recommended_flow": env.get("recommended_flow") or {},
+        "capability_graph": env.get("capability_graph") or {},
+        "capability_index": env.get("capability_index") or {},
+    }
+
+
+@app.get("/vlsi/route")
+async def get_vlsi_route(pdk: str = "", goal: str = "rtl_to_gds"):
+    env = detect_environment()
+    return recommend_flow(env, requested_pdk=pdk, design_goal=goal)
+
+
+def _require_active_local_runtime(request: Request) -> dict:
+    _require_opencode_bridge(request)
+    license_status = resolve_license_status(request)
+    if not license_status.get("active"):
+        raise HTTPException(402, license_status.get("reason") or "Active license required")
+    return license_status
+
+
+@app.post("/opencode/session/resolve")
+async def opencode_session_resolve(req: OpenCodeSessionRequest, request: Request):
+    license_status = _require_active_local_runtime(request)
+    mapping = _resolve_opencode_mapping(req)
+    from agentic_handoffs import schema_catalog
+    from agentic_kernel import build_context_contract, scope_for_turn
+    from agentic_role_runner import RoleContext, persist_role_results, run_role_pipeline
+    from agentic_validators import validation_schema_catalog
+    from context_engine import build_agent_context_packet
+    from design_intent import build_or_update_design_intent
+    from session_workflow import classify_session_workflow
+    from vlsi_capability_graph import assess_design_readiness
+
+    messages = [{"role": "user", "content": req.user_text or ""}]
+    workflow_decision = classify_session_workflow(req.user_text or "", messages)
+    is_design_task = workflow_decision.requires_design_kernel or workflow_decision.intent == "DESIGN_TASK"
+    kernel_scope = scope_for_turn(
+        is_design_task=is_design_task,
+        is_planning_round=workflow_decision.planning_round if is_design_task else False,
+        execution_authorized=workflow_decision.execution_authorized,
+        wants_diagram_artifact="diagram" in (req.user_text or "").lower() or "mermaid" in (req.user_text or "").lower(),
+        repairs_artifact=workflow_decision.mode == "diagram_repair",
+    )
+    env = detect_environment()
+    flow_decision = recommend_flow(env, requested_pdk=mapping.get("pdk_profile") or req.pdk_profile or "")
+    state_store = DesignStateStore(mapping["design_root"], mapping["design_name"])
+    state_store.set_intent(req.user_text or "", mapping.get("pdk_profile") or "")
+    state_store.upsert_design_fact("opencode_session", mapping["session_id"], mapping, source="opencode_bridge")
+    state_store.upsert_design_fact("session_workflow", workflow_decision.mode, workflow_decision.to_record(), source="session_workflow_router")
+    state_store.set_flow_decision(flow_decision)
+    kernel_contract = build_context_contract(req.user_text or "", kernel_scope).to_dict()
+    state_store.set_context_contract(kernel_contract)
+    role_results = []
+    role_counts = {}
+    design_intent = None
+    if is_design_task:
+        role_ctx = RoleContext(
+            user_text=req.user_text or "",
+            workspace_root=mapping["design_root"],
+            design_name=mapping["design_name"],
+            context_contract=kernel_contract,
+            flow_decision=flow_decision,
+            env=env,
+            design_state=state_store.load(),
+            needs_spec_clarification=False,
+        )
+        role_results = run_role_pipeline(role_ctx)
+        role_counts = persist_role_results(state_store, role_results)
+        design_intent = build_or_update_design_intent(
+            workspace_root=mapping["design_root"],
+            design_name=mapping["design_name"],
+            user_text=req.user_text or "",
+            flow_decision=flow_decision,
+            role_results=role_results,
+            env=env,
+            previous=state_store.load(),
+        )
+        state_store.set_design_intent(design_intent.model_dump(mode="json"))
+        readiness = assess_design_readiness(design_intent.model_dump(mode="json"), env.get("capability_graph") or {})
+        state_store.record_evidence("design_readiness", design_intent.intent_id, readiness)
+        state_store.upsert_design_fact("readiness", design_intent.intent_id, readiness, source="capability_graph")
+        state_store.record_evidence("role_pipeline", kernel_scope.name, {
+            "roles": [result.role for result in role_results],
+            "counts": role_counts,
+            "risks": [risk for result in role_results for risk in result.risks][:20],
+            "intent_id": design_intent.intent_id,
+            "project_root": design_intent.project_root,
+        })
+    context_packet = build_agent_context_packet(
+        workspace_root=mapping["design_root"],
+        design_name=mapping["design_name"],
+        user_text=req.user_text or "",
+        env=env,
+        flow_decision=flow_decision,
+        context_contract=kernel_contract,
+    )
+    return {
+        "success": True,
+        "license": {
+            "active": bool(license_status.get("active")),
+            "plan": license_status.get("plan"),
+            "source": license_status.get("source"),
+        },
+        "session": mapping,
+        "workflow": workflow_decision.to_record(),
+        "kernel_scope": kernel_scope.name,
+        "kernel_contract": kernel_contract,
+        "schema_catalog": schema_catalog(),
+        "validation_schema_catalog": validation_schema_catalog(),
+        "context_packet": context_packet,
+        "flow_decision": flow_decision,
+        "role_summary": {
+            "enabled": is_design_task,
+            "roles": [result.role for result in role_results],
+            "counts": role_counts,
+        },
+        "design_intent": design_intent.model_dump(mode="json") if design_intent else None,
+    }
+
+
+@app.post("/opencode/tool")
+async def opencode_tool(req: OpenCodeToolRequest, request: Request):
+    _require_active_local_runtime(request)
+    mapping = _resolve_opencode_mapping(req)
+    from agent_tools import dispatch_tool
+    guarded = _advisor_tool_guard(req.name, req.args or {}, mapping.get("agentic_mode", "advisor"))
+    if guarded:
+        return {
+            "success": False,
+            "result": guarded,
+            "session": mapping,
+        }
+    result = dispatch_tool(req.name, req.args or {}, mapping["design_root"], mapping["design_name"])
+    event = {
+        "run_id": mapping["run_id"],
+        "type": "progress",
+        "label": f"AgentIC VLSI tool `{req.name}` completed",
+        "stage": "AGENTIC_RUNTIME",
+        "status": "completed" if not str(result).startswith("Error:") else "failed",
+        "design_name": mapping["design_name"],
+        "timestamp": time.time(),
+    }
+    _append_run_event(event)
+    return {
+        "success": not str(result).startswith("Error:"),
+        "result": result,
+        "session": mapping,
+    }
+
+
+def _opencode_runtime_failure(exc: Exception) -> HTTPException:
+    message = str(exc) or exc.__class__.__name__
+    status = 503 if "not reachable" in message.lower() or "not running" in message.lower() else 502
+    return HTTPException(status, message)
+
+
+def _agentic_mode_system_prompt(mode: str) -> str:
+    normalized = _normalize_agentic_mode(mode)
+    common = (
+        "AgentIC Studio runtime mode is "
+        f"{normalized}. Keep responses concise and engineering-focused. "
+        "Do not use emojis, marketing copy, or oversized markdown sections. "
+        "Never expose raw runtime event names such as message.part.delta. "
+        "If clarification is needed, ask the exact question in the same response; do not end with a dangling heading like 'Let me ask'."
+    )
+    if normalized == "builder":
+        return (
+            common
+            + " Builder mode may create/edit design artifacts and run local tools after the user approves an implementation plan. "
+            "For a new build, inspect available context, propose a specific plan, wait for approval, then implement through AgentIC tools."
+        )
+    return (
+        common
+        + " Advisor mode is non-implementation mode. You may explain, inspect, query PDK/tool context, and write docs/plans/diagrams/reports to the workspace. "
+        "Do not write RTL/TB/scripts/constraints/layout sources and do not run shell or EDA commands. If implementation is needed, tell the user to switch to builder mode."
+    )
+
+
+def _desktop_mapping_request(
+    session_id: str,
+    *,
+    user_text: str = "",
+    workspace_root: str | None = None,
+    pdk_profile: str | None = None,
+    design_name: str | None = None,
+    agentic_mode: str = "advisor",
+    agent: str = "agentic-vlsi",
+) -> OpenCodeSessionRequest:
+    return OpenCodeSessionRequest(
+        session_id=session_id,
+        user_text=user_text,
+        workspace_root=workspace_root,
+        pdk_profile=pdk_profile,
+        design_name=design_name,
+        agentic_mode=agentic_mode,
+        agent=agent,
+    )
+
+
+def _normalized_opencode_event(raw: dict, mapping: dict) -> dict:
+    event_type = str(raw.get("type") or "opencode.event")
+    properties = raw.get("properties") if isinstance(raw.get("properties"), dict) else {}
+    part = properties.get("part") if isinstance(properties.get("part"), dict) else {}
+    info = properties.get("info") if isinstance(properties.get("info"), dict) else {}
+    part_type = str(part.get("type") or "")
+    role = str(info.get("role") or properties.get("role") or "")
+    label = properties.get("title") or properties.get("message") or event_type.replace(".", " ")
+    if event_type == "message.part.updated":
+        if part_type == "reasoning":
+            label = "Reasoning over the safest next VLSI step"
+        elif part_type == "text" and role == "assistant":
+            label = "Drafting the AgentIC response"
+        elif part_type.startswith("tool"):
+            label = "Running an AgentIC workspace tool"
+    elif event_type == "message.updated" and role == "assistant":
+        label = "Updating the AgentIC response"
+    elif event_type == "session.status":
+        label = "AgentIC runtime is working"
+    status = "running"
+    if event_type.endswith(".error") or event_type == "session.error":
+        status = "failed"
+    elif event_type in {"session.idle", "server.instance.disposed"}:
+        status = "completed"
+    return {
+        "run_id": mapping["run_id"],
+        "type": "opencode_event",
+        "state": event_type,
+        "stage": event_type,
+        "label": label,
+        "status": status,
+        "design_name": mapping["design_name"],
+        "timestamp": time.time(),
+        "opencode": raw,
+    }
+
+
+_OPENCODE_LEDGER_NOISE_EVENTS = {
+    "server.connected",
+    "server.heartbeat",
+    "session.updated",
+    "session.diff",
+    "session.status",
+    "message.updated",
+    "message.part.updated",
+    "message.part.delta",
+}
+
+
+def _should_persist_opencode_event(event: dict) -> bool:
+    state = str(event.get("stage") or event.get("state") or "")
+    if state in {"session.idle", "session.error", "server.instance.disposed"}:
+        return True
+    return state not in _OPENCODE_LEDGER_NOISE_EVENTS
+
+
+async def _opencode_event_sse(mapping: dict, replay: int = 0):
+    if replay:
+        for event in _read_run_events(replay, mapping["run_id"]):
+            yield {"event": "message", "data": json.dumps(event)}
+
+    import threading
+    from opencode_runtime import stream_events
+
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue[tuple[str, dict | str | None]] = asyncio.Queue()
+    stop = {"value": False}
+
+    def read_stream() -> None:
+        try:
+            for raw in stream_events(mapping["design_root"]):
+                if stop["value"]:
+                    break
+                normalized = _normalized_opencode_event(raw, mapping)
+                if _should_persist_opencode_event(normalized):
+                    _append_run_event(normalized)
+                loop.call_soon_threadsafe(queue.put_nowait, ("event", normalized))
+        except Exception as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, ("closed", None))
+
+    thread = threading.Thread(target=read_stream, daemon=True)
+    thread.start()
+    try:
+        while True:
+            kind, payload = await queue.get()
+            if kind == "event":
+                yield {"event": "message", "data": json.dumps(payload)}
+            elif kind == "error":
+                event = {
+                    "run_id": mapping["run_id"],
+                    "type": "error",
+                    "state": "AGENTIC_RUNTIME_EVENT_STREAM_ERROR",
+                    "label": "AgentIC runtime event stream failed",
+                    "message": payload,
+                    "content": payload,
+                    "status": "failed",
+                    "design_name": mapping["design_name"],
+                    "timestamp": time.time(),
+                }
+                _append_run_event(event)
+                yield {"event": "message", "data": json.dumps(event)}
+                break
+            else:
+                break
+    finally:
+        stop["value"] = True
+
+
+@app.get("/opencode/runtime/status")
+async def opencode_runtime_status(request: Request):
+    _require_active_local_runtime(request)
+    from opencode_runtime import discover_root, health
+    status = health()
+    root = discover_root()
+    return {
+        **status,
+        "root": str(root) if root else None,
+        "attach_mode": bool(os.environ.get("AGENTIC_OPENCODE_URL") or os.environ.get("OPENCODE_SERVER_URL")),
+        "start_command_configured": bool(os.environ.get("AGENTIC_OPENCODE_COMMAND")),
+    }
+
+
+@app.post("/opencode/runtime/start")
+async def opencode_runtime_start(req: OpenCodeRuntimeStartRequest, request: Request):
+    _require_active_local_runtime(request)
+    from opencode_runtime import start
+    try:
+        return start(hostname=req.hostname, port=req.port, timeout=req.timeout)
+    except Exception as exc:
+        raise _opencode_runtime_failure(exc)
+
+
+@app.post("/opencode/desktop/sessions")
+async def opencode_desktop_create_session(req: OpenCodeDesktopSessionRequest, request: Request):
+    _require_active_local_runtime(request)
+    from opencode_runtime import create_session, health
+    if not health().get("healthy"):
+        raise HTTPException(503, "AgentIC runtime engine is not healthy. Start the local runtime or configure AGENTIC_OPENCODE_URL.")
+
+    provisional_id = req.session_id or f"desktop_{uuid.uuid4().hex}"
+    mapping = _resolve_opencode_mapping(_desktop_mapping_request(
+        provisional_id,
+        user_text=req.user_text or req.title or "",
+        workspace_root=req.workspace_root,
+        pdk_profile=req.pdk_profile,
+        design_name=req.design_name,
+        agentic_mode=req.agentic_mode,
+        agent=req.agent,
+    ))
+    try:
+        session = create_session(mapping["design_root"], title=req.title or mapping["design_name"], agent=req.agent)
+    except Exception as exc:
+        raise _opencode_runtime_failure(exc)
+
+    canonical = _resolve_opencode_mapping(_desktop_mapping_request(
+        str(session["id"]),
+        user_text=req.user_text or req.title or "",
+        workspace_root=mapping["workspace_root"],
+        pdk_profile=mapping.get("pdk_profile") or req.pdk_profile,
+        design_name=mapping["design_name"],
+        agentic_mode=mapping.get("agentic_mode", req.agentic_mode),
+        agent=req.agent,
+    ))
+    event = {
+        "run_id": canonical["run_id"],
+        "type": "progress",
+        "state": "AGENTIC_RUNTIME_SESSION_READY",
+        "label": "AgentIC VLSI session ready",
+        "status": "completed",
+        "design_name": canonical["design_name"],
+        "timestamp": time.time(),
+    }
+    _append_run_event(event)
+    return {"success": True, "session": session, "mapping": canonical, "event": event}
+
+
+@app.post("/opencode/desktop/message")
+async def opencode_desktop_message(req: OpenCodeDesktopMessageRequest, request: Request):
+    _require_active_local_runtime(request)
+    from opencode_runtime import prompt_async
+    if not req.text.strip():
+        raise HTTPException(400, "Message text is required.")
+    mapping = _resolve_opencode_mapping(_desktop_mapping_request(
+        req.session_id,
+        user_text=req.text,
+        workspace_root=req.workspace_root,
+        pdk_profile=req.pdk_profile,
+        design_name=req.design_name,
+        agentic_mode=req.agentic_mode,
+        agent=req.agent,
+    ))
+    try:
+        system_prompt = _agentic_mode_system_prompt(mapping.get("agentic_mode", req.agentic_mode))
+        if req.system:
+            system_prompt = f"{system_prompt}\n\nAdditional caller system instruction:\n{req.system}"
+        prompt_async(
+            req.session_id,
+            mapping["design_root"],
+            req.text,
+            agent=req.agent,
+            model=req.model,
+            system=system_prompt,
+            variant=req.variant,
+            message_id=req.message_id,
+        )
+    except Exception as exc:
+        raise _opencode_runtime_failure(exc)
+    event = {
+        "run_id": mapping["run_id"],
+        "type": "progress",
+        "state": "AGENTIC_RUNTIME_PROMPT_ACCEPTED",
+        "label": "AgentIC runtime accepted the VLSI prompt",
+        "status": "running",
+        "design_name": mapping["design_name"],
+        "timestamp": time.time(),
+    }
+    _append_run_event(event)
+    return {"success": True, "accepted": True, "mapping": mapping, "event": event}
+
+
+@app.get("/opencode/desktop/sessions/{session_id}/messages")
+async def opencode_desktop_messages(session_id: str, request: Request, workspace_root: str = "", design_name: str = "", pdk_profile: str = "", limit: int = 200):
+    _require_active_local_runtime(request)
+    from opencode_runtime import list_messages
+    mapping = _resolve_opencode_mapping(_desktop_mapping_request(
+        session_id,
+        workspace_root=workspace_root or None,
+        pdk_profile=pdk_profile or None,
+        design_name=design_name or None,
+    ))
+    try:
+        messages = list_messages(session_id, mapping["design_root"], limit=min(max(limit, 1), 500))
+    except Exception as exc:
+        raise _opencode_runtime_failure(exc)
+    return {"success": True, "mapping": mapping, "messages": messages}
+
+
+@app.post("/opencode/desktop/sessions/{session_id}/abort")
+async def opencode_desktop_abort(session_id: str, request: Request, workspace_root: str = "", design_name: str = "", pdk_profile: str = ""):
+    _require_active_local_runtime(request)
+    from opencode_runtime import abort_session
+    mapping = _resolve_opencode_mapping(_desktop_mapping_request(
+        session_id,
+        workspace_root=workspace_root or None,
+        pdk_profile=pdk_profile or None,
+        design_name=design_name or None,
+    ))
+    try:
+        aborted = abort_session(session_id, mapping["design_root"])
+    except Exception as exc:
+        raise _opencode_runtime_failure(exc)
+    event = {
+        "run_id": mapping["run_id"],
+        "type": "cancelled",
+        "state": "AGENTIC_RUNTIME_ABORTED",
+        "label": "AgentIC run stopped",
+        "status": "cancelled",
+        "design_name": mapping["design_name"],
+        "timestamp": time.time(),
+    }
+    _append_run_event(event)
+    return {"success": True, "aborted": aborted, "mapping": mapping, "event": event}
+
+
+@app.get("/opencode/desktop/events")
+async def opencode_desktop_events(
+    request: Request,
+    session_id: str,
+    workspace_root: str = "",
+    design_name: str = "",
+    pdk_profile: str = "",
+    replay: int = 0,
+):
+    _require_active_local_runtime(request)
+    mapping = _resolve_opencode_mapping(_desktop_mapping_request(
+        session_id,
+        workspace_root=workspace_root or None,
+        pdk_profile=pdk_profile or None,
+        design_name=design_name or None,
+    ))
+    return EventSourceResponse(_opencode_event_sse(mapping, replay=min(max(replay, 0), 500)))
+
+
 @app.get("/runs/events")
 async def get_run_events(request: Request, limit: int = 200, run_id: str = ""):
     license_status = resolve_license_status(request)
@@ -868,6 +1528,17 @@ async def get_designs(request: Request):
     return {"designs": list_designs(WS_ROOT)}
 
 
+@app.post("/debug/log")
+async def debug_log(data: dict):
+    try:
+        import json
+        with open("/home/vickynishad/AgentIC-workspace/debug.log", "a") as f:
+            f.write(json.dumps(data) + "\n")
+    except Exception as e:
+        print("Error writing debug log:", e)
+    return {"ok": True}
+
+
 @app.get("/build/artifacts")
 @app.get("/build/artifacts/{design_name}")
 async def get_artifacts(request: Request, design_name: str = ""):
@@ -899,6 +1570,31 @@ async def get_artifact(request: Request, design_name: str, file_name: str):
     return content
 
 
+@app.get("/build/checkpoints/{design_name}")
+async def get_checkpoints(request: Request, design_name: str):
+    license_status = resolve_license_status(request)
+    if not license_status.get("active"):
+        raise HTTPException(402, license_status.get("reason") or "Active license required")
+    from checkpoint_engine import CheckpointEngine
+    design_root = os.path.join(WS_ROOT, design_name) if design_name else WS_ROOT
+    engine = CheckpointEngine(design_name, design_root)
+    report = engine.signoff_report()
+    try:
+        report["design_state"] = DesignStateStore(design_root, design_name).summary()
+    except Exception:
+        pass
+    return report
+
+
+@app.get("/build/state/{design_name}")
+async def get_design_state(request: Request, design_name: str):
+    license_status = resolve_license_status(request)
+    if not license_status.get("active"):
+        raise HTTPException(402, license_status.get("reason") or "Active license required")
+    design_root = os.path.join(WS_ROOT, design_name) if design_name else WS_ROOT
+    return DesignStateStore(design_root, design_name).load()
+
+
 @app.post("/chat/converse")
 async def chat_converse(req: ChatRequest, request: Request):
     license_status = resolve_license_status(request)
@@ -911,6 +1607,10 @@ async def chat_converse(req: ChatRequest, request: Request):
     base_url = req.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
     model = req.model or os.environ.get("OPENAI_MODEL", "gpt-4o")
     run_id = req.run_id or uuid.uuid4().hex
+    if run_id in ACTIVE_RUNS:
+        logging.info("Run %s is already active; attaching to existing run event stream", run_id)
+        return EventSourceResponse(_attach_existing_run_events(run_id))
+    ACTIVE_RUNS[run_id] = time.time()
     CANCELLED_RUNS.discard(run_id)
 
     async def event_generator():
@@ -921,17 +1621,64 @@ async def chat_converse(req: ChatRequest, request: Request):
         def _push_event(event_dict: dict) -> None:
             loop.call_soon_threadsafe(queue.put_nowait, ("event", event_dict))
 
+        def _generate_title_sync():
+            try:
+                import re
+                from openai import OpenAI, AzureOpenAI
+                if "azure.com" in base_url.lower():
+                    match = re.match(r"(https://[^.]+\.openai\.azure\.com)", base_url)
+                    azure_endpoint = match.group(1) if match else base_url
+                    api_version = "2024-02-15-preview"
+                    ver_match = re.search(r"api-version=([\d-]+)", base_url)
+                    if ver_match:
+                        api_version = ver_match.group(1)
+                    client = AzureOpenAI(api_key=api_key, api_version=api_version, azure_endpoint=azure_endpoint, timeout=30)
+                else:
+                    client = OpenAI(api_key=api_key, base_url=base_url, timeout=30)
+
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "Generate a concise 2-4 word title for this VLSI/chip design chat. Output ONLY the title text without quotes."},
+                        {"role": "user", "content": req.messages[0].get("content", "")}
+                    ],
+                    max_tokens=10,
+                    temperature=0.3
+                )
+                title = response.choices[0].message.content.strip().replace('"', '').replace("'", "")
+                _push_event({"type": "title", "title": title})
+            except Exception as e:
+                import logging
+                logging.getLogger("agentic.title").warning(f"Title generation failed: {e}")
+
+        if len(req.messages) == 1:
+            loop.run_in_executor(None, _generate_title_sync)
+
         def run_sync_gen():
             """Run the synchronous generator and push events to the queue."""
             try:
+                design_name = req.design_name or "scratch"
+                design_dir = os.path.join(WS_ROOT, design_name) if design_name else WS_ROOT
+                if design_name:
+                    os.makedirs(design_dir, exist_ok=True)
+                def is_run_cancelled():
+                    if SHUTDOWN_REQUESTED:
+                        logging.info("is_run_cancelled check: SHUTDOWN_REQUESTED is True, cancelling run %s", run_id)
+                        return True
+                    cancelled = run_id in CANCELLED_RUNS
+                    if cancelled:
+                        logging.info("is_run_cancelled check: run_id %s is CANCELLED", run_id)
+                    return cancelled
                 for event in converse_stream(
                     messages=req.messages,
                     api_key=api_key,
-                    workspace_root=WS_ROOT,
+                    workspace_root=design_dir,
+                    design_name=design_name,
                     base_url=base_url,
                     model=model,
                     event_pusher=_push_event,
-                    is_cancelled=lambda: run_id in CANCELLED_RUNS,
+                    is_cancelled=is_run_cancelled,
+                    pdk_profile=req.pdk_profile,
                 ):
                     loop.call_soon_threadsafe(queue.put_nowait, ("event", event))
                 loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
@@ -970,12 +1717,14 @@ async def chat_converse(req: ChatRequest, request: Request):
                     break
 
                 if kind == "error":
+                    error_message = str(payload or "The local run hit an issue").strip()
                     error_event = {
                         "run_id": run_id,
                         "type": "error",
                         "state": "ERROR",
                         "label": "The local run hit an issue",
-                        "message": "The local run hit an issue",
+                        "message": error_message,
+                        "content": error_message,
                         "status": "failed",
                         "timestamp": time.time(),
                     }
@@ -991,7 +1740,7 @@ async def chat_converse(req: ChatRequest, request: Request):
                 sse_data = {
                     "run_id": run_id,
                     "type": event_type,
-                    "state": state or ("THINKING" if event_type == "reasoning" else "done"),
+                    "state": state or ("THINKING" if event_type in {"reasoning", "thought"} else "done"),
                     "message": content,
                     "content": content,
                     "label": event.get("label"),
@@ -1000,9 +1749,12 @@ async def chat_converse(req: ChatRequest, request: Request):
                     "design_name": event.get("design_name"),
                     "timestamp": time.time(),
                 }
+                for key in ("options", "artifacts", "project_root", "artifact_path"):
+                    if key in event:
+                        sse_data[key] = event.get(key)
                 if sse_data.get("design_name"):
                     _set_active_design(sse_data["design_name"])
-                if event_type in {"progress", "needs_input", "response", "error", "stream_end", "cancelled"}:
+                if event_type in {"thought", "progress", "needs_input", "response", "error", "stream_end", "cancelled"}:
                     _append_run_event(sse_data)
 
                 yield {"event": "message", "data": json.dumps(sse_data)}
@@ -1021,6 +1773,7 @@ async def chat_converse(req: ChatRequest, request: Request):
             _append_run_event(timeout_event)
             yield {"event": "message", "data": json.dumps(timeout_event)}
         finally:
+            ACTIVE_RUNS.pop(run_id, None)
             task.cancel()
             try:
                 await task
@@ -1030,6 +1783,44 @@ async def chat_converse(req: ChatRequest, request: Request):
     return EventSourceResponse(event_generator())
 
 
+async def _attach_existing_run_events(run_id: str):
+    seen: set[str] = set()
+    terminal = {"stream_end", "error", "cancelled"}
+    attached_event = {
+        "run_id": run_id,
+        "type": "progress",
+        "state": "ATTACHED",
+        "message": "Reconnected to the active local run.",
+        "content": "Reconnected to the active local run.",
+        "label": "Reconnected to active run",
+        "stage": "RUN",
+        "status": "running",
+        "timestamp": time.time(),
+    }
+    yield {"event": "message", "data": json.dumps(attached_event)}
+    started = time.time()
+    while run_id in ACTIVE_RUNS and time.time() - started < 900:
+        for event in _read_run_events(limit=200, run_id=run_id):
+            key = f"{event.get('timestamp')}:{event.get('type')}:{event.get('label')}:{event.get('stage')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            yield {"event": "message", "data": json.dumps(event)}
+            if event.get("type") in terminal:
+                return
+        await asyncio.sleep(1.0)
+    if run_id not in ACTIVE_RUNS:
+        done_event = {
+            "run_id": run_id,
+            "type": "stream_end",
+            "state": "done",
+            "label": "Run complete",
+            "status": "completed",
+            "timestamp": time.time(),
+        }
+        yield {"event": "message", "data": json.dumps(done_event)}
+
+
 @app.post("/runs/{run_id}/cancel")
 async def cancel_run(request: Request, run_id: str):
     license_status = resolve_license_status(request)
@@ -1037,6 +1828,7 @@ async def cancel_run(request: Request, run_id: str):
         raise HTTPException(402, license_status.get("reason") or "Active license required")
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", run_id or ""):
         raise HTTPException(400, "Invalid run id")
+    logging.info("Adding run_id %s to CANCELLED_RUNS set", run_id)
     CANCELLED_RUNS.add(run_id)
     cancel_event = {
         "run_id": run_id,

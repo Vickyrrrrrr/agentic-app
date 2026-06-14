@@ -33,6 +33,8 @@ desktop/out/
 desktop/dist/
 desktop/.vite/
 desktop/resources/*.local.json
+apps/agentic-desktop/packages/desktop/.agentic-backend-build-venv/
+apps/agentic-desktop/packages/desktop/resources/backend/
 web/dist/
 web/.vite/
 server/.agentic-state/

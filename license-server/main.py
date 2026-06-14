@@ -41,6 +41,8 @@ LEMON_SQUEEZY_STORE_ID = _optional_env("LEMON_SQUEEZY_STORE_ID")
 LEMON_SQUEEZY_VARIANT_ID = _optional_env("LEMON_SQUEEZY_VARIANT_ID")
 LEMON_SQUEEZY_WEBHOOK_SECRET = _optional_env("LEMON_SQUEEZY_WEBHOOK_SECRET")
 LEMON_SQUEEZY_TEST_MODE = os.getenv("LEMON_SQUEEZY_TEST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+GOOGLE_CLIENT_ID = _optional_env("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = _optional_env("GOOGLE_CLIENT_SECRET")
 ENTITLEMENT_JWT_SECRET = _optional_env("ENTITLEMENT_JWT_SECRET")
 ENTITLEMENT_JWT_PRIVATE_KEY = _optional_env("ENTITLEMENT_JWT_PRIVATE_KEY")
 ENTITLEMENT_JWT_PRIVATE_KEY_FILE = _optional_env("ENTITLEMENT_JWT_PRIVATE_KEY_FILE")
@@ -361,13 +363,13 @@ async def _active_subscription(user_id: str) -> dict[str, Any] | None:
 def normalize_pem_private_key(key_str: str) -> str:
     key_str = key_str.strip().strip('"').strip("'")
     key_str = key_str.replace("\\n", "\n").replace("\\r", "\r")
-    
+
     header_marker = "-----BEGIN RSA PRIVATE KEY-----"
     footer_marker = "-----END RSA PRIVATE KEY-----"
     if header_marker not in key_str:
         header_marker = "-----BEGIN PRIVATE KEY-----"
         footer_marker = "-----END PRIVATE KEY-----"
-        
+
     if header_marker in key_str:
         parts = key_str.split(header_marker)
         if len(parts) > 1:
@@ -398,7 +400,7 @@ def _signed_entitlement(user: UserContext, subscription: dict[str, Any]) -> str:
     use_rsa = bool(private_key_from_file or ENTITLEMENT_JWT_PRIVATE_KEY)
     algorithm = "RS256" if use_rsa else "HS256"
     key_id = "agentic-rs256" if use_rsa else "agentic-hs256"
-    
+
     if use_rsa:
         try:
             signing_key = normalize_pem_private_key(signing_key)
@@ -498,20 +500,128 @@ async def refresh(payload: AuthRefreshRequest) -> AuthSessionResponse:
     return _auth_response(data)
 
 
+def _require_google_oauth() -> tuple[str, str]:
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(status_code=503, detail="Google OAuth is not configured on the license server")
+    return GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+
+
 @app.get("/auth/google/start")
 async def google_start() -> RedirectResponse:
-    response = _supabase_google_redirect(f"{PUBLIC_BASE_URL}/auth/google/landing")
+    client_id, _ = _require_google_oauth()
+    state_str = json.dumps({"flow": "desktop", "plan": ""})
+    params = {
+        "client_id": client_id,
+        "redirect_uri": f"{PUBLIC_BASE_URL}/auth/google/callback",
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state_str,
+    }
+    target = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
+    response = RedirectResponse(target)
     response.set_cookie("agentic_flow", "desktop", max_age=3600, secure=True, samesite="lax")
     return response
 
 
 @app.get("/purchase/start")
 async def purchase_start(plan: str = "pro") -> RedirectResponse:
+    client_id, _ = _require_google_oauth()
     normalized_plan = _normalize_plan(plan)
-    redirect_to = f"{PUBLIC_BASE_URL}/auth/google/landing"
-    response = _supabase_google_redirect(redirect_to)
+    state_str = json.dumps({"flow": "checkout", "plan": normalized_plan})
+    params = {
+        "client_id": client_id,
+        "redirect_uri": f"{PUBLIC_BASE_URL}/auth/google/callback",
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state_str,
+    }
+    target = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
+    response = RedirectResponse(target)
     response.set_cookie("agentic_flow", "checkout", max_age=3600, secure=True, samesite="lax")
     response.set_cookie("agentic_plan", normalized_plan, max_age=3600, secure=True, samesite="lax")
+    return response
+
+
+@app.get("/auth/google/callback")
+async def google_callback(code: str, state: str | None = None) -> RedirectResponse:
+    client_id, client_secret = _require_google_oauth()
+
+    # 1. Exchange code for Google ID token and access token
+    async with httpx.AsyncClient(timeout=20) as client:
+        token_resp = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": f"{PUBLIC_BASE_URL}/auth/google/callback",
+                "grant_type": "authorization_code",
+            }
+        )
+        if token_resp.status_code >= 400:
+            raise HTTPException(status_code=400, detail="Google authentication failed to exchange code")
+        tokens = token_resp.json()
+        id_token = tokens.get("id_token")
+        google_access_token = tokens.get("access_token")
+        if not id_token:
+            raise HTTPException(status_code=400, detail="Google did not return an ID token")
+
+    # 2. Exchange Google ID token for Supabase session
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise HTTPException(status_code=503, detail="Supabase connection is not configured")
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        sb_resp = await client.post(
+            f"{SUPABASE_URL.rstrip('/')}/auth/v1/token",
+            params={"grant_type": "id_token"},
+            headers={
+                "apikey": SUPABASE_ANON_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "provider": "google",
+                "id_token": id_token,
+                "access_token": google_access_token,
+            }
+        )
+        if sb_resp.status_code >= 400:
+            try:
+                err_body = sb_resp.json()
+                err_msg = err_body.get("msg") or err_body.get("error_description") or "Supabase registration failed"
+            except Exception:
+                err_msg = "Supabase registration failed"
+            raise HTTPException(status_code=400, detail=err_msg)
+
+        sb_session = sb_resp.json()
+
+    # 3. Decode flow state
+    flow = "desktop"
+    plan = ""
+    if state:
+        try:
+            state_data = json.loads(state)
+            flow = state_data.get("flow", "desktop")
+            plan = state_data.get("plan", "")
+        except Exception:
+            pass
+
+    access_token = sb_session.get("access_token")
+    refresh_token = sb_session.get("refresh_token")
+    expires_in = sb_session.get("expires_in")
+    expires_at = int(time.time()) + expires_in if expires_in else ""
+
+    hash_params = {
+        "access_token": access_token or "",
+        "refresh_token": refresh_token or "",
+        "expires_in": str(expires_in or ""),
+        "expires_at": str(expires_at or ""),
+        "token_type": "bearer",
+    }
+
+    target_url = f"{PUBLIC_BASE_URL}/auth/google/landing?flow={flow}&plan={plan}#{urlencode(hash_params)}"
+    response = RedirectResponse(target_url)
+    response.set_cookie("agentic_flow", flow, max_age=3600, secure=True, samesite="lax")
+    response.set_cookie("agentic_plan", plan, max_age=3600, secure=True, samesite="lax")
     return response
 
 
@@ -523,7 +633,7 @@ async def google_landing(request: Request) -> HTMLResponse:
     plan_raw = request.query_params.get("plan") or request.cookies.get("agentic_plan")
     plan = _normalize_plan(plan_raw) if flow == "checkout" else ""
     checkout_url = f"{PUBLIC_BASE_URL}/checkout/create"
-    
+
     html_content = (
         r"""
 <!doctype html>
@@ -566,7 +676,7 @@ async def google_landing(request: Request) -> HTMLResponse:
       const expiresAt = hash.get("expires_at");
       const expiresIn = hash.get("expires_in");
       const tokenType = hash.get("token_type") || "bearer";
-      
+
       let errorMsg = hash.get("error_description") || hash.get("error") || searchParams.get("error_description") || searchParams.get("error");
       if (errorMsg) {
         errorMsg = decodeURIComponent(errorMsg.replace(/\+/g, ' '));
@@ -655,7 +765,7 @@ async def google_landing(request: Request) -> HTMLResponse:
         .replace("__PLAN__", json.dumps(plan))
         .replace("__CHECKOUT_URL__", json.dumps(checkout_url))
     )
-    
+
     response = HTMLResponse(html_content)
     response.delete_cookie("agentic_flow", secure=True, samesite="lax")
     response.delete_cookie("agentic_plan", secure=True, samesite="lax")
