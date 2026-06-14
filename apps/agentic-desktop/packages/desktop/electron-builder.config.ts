@@ -92,7 +92,7 @@ function getConfig() {
     case "dev": {
       return {
         ...base,
-        appId: "live.buildstack.agentic.desktop.dev",
+        appId: "live.buildstack.agentic.dev",
         productName: "AgentIC Dev",
         rpm: { packageName: "agentic-dev" },
       }
@@ -100,7 +100,7 @@ function getConfig() {
     case "beta": {
       return {
         ...base,
-        appId: "live.buildstack.agentic.desktop.beta",
+        appId: "live.buildstack.agentic.beta",
         productName: "AgentIC Beta",
         protocols: { name: "AgentIC Beta", schemes: ["agentic"] },
         publish: {
@@ -116,7 +116,7 @@ function getConfig() {
     case "prod": {
       return {
         ...base,
-        appId: "live.buildstack.agentic.desktop",
+        appId: "live.buildstack.agentic",
         productName: "AgentIC",
         protocols: { name: "AgentIC", schemes: ["agentic"] },
         publish: {

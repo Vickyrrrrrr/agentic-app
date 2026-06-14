@@ -46,9 +46,9 @@ const APP_NAMES: Record<string, string> = {
   prod: "AgentIC",
 }
 const APP_IDS: Record<string, string> = {
-  dev: "live.buildstack.agentic.desktop.dev",
-  beta: "live.buildstack.agentic.desktop.beta",
-  prod: "live.buildstack.agentic.desktop",
+  dev: "live.buildstack.agentic.dev",
+  beta: "live.buildstack.agentic.beta",
+  prod: "live.buildstack.agentic",
 }
 const TEST_ONBOARDING = process.env.OPENCODE_TEST_ONBOARDING === "1"
 const jsCallStackFeature = "DocumentPolicyIncludeJSCallStacksInCrashReports"
@@ -111,7 +111,7 @@ const main = Effect.gen(function* () {
 
   process.env.OPENCODE_DISABLE_EMBEDDED_WEB_UI = "true"
 
-  const appId = app.isPackaged ? APP_IDS[CHANNEL] : "live.buildstack.agentic.desktop.dev"
+  const appId = app.isPackaged ? APP_IDS[CHANNEL] : "live.buildstack.agentic.dev"
   const onboardingTestRoot = ((): string | undefined => {
     if (!TEST_ONBOARDING) return
 
