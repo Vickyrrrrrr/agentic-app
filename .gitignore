@@ -29,6 +29,8 @@ __pycache__/
 .venv/
 venv/
 env/
+!apps/agentic-desktop/packages/opencode/src/env/
+!apps/agentic-desktop/packages/opencode/src/env/**
 desktop/out/
 desktop/dist/
 desktop/.vite/

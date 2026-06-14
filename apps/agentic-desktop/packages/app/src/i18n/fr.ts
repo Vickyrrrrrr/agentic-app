@@ -559,7 +559,7 @@ export const dict = {
   "sidebar.project.recentSessions": "Sessions récentes",
   "sidebar.project.viewAllSessions": "Voir toutes les sessions",
   "sidebar.project.clearNotifications": "Effacer les notifications",
-  "app.name.desktop": "OpenCode Desktop",
+  "app.name.desktop": "AgentIC Desktop",
   "settings.section.desktop": "Bureau",
   "settings.section.server": "Serveur",
   "settings.tab.general": "Général",

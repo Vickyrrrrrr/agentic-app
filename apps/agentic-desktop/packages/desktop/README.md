@@ -1,6 +1,6 @@
-# OpenCode Desktop
+# AgentIC Desktop
 
-The OpenCode Desktop app, built with Electron.
+The AgentIC desktop app, built with Electron.
 
 ## Development
 

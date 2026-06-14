@@ -201,7 +201,7 @@ export const DESKTOP_MENU: DesktopMenu[] = [
     label: "Help",
     items: [
       { type: "item", label: "AgentIC Documentation", href: "https://buildstack.live/agentic" },
-      { type: "item", label: "OpenCode Runtime Docs", href: "https://opencode.ai/docs" },
+      { type: "item", label: "Runtime Docs", href: "https://opencode.ai/docs" },
       { type: "item", label: "Export Logs...", command: "logs.export" },
       { type: "separator" },
       {
