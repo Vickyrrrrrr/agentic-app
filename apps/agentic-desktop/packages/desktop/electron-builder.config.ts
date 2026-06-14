@@ -103,7 +103,13 @@ function getConfig() {
         appId: "live.buildstack.agentic.desktop.beta",
         productName: "AgentIC Beta",
         protocols: { name: "AgentIC Beta", schemes: ["agentic"] },
-        publish: { provider: "github", owner: "Vickyrrrrrr", repo: "buildstack", channel: "beta" },
+        publish: {
+          provider: "github",
+          owner: "Vickyrrrrrr",
+          repo: "buildstack",
+          channel: "beta",
+          releaseType: "prerelease",
+        },
         rpm: { packageName: "agentic-beta" },
       }
     }
@@ -113,7 +119,13 @@ function getConfig() {
         appId: "live.buildstack.agentic.desktop",
         productName: "AgentIC",
         protocols: { name: "AgentIC", schemes: ["agentic"] },
-        publish: { provider: "github", owner: "Vickyrrrrrr", repo: "buildstack", channel: "latest" },
+        publish: {
+          provider: "github",
+          owner: "Vickyrrrrrr",
+          repo: "buildstack",
+          channel: "latest",
+          releaseType: "release",
+        },
         rpm: { packageName: "agentic" },
       }
     }
