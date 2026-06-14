@@ -33,7 +33,10 @@ echo "[scan] Installing Python dependencies..."
 pip3 install -q -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null || pip install -q -r "$SCRIPT_DIR/requirements.txt"
 
 echo ""
-echo "→ AgentIC Local Server starting at http://localhost:7860"
+AGENTIC_PORT="${AGENTIC_PORT:-${PORT:-7860}}"
+export AGENTIC_PORT
+
+echo "→ AgentIC Local Server starting at http://localhost:${AGENTIC_PORT}"
 echo ""
 
 cd "$SCRIPT_DIR"

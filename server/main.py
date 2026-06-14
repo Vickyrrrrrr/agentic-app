@@ -932,6 +932,16 @@ async def get_vlsi_route(pdk: str = "", goal: str = "rtl_to_gds"):
     return recommend_flow(env, requested_pdk=pdk, design_goal=goal)
 
 
+@app.get("/opencode/bridge/health")
+async def opencode_bridge_health():
+    return {
+        "status": "ok",
+        "service": "agentic-opencode-bridge",
+        "bridge": True,
+        "agent": "agentic-vlsi",
+    }
+
+
 def _require_active_local_runtime(request: Request) -> dict:
     _require_opencode_bridge(request)
     license_status = resolve_license_status(request)
@@ -1852,4 +1862,5 @@ async def get_active_workspace(request: Request):
 if __name__ == "__main__":
     import uvicorn
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-    uvicorn.run(app, host="0.0.0.0", port=7860, log_config=None, access_log=False)
+    port = int(os.environ.get("AGENTIC_PORT") or os.environ.get("PORT") or "7860")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_config=None, access_log=False)

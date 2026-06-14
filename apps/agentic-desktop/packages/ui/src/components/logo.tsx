@@ -5,12 +5,22 @@ export const Mark = (props: { class?: string }) => {
     <svg
       data-component="logo-mark"
       classList={{ [props.class ?? ""]: !!props.class }}
-      viewBox="0 0 16 20"
+      viewBox="0 0 20 20"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <path data-slot="logo-logo-mark-shadow" d="M12 16H4V8H12V16Z" fill="var(--icon-weak-base)" />
-      <path data-slot="logo-logo-mark-o" d="M12 4H4V16H12V4ZM16 20H0V0H16V20Z" fill="var(--icon-strong-base)" />
+      <path
+        d="M3 5.5C3 3.567 4.567 2 6.5 2H14C15.657 2 17 3.343 17 5V12.5C17 14.433 15.433 16 13.5 16H6C4.343 16 3 14.657 3 13V5.5Z"
+        fill="var(--icon-weak-base)"
+      />
+      <path
+        d="M8.143 5H14L11.857 9H14.5L7.714 17L9.286 11.75H6L8.143 5Z"
+        fill="var(--icon-strong-base)"
+      />
+      <path
+        d="M6 1V0H8V1H12V0H14V1C16.761 1 19 3.239 19 6H20V8H19V12H20V14H19C19 16.761 16.761 19 14 19V20H12V19H8V20H6V19C3.239 19 1 16.761 1 14H0V12H1V8H0V6H1C1 3.239 3.239 1 6 1ZM6 3C4.343 3 3 4.343 3 6V14C3 15.657 4.343 17 6 17H14C15.657 17 17 15.657 17 14V6C17 4.343 15.657 3 14 3H6Z"
+        fill="var(--icon-base)"
+      />
     </svg>
   )
 }
@@ -21,12 +31,19 @@ export const Splash = (props: Pick<ComponentProps<"svg">, "ref" | "class">) => {
       ref={props.ref}
       data-component="logo-splash"
       classList={{ [props.class ?? ""]: !!props.class }}
-      viewBox="0 0 80 100"
+      viewBox="0 0 100 100"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <path d="M60 80H20V40H60V80Z" fill="var(--icon-base)" />
-      <path d="M60 20H20V80H60V20ZM80 100H0V0H80V100Z" fill="var(--icon-strong-base)" />
+      <path
+        d="M17 26C17 16.611 24.611 9 34 9H70C78.284 9 85 15.716 85 24V60C85 69.389 77.389 77 68 77H32C23.716 77 17 70.284 17 62V26Z"
+        fill="var(--icon-weak-base)"
+      />
+      <path d="M41 25H70L59 47H72L34 91L43 62H27L41 25Z" fill="var(--icon-strong-base)" />
+      <path
+        d="M30 4V0H40V4H60V0H70V4C84.359 4 96 15.641 96 30H100V40H96V60H100V70H96C96 84.359 84.359 96 70 96V100H60V96H40V100H30V96C15.641 96 4 84.359 4 70H0V60H4V40H0V30H4C4 15.641 15.641 4 30 4ZM30 14C21.163 14 14 21.163 14 30V70C14 78.837 21.163 86 30 86H70C78.837 86 86 78.837 86 70V30C86 21.163 78.837 14 70 14H30Z"
+        fill="var(--icon-base)"
+      />
     </svg>
   )
 }
@@ -35,28 +52,43 @@ export const Logo = (props: { class?: string }) => {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 234 42"
+      viewBox="0 0 260 48"
       fill="none"
       classList={{ [props.class ?? ""]: !!props.class }}
     >
-      <g>
-        <path d="M18 30H6V18H18V30Z" fill="var(--icon-weak-base)" />
-        <path d="M18 12H6V30H18V12ZM24 36H0V6H24V36Z" fill="var(--icon-base)" />
-        <path d="M48 30H36V18H48V30Z" fill="var(--icon-weak-base)" />
-        <path d="M36 30H48V12H36V30ZM54 36H36V42H30V6H54V36Z" fill="var(--icon-base)" />
-        <path d="M84 24V30H66V24H84Z" fill="var(--icon-weak-base)" />
-        <path d="M84 24H66V30H84V36H60V6H84V24ZM66 18H78V12H66V18Z" fill="var(--icon-base)" />
-        <path d="M108 36H96V18H108V36Z" fill="var(--icon-weak-base)" />
-        <path d="M108 12H96V36H90V6H108V12ZM114 36H108V12H114V36Z" fill="var(--icon-base)" />
-        <path d="M144 30H126V18H144V30Z" fill="var(--icon-weak-base)" />
-        <path d="M144 12H126V30H144V36H120V6H144V12Z" fill="var(--icon-strong-base)" />
-        <path d="M168 30H156V18H168V30Z" fill="var(--icon-weak-base)" />
-        <path d="M168 12H156V30H168V12ZM174 36H150V6H174V36Z" fill="var(--icon-strong-base)" />
-        <path d="M198 30H186V18H198V30Z" fill="var(--icon-weak-base)" />
-        <path d="M198 12H186V30H198V12ZM204 36H180V6H198V0H204V36Z" fill="var(--icon-strong-base)" />
-        <path d="M234 24V30H216V24H234Z" fill="var(--icon-weak-base)" />
-        <path d="M216 12V18H228V12H216ZM234 24H216V30H234V36H210V6H234V24Z" fill="var(--icon-strong-base)" />
+      <g transform="translate(0 6)">
+        <path
+          d="M3 5.5C3 3.567 4.567 2 6.5 2H14C15.657 2 17 3.343 17 5V12.5C17 14.433 15.433 16 13.5 16H6C4.343 16 3 14.657 3 13V5.5Z"
+          fill="var(--icon-weak-base)"
+        />
+        <path d="M8.143 5H14L11.857 9H14.5L7.714 17L9.286 11.75H6L8.143 5Z" fill="var(--icon-strong-base)" />
+        <path
+          d="M6 1V0H8V1H12V0H14V1C16.761 1 19 3.239 19 6H20V8H19V12H20V14H19C19 16.761 16.761 19 14 19V20H12V19H8V20H6V19C3.239 19 1 16.761 1 14H0V12H1V8H0V6H1C1 3.239 3.239 1 6 1ZM6 3C4.343 3 3 4.343 3 6V14C3 15.657 4.343 17 6 17H14C15.657 17 17 15.657 17 14V6C17 4.343 15.657 3 14 3H6Z"
+          fill="var(--icon-base)"
+        />
       </g>
+      <text
+        x="30"
+        y="31"
+        fill="var(--icon-strong-base)"
+        font-family="Inter, ui-sans-serif, system-ui, sans-serif"
+        font-size="24"
+        font-weight="760"
+        letter-spacing="0"
+      >
+        AgentIC
+      </text>
+      <text
+        x="130"
+        y="31"
+        fill="var(--icon-base)"
+        font-family="Inter, ui-sans-serif, system-ui, sans-serif"
+        font-size="13"
+        font-weight="650"
+        letter-spacing="0"
+      >
+        Silicon
+      </text>
     </svg>
   )
 }

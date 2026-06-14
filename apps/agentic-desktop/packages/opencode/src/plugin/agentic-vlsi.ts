@@ -158,7 +158,7 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
 
       ctxOutput.system.push(
         [
-          "## AgentIC OpenCode Runtime Contract",
+          "## AgentIC Desktop Runtime Contract",
           `Session: ${response.session?.session_id}`,
           `Design: ${response.session?.design_name}`,
           `Design root: ${response.session?.design_root}`,
@@ -166,7 +166,7 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
           `Workflow: ${response.workflow?.mode} (${response.workflow?.intent})`,
           `Scope: ${response.kernel_scope}`,
           "",
-          "Use OpenCode for session/tool UX, but use AgentIC bridge tools for VLSI-specific decisions.",
+          "Use the desktop runtime for session/tool UX, but use AgentIC bridge tools for VLSI-specific decisions.",
           "In advisor mode, do not write RTL/TB/scripts or run shell/EDA commands; only inspect/query and write docs/plans/diagrams/reports.",
           "In builder mode, make a plan, wait for approval when starting implementation, then use AgentIC tools for edits and execution.",
           "Do not invent PDK cells, SRAM macros, tool licenses, timing corners, or signoff readiness.",
@@ -188,7 +188,7 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
     },
     tool: {
       agentic_context: tool({
-        description: "Resolve the current OpenCode session into AgentIC's VLSI design context, workflow, PDK/tool capability state, and durable design mapping.",
+        description: "Resolve the current AgentIC session into VLSI design context, workflow, PDK/tool capability state, and durable design mapping.",
         args: {
           user_text: z.string().default(""),
           pdk_profile: z.string().optional(),
@@ -270,7 +270,7 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
         },
       }),
       agentic_ledger: tool({
-        description: "Read or update AgentIC's durable VLSI design facts, role handoffs, and evidence graph for the current OpenCode session.",
+        description: "Read or update AgentIC's durable VLSI design facts, role handoffs, and evidence graph for the current session.",
         args: {
           action: z.enum(["get_state", "record_fact", "record_handoff", "record_evidence"]),
           namespace: z.string().optional(),

@@ -124,6 +124,7 @@ export const layer = Layer.effect(
 
         const user = Permission.fromConfig(cfg.permission ?? {})
 
+        const isAgenticProduct = process.env.AGENTIC_PRODUCT === "1"
         const agents: Record<string, Info> = {
           build: {
             name: "build",
@@ -167,8 +168,8 @@ export const layer = Layer.effect(
             name: "agentic-vlsi",
             description: "VLSI design engineer agent backed by AgentIC's PDK/tool/IP capability graph, checkpoint engine, and typed design state.",
             prompt: [
-              "You are AgentIC VLSI running on the OpenCode runtime.",
-              "Use OpenCode for the coding-agent experience: sessions, files, diffs, shell, progress, and cancellation.",
+              "You are AgentIC VLSI running inside the AgentIC desktop runtime.",
+              "Use the runtime for the coding-agent experience: sessions, files, diffs, shell, progress, and cancellation.",
               "Use AgentIC bridge tools for VLSI-specific truth: agentic_context, agentic_query_pdk, agentic_bash, agentic_write, agentic_report, and agentic_ledger.",
               "Before making PDK, SRAM, macro, flow, timing, or signoff claims, call AgentIC capability/context tools. Use agentic_query_pdk with query_type=tool_adapters before selecting simulation, synthesis, PnR, STA, or signoff tools.",
               "Do not assume Sky130, OpenLane, ORFS, Cadence, Synopsys, Siemens, or any other flow. Select from detected local PDK, tools, licenses, manifests, and user intent.",
@@ -277,6 +278,11 @@ export const layer = Layer.effect(
           },
         }
 
+        if (isAgenticProduct) {
+          agents.build.hidden = true
+          agents.plan.hidden = true
+        }
+
         for (const [key, value] of Object.entries(cfg.agent ?? {})) {
           if (value.disable) {
             delete agents[key]
@@ -328,11 +334,14 @@ export const layer = Layer.effect(
 
         const list = Effect.fnUntraced(function* () {
           const cfg = yield* config.get()
+          const defaultName = isAgenticProduct ? "agentic-vlsi" : cfg.default_agent || "agentic-vlsi"
+          if (isAgenticProduct) return [agents["agentic-vlsi"]]
           return pipe(
             agents,
             values(),
+            (items) => items.filter((item) => item.hidden !== true),
             sortBy(
-              [(x) => (cfg.default_agent ? x.name === cfg.default_agent : x.name === "agentic-vlsi"), "desc"],
+              [(x) => x.name === defaultName, "desc"],
               [(x) => x.name, "asc"],
             ),
           )
@@ -340,7 +349,9 @@ export const layer = Layer.effect(
 
         const defaultInfo = Effect.fnUntraced(function* () {
           const c = yield* config.get()
-          const requested = c.default_agent || process.env.OPENCODE_DEFAULT_AGENT || "agentic-vlsi"
+          const requested = isAgenticProduct
+            ? "agentic-vlsi"
+            : c.default_agent || process.env.OPENCODE_DEFAULT_AGENT || "agentic-vlsi"
           if (requested) {
             const agent = agents[requested]
             if (!agent) throw new Error(`default agent "${requested}" not found`)

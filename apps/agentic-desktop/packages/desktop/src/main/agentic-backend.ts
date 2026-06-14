@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { get as httpGet } from "node:http"
+import { createServer } from "node:net"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -10,6 +11,7 @@ import { write as writeLog } from "./logging"
 
 const DEFAULT_AGENTIC_URL = "http://127.0.0.1:7860"
 const HEALTH_PATH = "/health"
+const BRIDGE_HEALTH_PATH = "/opencode/bridge/health"
 
 let backendProcess: ChildProcess | null = null
 let started = false
@@ -28,9 +30,20 @@ export async function startAgenticBackend() {
     return
   }
 
-  if (await isHealthy(baseUrl)) {
-    writeLog("agentic-backend", "attached to existing local AgentIC backend", { url: baseUrl })
+  if (await isBridgeHealthy(baseUrl)) {
+    writeLog("agentic-backend", "attached to existing local AgentIC bridge", { url: baseUrl })
     return
+  }
+
+  if (await isHealthy(baseUrl)) {
+    const managedUrl = await nextManagedBackendUrl(baseUrl)
+    process.env.AGENTIC_LOCAL_URL = managedUrl
+    writeLog(
+      "agentic-backend",
+      "existing local backend is missing the OpenCode bridge; starting isolated AgentIC bridge",
+      { existing: baseUrl, managed: managedUrl },
+      "warn",
+    )
   }
 
   const command = resolveBackendCommand()
@@ -55,7 +68,7 @@ export async function startAgenticBackend() {
   })
 
   attachProcessLogging(backendProcess)
-  void waitForBackendReady(baseUrl)
+  void waitForBackendReady(process.env.AGENTIC_LOCAL_URL || baseUrl)
 }
 
 export function stopAgenticBackend() {
@@ -123,6 +136,8 @@ function findRepoServerDir() {
 
 function backendEnvironment(): NodeJS.ProcessEnv {
   const licenseConfig = readLicenseConfig()
+  const localUrl = process.env.AGENTIC_LOCAL_URL || DEFAULT_AGENTIC_URL
+  const localPort = portFromLocalUrl(localUrl)
   const licenseServerUrl = (
     process.env.AGENTIC_LICENSE_SERVER_URL ||
     process.env.VITE_AGENTIC_LICENSE_SERVER_URL ||
@@ -138,6 +153,7 @@ function backendEnvironment(): NodeJS.ProcessEnv {
     AGENTIC_LICENSE_STATUS_URL: process.env.AGENTIC_LICENSE_STATUS_URL || `${licenseServerUrl}/license/status`,
     AGENTIC_CHECKOUT_URL: process.env.AGENTIC_CHECKOUT_URL || `${licenseServerUrl}/checkout/create`,
     AGENTIC_USAGE_URL: process.env.AGENTIC_USAGE_URL || `${licenseServerUrl}/usage/build`,
+    AGENTIC_PORT: localPort || process.env.AGENTIC_PORT || "7860",
     AGENTIC_ENTITLEMENT_PUBLIC_KEY:
       process.env.AGENTIC_ENTITLEMENT_PUBLIC_KEY || licenseConfig.entitlement_public_key || "",
     AGENTIC_REQUIRE_SIGNED_ENTITLEMENT: process.env.AGENTIC_REQUIRE_SIGNED_ENTITLEMENT || "true",
@@ -205,20 +221,42 @@ function attachProcessLogging(child: ChildProcess) {
 async function waitForBackendReady(baseUrl: string) {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     if (!backendProcess) return
-    if (await isHealthy(baseUrl)) {
-      writeLog("agentic-backend", "AgentIC backend is ready", { url: baseUrl })
+    if (await isBridgeHealthy(baseUrl)) {
+      writeLog("agentic-backend", "AgentIC bridge is ready", { url: baseUrl })
       return
     }
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
-  writeLog("agentic-backend", "AgentIC backend did not report ready before timeout", { url: baseUrl }, "warn")
+  writeLog("agentic-backend", "AgentIC bridge did not report ready before timeout", { url: baseUrl }, "warn")
 }
 
 function isHealthy(baseUrl: string) {
+  return getJsonHealth(baseUrl, HEALTH_PATH, () => true)
+}
+
+function isBridgeHealthy(baseUrl: string) {
+  return getJsonHealth(baseUrl, BRIDGE_HEALTH_PATH, (body) => body?.bridge === true)
+}
+
+function getJsonHealth(baseUrl: string, path: string, validate: (body: any) => boolean) {
   return new Promise<boolean>((resolve) => {
-    const request = httpGet(`${baseUrl.replace(/\/$/, "")}${HEALTH_PATH}`, (response) => {
-      response.resume()
-      resolve(Boolean(response.statusCode && response.statusCode >= 200 && response.statusCode < 500))
+    const request = httpGet(`${baseUrl.replace(/\/$/, "")}${path}`, (response) => {
+      let data = ""
+      response.setEncoding("utf8")
+      response.on("data", (chunk) => {
+        data += chunk
+      })
+      response.on("end", () => {
+        if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+          resolve(false)
+          return
+        }
+        try {
+          resolve(validate(data ? JSON.parse(data) : {}))
+        } catch {
+          resolve(false)
+        }
+      })
     })
     request.on("error", () => resolve(false))
     request.setTimeout(1000, () => {
@@ -235,4 +273,42 @@ function isManagedLoopback(value: string) {
   } catch {
     return false
   }
+}
+
+async function nextManagedBackendUrl(baseUrl: string) {
+  const preferred = portFromLocalUrl(baseUrl)
+  const start = preferred ? Number(preferred) + 1 : 7861
+  const port = await findFreeLoopbackPort(start)
+  return `http://127.0.0.1:${port}`
+}
+
+function portFromLocalUrl(value: string) {
+  try {
+    const url = new URL(value)
+    return url.port || (url.protocol === "https:" ? "443" : "80")
+  } catch {
+    return ""
+  }
+}
+
+function findFreeLoopbackPort(start: number) {
+  return new Promise<number>((resolve, reject) => {
+    const tryPort = (port: number) => {
+      const server = createServer()
+      server.once("error", () => {
+        server.close()
+        tryPort(port + 1)
+      })
+      server.listen(port, "127.0.0.1", () => {
+        server.close((error) => {
+          if (error) {
+            reject(error)
+            return
+          }
+          resolve(port)
+        })
+      })
+    }
+    tryPort(start)
+  })
 }

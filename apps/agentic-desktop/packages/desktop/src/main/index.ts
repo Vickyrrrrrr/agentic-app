@@ -129,6 +129,7 @@ const main = Effect.gen(function* () {
   })()
   process.env.AGENTIC_LOCAL_URL ??= "http://127.0.0.1:7860"
   process.env.AGENTIC_MODE ??= "advisor"
+  process.env.AGENTIC_PRODUCT ??= "1"
   process.env.OPENCODE_DEFAULT_AGENT ??= "agentic-vlsi"
 
   app.setName(app.isPackaged ? APP_NAMES[CHANNEL] : "AgentIC Dev")
@@ -243,8 +244,8 @@ const main = Effect.gen(function* () {
   yield* Effect.promise(() => app.whenReady())
   yield* Effect.promise(() => startAgenticBackend())
 
-  if (!TEST_ONBOARDING) migrate()
-  app.setAsDefaultProtocolClient("opencode")
+  if (!TEST_ONBOARDING && process.env.AGENTIC_IMPORT_OPENCODE_STATE === "1") migrate()
+  app.setAsDefaultProtocolClient("agentic")
   registerRendererProtocol()
   setDockIcon()
   const updater = setupAutoUpdater(stopSidecars)

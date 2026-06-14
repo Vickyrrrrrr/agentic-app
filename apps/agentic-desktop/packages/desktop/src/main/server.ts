@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { app, utilityProcess } from "electron"
@@ -16,7 +17,7 @@ type SidecarMessage =
 
 export type SidecarListener = { stop: () => Promise<void> }
 
-const SIDECAR_SERVICE_NAME = "opencode server"
+const SIDECAR_SERVICE_NAME = "agentic runtime server"
 const SIDECAR_START_STALL_TIMEOUT = 60_000
 const SIDECAR_STOP_TIMEOUT = 6_000
 
@@ -43,12 +44,18 @@ export function setDefaultServerUrl(url: string | null) {
 
 export function preferAppEnv(userDataPath: string) {
   const shell = process.platform === "win32" ? null : getUserShell()
+  const runtime = ensureRuntimeDirs(userDataPath)
   Object.assign(process.env, {
     ...(shell ? loadShellEnv(shell, getLogger()) : null),
+    AGENTIC_PRODUCT: "1",
     OPENCODE_EXPERIMENTAL_ICON_DISCOVERY: "true",
     OPENCODE_EXPERIMENTAL_FILEWATCHER: "true",
     OPENCODE_CLIENT: "desktop",
-    XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? userDataPath,
+    OPENCODE_DEFAULT_AGENT: process.env.OPENCODE_DEFAULT_AGENT ?? "agentic-vlsi",
+    XDG_DATA_HOME: runtime.data,
+    XDG_CONFIG_HOME: runtime.config,
+    XDG_CACHE_HOME: runtime.cache,
+    XDG_STATE_HOME: runtime.state,
   })
 }
 
@@ -215,6 +222,18 @@ function createSidecarEnv(): Record<string, string> {
   if (process.platform === "linux") delete env.LD_PRELOAD
   if (!app.isPackaged) env.OPENCODE_DISABLE_CHANNEL_DB = "1"
   return env
+}
+
+function ensureRuntimeDirs(userDataPath: string) {
+  const root = join(userDataPath, "runtime")
+  const dirs = {
+    data: join(root, "data"),
+    config: join(root, "config"),
+    cache: join(root, "cache"),
+    state: join(root, "state"),
+  }
+  for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true })
+  return dirs
 }
 
 function delay(ms: number) {

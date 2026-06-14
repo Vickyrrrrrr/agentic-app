@@ -1,4 +1,6 @@
 import * as http from "node:http"
+import { mkdirSync } from "node:fs"
+import { join } from "node:path"
 import * as tls from "node:tls"
 
 type NodeHttpWithEnvProxy = typeof http & {
@@ -81,11 +83,29 @@ async function stop() {
 }
 
 function prepareSidecarEnv(password: string, userDataPath: string) {
+  const runtime = ensureRuntimeDirs(userDataPath)
   Object.assign(process.env, {
+    AGENTIC_PRODUCT: "1",
     OPENCODE_SERVER_USERNAME: "opencode",
     OPENCODE_SERVER_PASSWORD: password,
-    XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? userDataPath,
+    OPENCODE_DEFAULT_AGENT: process.env.OPENCODE_DEFAULT_AGENT ?? "agentic-vlsi",
+    XDG_DATA_HOME: runtime.data,
+    XDG_CONFIG_HOME: runtime.config,
+    XDG_CACHE_HOME: runtime.cache,
+    XDG_STATE_HOME: runtime.state,
   })
+}
+
+function ensureRuntimeDirs(userDataPath: string) {
+  const root = join(userDataPath, "runtime")
+  const dirs = {
+    data: join(root, "data"),
+    config: join(root, "config"),
+    cache: join(root, "cache"),
+    state: join(root, "state"),
+  }
+  for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true })
+  return dirs
 }
 
 function ensureLoopbackNoProxy() {
