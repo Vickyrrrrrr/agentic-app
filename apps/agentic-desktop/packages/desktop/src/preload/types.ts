@@ -17,6 +17,7 @@ export type {
 
 export type ServerReadyData = {
   url: string
+  agenticUrl?: string
   username: string | null
   password: string | null
 }

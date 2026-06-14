@@ -13,7 +13,7 @@ import { Deferred, Effect, Fiber } from "effect"
 import contextMenu from "electron-context-menu"
 
 import type { ServerReadyData } from "../preload/types"
-import { startAgenticBackend, stopAgenticBackend } from "./agentic-backend"
+import { getAgenticBackendUrl, startAgenticBackend, stopAgenticBackend } from "./agentic-backend"
 import { checkAppExists, resolveAppPath } from "./apps"
 import { CHANNEL } from "./constants"
 import { registerIpcHandlers, sendDeepLinks, sendMenuCommand } from "./ipc"
@@ -111,10 +111,11 @@ function handleAuthCallback(url: string): void {
     }
 
     const body = JSON.stringify(session)
+    const backendUrl = new URL(getAgenticBackendUrl())
     const req = httpRequest(
       {
-        hostname: "127.0.0.1",
-        port: 7860,
+        hostname: backendUrl.hostname,
+        port: backendUrl.port || (backendUrl.protocol === "https:" ? 443 : 80),
         path: "/auth/desktop-session",
         method: "POST",
         headers: {
@@ -410,6 +411,7 @@ const main = Effect.gen(function* () {
     server = listener
     yield* Deferred.succeed(serverReady, {
       url,
+      agenticUrl: getAgenticBackendUrl(),
       username: "opencode",
       password,
     })

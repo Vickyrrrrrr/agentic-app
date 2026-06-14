@@ -16,6 +16,10 @@ const BRIDGE_HEALTH_PATH = "/opencode/bridge/health"
 let backendProcess: ChildProcess | null = null
 let started = false
 
+export function getAgenticBackendUrl() {
+  return process.env.AGENTIC_LOCAL_URL || DEFAULT_AGENTIC_URL
+}
+
 export async function startAgenticBackend() {
   if (started || process.env.AGENTIC_MANAGED_BACKEND === "0") return
   started = true
@@ -145,6 +149,9 @@ function backendEnvironment(): NodeJS.ProcessEnv {
     "https://api.buildstack.live"
   ).replace(/\/$/, "")
 
+  const entitlementPublicKey =
+    process.env.AGENTIC_ENTITLEMENT_PUBLIC_KEY || licenseConfig.entitlement_public_key || ""
+
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PYTHONUNBUFFERED: "1",
@@ -154,9 +161,9 @@ function backendEnvironment(): NodeJS.ProcessEnv {
     AGENTIC_CHECKOUT_URL: process.env.AGENTIC_CHECKOUT_URL || `${licenseServerUrl}/checkout/create`,
     AGENTIC_USAGE_URL: process.env.AGENTIC_USAGE_URL || `${licenseServerUrl}/usage/build`,
     AGENTIC_PORT: localPort || process.env.AGENTIC_PORT || "7860",
-    AGENTIC_ENTITLEMENT_PUBLIC_KEY:
-      process.env.AGENTIC_ENTITLEMENT_PUBLIC_KEY || licenseConfig.entitlement_public_key || "",
-    AGENTIC_REQUIRE_SIGNED_ENTITLEMENT: process.env.AGENTIC_REQUIRE_SIGNED_ENTITLEMENT || "true",
+    AGENTIC_ENTITLEMENT_PUBLIC_KEY: entitlementPublicKey,
+    AGENTIC_REQUIRE_SIGNED_ENTITLEMENT:
+      process.env.AGENTIC_REQUIRE_SIGNED_ENTITLEMENT || (entitlementPublicKey ? "true" : "false"),
   }
 
   stripCloudOnlySecrets(env)

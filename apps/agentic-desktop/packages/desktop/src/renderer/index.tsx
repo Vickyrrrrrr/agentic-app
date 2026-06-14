@@ -745,7 +745,7 @@ render(() => {
       <Show when={ready()} fallback={splash}>
         <Show when={initializationData(sidecar)} keyed>
           {(data) => (
-            <AgenticAuthGate apiBase={data.url}>
+            <AgenticAuthGate apiBase={data.agenticUrl ?? data.url}>
               <Show when={effectiveDefaultServer()} keyed>
                 {(key) => (
                   <AppInterface defaultServer={key} servers={servers()} router={MemoryRouter}>

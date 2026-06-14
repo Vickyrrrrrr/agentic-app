@@ -60,7 +60,7 @@ ALLOWED_ORIGINS = [
 PUBLIC_BASE_URL = os.getenv("AGENTIC_PUBLIC_BASE_URL", "https://api.buildstack.live").rstrip("/")
 BUILDSTACK_AGENTIC_SUCCESS_URL = os.getenv(
     "AGENTIC_CHECKOUT_SUCCESS_URL",
-    "https://buildstack.live/agentic/success",
+    f"{PUBLIC_BASE_URL}/purchase/complete",
 ).strip()
 PLAN_ALIASES = {
     "starter": "starter",
@@ -542,6 +542,11 @@ async def purchase_start(plan: str = "pro") -> RedirectResponse:
     return response
 
 
+@app.get("/purchase/complete")
+async def purchase_complete() -> RedirectResponse:
+    return RedirectResponse(f"{PUBLIC_BASE_URL}/auth/google/start")
+
+
 @app.get("/auth/google/callback")
 async def google_callback(code: str, state: str | None = None) -> RedirectResponse:
     client_id, client_secret = _require_google_oauth()
@@ -778,12 +783,19 @@ async def license_status(user: UserContext = Depends(current_user)) -> LicenseSt
     if not subscription:
         return LicenseStatusResponse(active=False, reason="No active AgentIC subscription")
 
+    signed_entitlement: str | None = None
+    try:
+        signed_entitlement = _signed_entitlement(user, subscription)
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+
     return LicenseStatusResponse(
         active=True,
         plan=subscription.get("plan") or PLAN_NAME,
         expires_at=subscription.get("ends_at") or subscription.get("renews_at"),
         usage_limits={"builds_per_month": BUILDS_PER_MONTH},
-        signed_entitlement=_signed_entitlement(user, subscription),
+        signed_entitlement=signed_entitlement,
     )
 
 

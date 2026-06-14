@@ -103,6 +103,18 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _license_server_base() -> str:
+    return os.environ.get("AGENTIC_LICENSE_SERVER_URL", "").strip().rstrip("/")
+
+
+def _license_status_url() -> str:
+    configured = os.environ.get("AGENTIC_LICENSE_STATUS_URL", "").strip()
+    if configured:
+        return configured
+    base = _license_server_base()
+    return f"{base}/license/status" if base else ""
+
+
 def _epoch_from(value) -> float | None:
     if value is None:
         return None
@@ -206,6 +218,10 @@ def _entitlement_verify_key() -> tuple[str, list[str]] | None:
     return None
 
 
+def _signed_entitlement_required() -> bool:
+    return _env_bool("AGENTIC_REQUIRE_SIGNED_ENTITLEMENT", _entitlement_verify_key() is not None)
+
+
 def _verify_signed_entitlement(data: dict, source: str) -> dict | None:
     token = data.get("signed_entitlement")
     if not token:
@@ -259,7 +275,7 @@ def _read_cached_entitlement() -> dict | None:
     if verified:
         verified["source"] = "cache"
         return verified
-    if _env_bool("AGENTIC_REQUIRE_SIGNED_ENTITLEMENT", True):
+    if _signed_entitlement_required():
         return None
     expires_at = _epoch_from(cached.get("expires_at")) or 0
     if cached.get("active") and expires_at > time.time():
@@ -367,7 +383,7 @@ def resolve_license_status(request: Request) -> dict:
             "developer_bypass",
         )
 
-    license_url = os.environ.get("AGENTIC_LICENSE_STATUS_URL", "").strip()
+    license_url = _license_status_url()
     if license_url:
         try:
             cloud_req = urllib.request.Request(
@@ -383,7 +399,7 @@ def resolve_license_status(request: Request) -> dict:
                 return verified
             if not data.get("active"):
                 return _normalize_entitlement(data, "cloud")
-            if _env_bool("AGENTIC_REQUIRE_SIGNED_ENTITLEMENT", True):
+            if _signed_entitlement_required():
                 cached = _cached_entitlement_for_temporary_failure(
                     "Using cached entitlement while license verification refreshes."
                 )
