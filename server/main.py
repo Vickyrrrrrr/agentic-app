@@ -223,6 +223,8 @@ def _signed_entitlement_required() -> bool:
 
 
 def _verify_signed_entitlement(data: dict, source: str) -> dict | None:
+    if not isinstance(data, dict):
+        return None
     token = data.get("signed_entitlement")
     if not token:
         return None
@@ -244,7 +246,7 @@ def _verify_signed_entitlement(data: dict, source: str) -> dict | None:
             issuer="agentic-license-server",
             options={"verify_iat": False, "verify_exp": False},
         )
-    except jwt.PyJWTError as exc:
+    except Exception as exc:
         logging.error("Entitlement verification failed: %s", exc)
         return None
 
@@ -270,6 +272,8 @@ def _read_cached_entitlement() -> dict | None:
     try:
         cached = json.loads(ENTITLEMENT_PATH.read_text())
     except Exception:
+        return None
+    if not isinstance(cached, dict):
         return None
     verified = _verify_signed_entitlement(cached, cached.get("source") or "cache")
     if verified:
@@ -377,31 +381,78 @@ def _authorization_headers(request: Request) -> dict[str, str]:
 
 
 def resolve_license_status(request: Request) -> dict:
-    if _env_true("AGENTIC_LICENSE_BYPASS"):
-        return _normalize_entitlement(
-            {"active": True, "plan": "developer", "expires_at": time.time() + 24 * 3600},
-            "developer_bypass",
-        )
-
-    license_url = _license_status_url()
-    if license_url:
-        try:
-            cloud_req = urllib.request.Request(
-                license_url,
-                headers=_authorization_headers(request),
-                method="GET",
+    try:
+        if _env_true("AGENTIC_LICENSE_BYPASS"):
+            return _normalize_entitlement(
+                {"active": True, "plan": "developer", "expires_at": time.time() + 24 * 3600},
+                "developer_bypass",
             )
-            with urllib.request.urlopen(cloud_req, timeout=10) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            verified = _verify_signed_entitlement(data, "cloud")
-            if verified:
-                _write_cached_entitlement(verified)
-                return verified
-            if not data.get("active"):
-                return _normalize_entitlement(data, "cloud")
-            if _signed_entitlement_required():
+
+        license_url = _license_status_url()
+        if license_url:
+            try:
+                cloud_req = urllib.request.Request(
+                    license_url,
+                    headers=_authorization_headers(request),
+                    method="GET",
+                )
+                with urllib.request.urlopen(cloud_req, timeout=10) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                if not isinstance(data, dict):
+                    return {
+                        "active": False,
+                        "plan": "unlicensed",
+                        "checked_at": time.time(),
+                        "source": "cloud_error",
+                        "reason": "Invalid response format from license server.",
+                    }
+                verified = _verify_signed_entitlement(data, "cloud")
+                if verified:
+                    _write_cached_entitlement(verified)
+                    return verified
+                if not data.get("active"):
+                    return _normalize_entitlement(data, "cloud")
+                if _signed_entitlement_required():
+                    cached = _cached_entitlement_for_temporary_failure(
+                        "Using cached entitlement while license verification refreshes."
+                    )
+                    if cached:
+                        return cached
+                    return {
+                        "active": False,
+                        "plan": "unlicensed",
+                        "checked_at": time.time(),
+                        "source": "cloud_unsigned",
+                        "reason": "We could not verify your license securely. Please try again in a moment.",
+                    }
+                entitlement = _normalize_entitlement(data, "cloud")
+                _write_cached_entitlement(entitlement)
+                return entitlement
+            except urllib.error.HTTPError as exc:
+                if exc.code == 401:
+                    cached = _cached_entitlement_for_temporary_failure(
+                        "Using cached entitlement while your sign-in session refreshes."
+                    )
+                    if cached:
+                        return cached
+                    return {
+                        "active": False,
+                        "plan": "unlicensed",
+                        "checked_at": time.time(),
+                        "source": "cloud_unauthorized",
+                        "reason": _safe_license_failure_reason(exc.code),
+                    }
+                if exc.code == 402:
+                    return {
+                        "active": False,
+                        "plan": "unlicensed",
+                        "checked_at": time.time(),
+                        "source": "cloud_inactive",
+                        "reason": _safe_license_failure_reason(exc.code),
+                    }
+                body = exc.read().decode("utf-8", errors="replace")
                 cached = _cached_entitlement_for_temporary_failure(
-                    "Using cached entitlement while license verification refreshes."
+                    "Using cached entitlement because license verification is temporarily unavailable."
                 )
                 if cached:
                     return cached
@@ -409,16 +460,12 @@ def resolve_license_status(request: Request) -> dict:
                     "active": False,
                     "plan": "unlicensed",
                     "checked_at": time.time(),
-                    "source": "cloud_unsigned",
-                    "reason": "We could not verify your license securely. Please try again in a moment.",
+                    "source": "cloud_error",
+                    "reason": _safe_license_failure_reason(exc.code, body),
                 }
-            entitlement = _normalize_entitlement(data, "cloud")
-            _write_cached_entitlement(entitlement)
-            return entitlement
-        except urllib.error.HTTPError as exc:
-            if exc.code == 401:
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
                 cached = _cached_entitlement_for_temporary_failure(
-                    "Using cached entitlement while your sign-in session refreshes."
+                    "Using cached entitlement because license cloud is temporarily unavailable."
                 )
                 if cached:
                     return cached
@@ -426,54 +473,29 @@ def resolve_license_status(request: Request) -> dict:
                     "active": False,
                     "plan": "unlicensed",
                     "checked_at": time.time(),
-                    "source": "cloud_unauthorized",
-                    "reason": _safe_license_failure_reason(exc.code),
+                    "source": "cloud_error",
+                    "reason": "We could not verify your license right now. Please try again in a moment.",
                 }
-            if exc.code == 402:
-                return {
-                    "active": False,
-                    "plan": "unlicensed",
-                    "checked_at": time.time(),
-                    "source": "cloud_inactive",
-                    "reason": _safe_license_failure_reason(exc.code),
-                }
-            body = exc.read().decode("utf-8", errors="replace")
-            cached = _cached_entitlement_for_temporary_failure(
-                "Using cached entitlement because license verification is temporarily unavailable."
-            )
-            if cached:
-                return cached
-            return {
-                "active": False,
-                "plan": "unlicensed",
-                "checked_at": time.time(),
-                "source": "cloud_error",
-                "reason": _safe_license_failure_reason(exc.code, body),
-            }
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-            cached = _cached_entitlement_for_temporary_failure(
-                "Using cached entitlement because license cloud is temporarily unavailable."
-            )
-            if cached:
-                return cached
-            return {
-                "active": False,
-                "plan": "unlicensed",
-                "checked_at": time.time(),
-                "source": "cloud_error",
-                "reason": "We could not verify your license right now. Please try again in a moment.",
-            }
 
-    cached = _read_cached_entitlement()
-    if cached:
-        return cached
-    return {
-        "active": False,
-        "plan": "unlicensed",
-        "checked_at": time.time(),
-        "source": "not_configured",
-        "reason": "License cloud is not configured. Set AGENTIC_LICENSE_STATUS_URL for paid desktop verification.",
-    }
+        cached = _read_cached_entitlement()
+        if cached:
+            return cached
+        return {
+            "active": False,
+            "plan": "unlicensed",
+            "checked_at": time.time(),
+            "source": "not_configured",
+            "reason": "License cloud is not configured. Set AGENTIC_LICENSE_STATUS_URL for paid desktop verification.",
+        }
+    except Exception as exc:
+        logging.error("Unhandled exception in resolve_license_status: %s", exc)
+        return {
+            "active": False,
+            "plan": "unlicensed",
+            "checked_at": time.time(),
+            "source": "internal_error",
+            "reason": "Internal license verification error.",
+        }
 
 
 def _install_plan_for(capability: str, requested_platform: str | None = None) -> dict:

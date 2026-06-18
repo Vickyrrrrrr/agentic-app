@@ -46,6 +46,10 @@ const getBase = (): Configuration => ({
       to: "backend/",
       filter: ["**/*"],
     },
+    {
+      from: "resources/license.json",
+      to: "license.json",
+    },
   ],
   mac: {
     category: "public.app-category.developer-tools",
