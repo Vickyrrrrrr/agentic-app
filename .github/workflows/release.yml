@@ -106,7 +106,7 @@ jobs:
 
       - name: Install desktop dependencies
         working-directory: apps/agentic-desktop
-        run: bun install --frozen-lockfile
+        run: bun install
 
       - name: Build desktop app
         working-directory: apps/agentic-desktop/packages/desktop
