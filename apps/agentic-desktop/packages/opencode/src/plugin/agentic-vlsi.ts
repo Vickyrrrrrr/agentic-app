@@ -86,6 +86,16 @@ async function latestUserText(input: PluginInput, sessionID?: string) {
   }
 }
 
+async function sessionDirectory(input: PluginInput, sessionID?: string) {
+  if (!sessionID) return input.worktree
+  try {
+    const info = await input.client.session.get({ path: { id: sessionID } } as any)
+    return (info as any)?.directory || (info as any)?.info?.directory || (info as any)?.data?.directory || input.worktree
+  } catch {
+    return input.worktree
+  }
+}
+
 function sessionPayload(input: PluginInput, context: ToolContext, extra: Partial<AgenticSession> = {}): AgenticSession {
   return {
     session_id: extra.session_id || context.sessionID,
@@ -100,12 +110,13 @@ function sessionPayload(input: PluginInput, context: ToolContext, extra: Partial
 }
 
 async function runAgenticTool(input: PluginInput, context: ToolContext, payload: Omit<AgenticToolPayload, keyof AgenticSession>) {
+  const worktree = await sessionDirectory(input, context.sessionID)
   const response = await callAgentic<{
     success: boolean
     result: string
     session?: { design_name?: string; design_root?: string; run_id?: string }
   }>("/opencode/tool", {
-    ...sessionPayload(input, context),
+    ...sessionPayload(input, context, { workspace_root: worktree }),
     ...payload,
   })
   const design = response.session?.design_name
@@ -135,11 +146,12 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
       const activeAgent = await sessionAgent(input, ctxInput.sessionID)
       if (activeAgent && activeAgent !== AGENT_NAME) return
       const userText = await latestUserText(input, ctxInput.sessionID)
+      const worktree = await sessionDirectory(input, ctxInput.sessionID)
       const response = await callAgentic<any>("/opencode/session/resolve", {
         session_id: ctxInput.sessionID,
         agent: activeAgent || AGENT_NAME,
         user_text: userText,
-        workspace_root: input.worktree,
+        workspace_root: worktree,
         pdk_profile: process.env.AGENTIC_PDK_PROFILE || process.env.PDK || "",
         agentic_mode: process.env.AGENTIC_MODE || "advisor",
       }).catch((error) => ({ success: false, error: error instanceof Error ? error.message : String(error) }))
@@ -287,6 +299,18 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
         },
         async execute(args, context) {
           return toolResult(input, context, "ledger", args)
+        },
+      }),
+      agentic_import_repo: tool({
+        description: "Clone a GitHub repository into the workspace. Use when the user provides a repo URL.",
+        args: {
+          url: z.string().describe("GitHub repo URL (https://github.com/user/repo or git@github.com:user/repo)"),
+          target_dir: z.string().optional().describe("Optional subdirectory name"),
+          branch: z.string().default("main"),
+          token: z.string().default("").describe("GitHub PAT for private repos"),
+        },
+        async execute(args, context) {
+          return toolResult(input, context, "git_clone", args)
         },
       }),
     },

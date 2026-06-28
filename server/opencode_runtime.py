@@ -78,9 +78,9 @@ def request_json(
                 return text
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise OpenCodeRuntimeError(f"OpenCode HTTP {exc.code} for {path}: {detail or exc.reason}") from exc
+        raise OpenCodeRuntimeError(f"AgentIC runtime HTTP {exc.code} for {path}: {detail or exc.reason}") from exc
     except urllib.error.URLError as exc:
-        raise OpenCodeRuntimeError(f"OpenCode is not reachable at {_base_url()}: {exc.reason}") from exc
+        raise OpenCodeRuntimeError(f"AgentIC runtime is not reachable at {_base_url()}: {exc.reason}") from exc
 
 
 def health(timeout: float = 2.0) -> dict[str, Any]:
@@ -141,8 +141,8 @@ def _start_command(hostname: str, port: int) -> tuple[list[str], Path | None]:
     if root and shutil.which("bun"):
         return ["bun", "run", "dev", "serve", "--hostname", hostname, "--port", str(port)], root
     raise OpenCodeRuntimeError(
-        "OpenCode is not running and AgentIC cannot infer a start command. "
-        "Set AGENTIC_OPENCODE_URL to an existing server or AGENTIC_OPENCODE_COMMAND to a serve command."
+        "AgentIC runtime is not running and AgentIC cannot infer a start command. "
+        "Set AGENTIC_OPENCODE_URL to an existing runtime server or AGENTIC_OPENCODE_COMMAND to a serve command."
     )
 
 
@@ -182,7 +182,7 @@ def start(hostname: str = "127.0.0.1", port: int = 4096, timeout: float = 20.0) 
         if _PROCESS.poll() is not None:
             break
     raise OpenCodeRuntimeError(
-        f"OpenCode server did not become healthy. pid={_PROCESS.pid if _PROCESS else None}, "
+        f"AgentIC runtime did not become healthy. pid={_PROCESS.pid if _PROCESS else None}, "
         f"exit={_PROCESS.poll() if _PROCESS else None}, log={log_file}, last={last}"
     )
 
@@ -193,7 +193,7 @@ def create_session(directory: str, *, title: str | None = None, agent: str = "ag
         payload["title"] = title
     data = request_json("POST", "/session", query={"directory": directory}, payload=payload)
     if not isinstance(data, dict) or not data.get("id"):
-        raise OpenCodeRuntimeError(f"OpenCode returned an invalid session object: {data!r}")
+        raise OpenCodeRuntimeError(f"AgentIC runtime returned an invalid session object: {data!r}")
     return data
 
 

@@ -195,6 +195,7 @@ def scope_for_turn(
                 ".v", ".sv", ".vh", ".svh", ".vhd", ".vhdl", ".sdc", ".tcl", ".ys",
                 ".mk", ".json", ".yaml", ".yml", ".md", ".txt", ".log", ".rpt", ".cfg",
                 ".py", ".sh", ".csv", ".sp", ".spi", ".lvs", ".mermaid", ".mmd",
+                ".vcd", ".fst",
             ),
             allow_bash=True,
             allow_eda=True,

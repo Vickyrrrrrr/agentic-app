@@ -53,7 +53,6 @@ def build_agent_context_packet(
         "kernel_contract": context_contract or state.get("context_contract"),
         "role_context": role_context,
         "environment_summary": _environment_summary(env),
-        "flow_decision": _compact_flow_decision(flow_decision),
         "repo_map": _repo_map(root),
         "relevant_snippets": _relevant_snippets(root, user_text),
         "context_policy": {
@@ -155,26 +154,6 @@ def _compact_capability_index(index: dict[str, Any]) -> dict[str, Any]:
             }
             for stage, data in (((index.get("toolchains") or {}).get("stages") or {}).items())
         },
-    }
-
-
-def _compact_flow_decision(decision: dict[str, Any]) -> dict[str, Any]:
-    selected = decision.get("selected_pdk") or {}
-    return {
-        "profile": decision.get("profile"),
-        "backend": decision.get("backend"),
-        "confidence": decision.get("confidence"),
-        "selected_pdk": {
-            "name": selected.get("name"),
-            "family": selected.get("family"),
-            "node_nm": selected.get("node_nm"),
-            "class": selected.get("class"),
-            "readiness": selected.get("readiness"),
-        } if selected else None,
-        "rationale": decision.get("rationale", [])[:5],
-        "blockers": decision.get("blockers", [])[:8],
-        "setup_actions": decision.get("setup_actions", [])[:5],
-        "run_strategy": decision.get("run_strategy", {}),
     }
 
 

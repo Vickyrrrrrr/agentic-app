@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, onCleanup, type JSX } from "solid-js"
+import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, onCleanup, type JSX } from "solid-js"
 import { createStore } from "solid-js/store"
 import { createMediaQuery } from "@solid-primitives/media"
 import { Tabs } from "@opencode-ai/ui/tabs"
@@ -14,7 +14,7 @@ import { useDialog } from "@opencode-ai/ui/context/dialog"
 
 import FileTree from "@/components/file-tree"
 import { SessionContextUsage } from "@/components/session-context-usage"
-import { SessionContextTab, SortableTab, FileVisual } from "@/components/session"
+import { SessionContextTab, SortableTab, FileVisual, PDKCatalogDock, DRCLVSDashboard, SchematicExplorer, SessionWaveformTab } from "@/components/session"
 import { useCommand } from "@/context/command"
 import { useFile, type SelectedLineRange } from "@/context/file"
 import { useLanguage } from "@/context/language"
@@ -27,12 +27,105 @@ import { FileTabContent } from "@/pages/session/file-tabs"
 import { createOpenSessionFileTab, createSessionTabs, getTabReorderIndex, type Sizing } from "@/pages/session/helpers"
 import { setSessionHandoff } from "@/pages/session/handoff"
 import { useSessionLayout } from "@/pages/session/session-layout"
+import { callAgenticTool } from "@/utils/agentic"
+import { decode64 } from "@/utils/base64"
 
 type RenderDiff = (SnapshotFileDiff & { file: string }) | VcsFileDiff
 
 function renderDiff(value: SnapshotFileDiff | VcsFileDiff): value is RenderDiff {
   return typeof value.file === "string"
 }
+
+/**
+ * WaveformPanel — scans the real workspace for .vcd / .fst waveform files.
+ * Shows an honest empty state if none exist. Never shows fake data.
+ */
+function WaveformPanel() {
+  const { params } = useSessionLayout()
+  const [selected, setSelected] = createSignal<string | null>(null)
+
+  const [vcdFiles] = createResource(
+    () => params.id,
+    async (sessionId) => {
+      if (!sessionId) return []
+      try {
+        const res = await callAgenticTool(
+          "workspace",
+          { session_id: sessionId, workspace_root: decode64(params.dir) ?? "" },
+          { action: "list", pattern: "**/*" }
+        )
+        const files: string[] = res.result
+          ? res.result.split("\n").map((f) => f.trim()).filter(Boolean)
+          : []
+        return files.filter((f) => f.endsWith(".vcd") || f.endsWith(".fst"))
+      } catch {
+        return []
+      }
+    },
+  )
+
+  const files = () => vcdFiles() ?? []
+
+  return (
+    <div class="flex flex-col w-full h-full bg-background-stronger font-sans">
+      <Show when={!selected()}>
+        <div class="flex items-center justify-between px-3 py-1.5 border-b border-border-weaker-base text-12-medium text-text-strong shrink-0">
+          <span>Waveform Viewer</span>
+          <Show when={!vcdFiles.loading}>
+            <span class="text-11-regular text-text-weaker">{files().length} file{files().length !== 1 ? "s" : ""}</span>
+          </Show>
+        </div>
+
+        <Show when={vcdFiles.loading}>
+          <div class="flex-1 flex items-center justify-center text-12-regular text-text-weak">
+            Scanning workspace…
+          </div>
+        </Show>
+
+        <Show when={!vcdFiles.loading && files().length === 0}>
+          <div class="flex-1 flex flex-col items-center justify-center gap-2 px-4 text-center pb-16">
+            <div class="text-12-medium text-text-weak">No waveform files found</div>
+            <div class="text-11-regular text-text-weaker max-w-[180px]">
+              Run a simulation to generate a .vcd file, then come back here.
+            </div>
+          </div>
+        </Show>
+
+        <Show when={!vcdFiles.loading && files().length > 0}>
+          <div class="flex-1 overflow-y-auto">
+            <For each={files()}>
+              {(f) => (
+                <div
+                  onClick={() => setSelected(f)}
+                  class="flex items-center gap-2 px-3 py-1.5 text-12-regular text-text-base hover:text-text-strong hover:bg-surface-base cursor-pointer border-b border-border-weaker-base last:border-b-0"
+                >
+                  <span class="font-mono truncate">{f}</span>
+                </div>
+              )}
+            </For>
+          </div>
+        </Show>
+      </Show>
+
+      <Show when={selected()}>
+        <div class="flex items-center gap-2 px-3 py-1.5 border-b border-border-weaker-base shrink-0">
+          <button
+            onClick={() => setSelected(null)}
+            class="text-11-regular text-text-weaker hover:text-text-strong transition-colors"
+            aria-label="Back to file list"
+          >
+            ← Back
+          </button>
+          <span class="text-12-regular text-text-base truncate font-mono">{selected()}</span>
+        </div>
+        <div class="flex-1 min-h-0">
+          <SessionWaveformTab path={selected()!} />
+        </div>
+      </Show>
+    </div>
+  )
+}
+
 
 export function SessionSidePanel(props: {
   canReview: () => boolean
@@ -148,7 +241,7 @@ export function SessionSidePanel(props: {
   const fileTreeTab = () => layout.fileTree.tab()
 
   const setFileTreeTabValue = (value: string) => {
-    if (value !== "changes" && value !== "all") return
+    if (value !== "changes" && value !== "all" && value !== "pdk" && value !== "signoff" && value !== "schematic" && value !== "waves") return
     layout.fileTree.setTab(value)
   }
 
@@ -398,6 +491,18 @@ export function SessionSidePanel(props: {
                       <Tabs.Trigger value="all" class="flex-1" classes={{ button: "w-full" }}>
                         {language.t("session.files.all")}
                       </Tabs.Trigger>
+                      <Tabs.Trigger value="pdk" class="flex-1" classes={{ button: "w-full" }}>
+                        PDK
+                      </Tabs.Trigger>
+                      <Tabs.Trigger value="signoff" class="flex-1" classes={{ button: "w-full" }}>
+                        Signoff
+                      </Tabs.Trigger>
+                      <Tabs.Trigger value="schematic" class="flex-1" classes={{ button: "w-full" }}>
+                        RTL
+                      </Tabs.Trigger>
+                      <Tabs.Trigger value="waves" class="flex-1" classes={{ button: "w-full" }}>
+                        Waves
+                      </Tabs.Trigger>
                     </Tabs.List>
                     <Tabs.Content value="changes" class="bg-background-stronger px-3 py-0">
                       <Switch>
@@ -437,6 +542,18 @@ export function SessionSidePanel(props: {
                           />
                         </Match>
                       </Switch>
+                    </Tabs.Content>
+                    <Tabs.Content value="pdk" class="bg-background-stronger h-full contain-strict">
+                      <PDKCatalogDock />
+                    </Tabs.Content>
+                    <Tabs.Content value="signoff" class="bg-background-stronger h-full contain-strict">
+                      <DRCLVSDashboard />
+                    </Tabs.Content>
+                    <Tabs.Content value="schematic" class="bg-background-stronger h-full contain-strict overflow-y-auto">
+                      <SchematicExplorer />
+                    </Tabs.Content>
+                    <Tabs.Content value="waves" class="bg-background-stronger h-full contain-strict">
+                      <WaveformPanel />
                     </Tabs.Content>
                   </Tabs>
                 </div>

@@ -89,9 +89,17 @@ function resolve(file: string) {
 }
 
 function win() {
+  const shells = [which("pwsh"), which("powershell"), gitbash(), process.env.COMSPEC || "cmd.exe"]
+  
+  // Natively detect and surface WSL
+  const wslPath = which("wsl")
+  if (wslPath) {
+    shells.push(wslPath)
+  }
+
   return Array.from(
     new Set(
-      [which("pwsh"), which("powershell"), gitbash(), process.env.COMSPEC || "cmd.exe"]
+      shells
         .filter((item): item is string => Boolean(item))
         .map(full),
     ),
@@ -175,6 +183,22 @@ export function args(file: string, command: string, cwd: string) {
   }
   if (n === "bash") {
     return [
+      "-l",
+      "-c",
+      `
+        shopt -s expand_aliases
+        [[ -f ~/.bashrc ]] && source ~/.bashrc >/dev/null 2>&1 || true
+        cd -- "$1"
+        eval ${JSON.stringify(command)}
+      `,
+      "opencode",
+      cwd,
+    ]
+  }
+  if (n === "wsl") {
+    return [
+      "--",
+      "bash",
       "-l",
       "-c",
       `

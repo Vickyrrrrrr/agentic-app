@@ -312,6 +312,38 @@ const main = Effect.gen(function* () {
   const serverReady = Deferred.makeUnsafe<ServerReadyData, unknown>()
 
   yield* Effect.promise(() => app.whenReady())
+
+  const port = yield* Effect.gen(function* () {
+    const fromEnv = process.env.OPENCODE_PORT
+    if (fromEnv) {
+      const parsed = Number.parseInt(fromEnv, 10)
+      if (!Number.isNaN(parsed)) return parsed
+    }
+
+    const res = yield* Deferred.make<number, unknown>()
+    const server = createServer()
+    server.on("error", (e) => Deferred.failSync(res, () => e))
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address()
+      if (typeof address !== "object" || !address) {
+        server.close()
+        Deferred.failSync(res, () => new Error("Failed to get port"))
+        return
+      }
+      const port = address.port
+      server.close(() => Effect.runSync(Deferred.succeed(res, port)))
+    })
+
+    return yield* Deferred.await(res)
+  })
+  const hostname = "127.0.0.1"
+  const url = `http://${hostname}:${port}`
+  const password = randomUUID()
+
+  process.env.AGENTIC_OPENCODE_URL ??= url
+  process.env.AGENTIC_OPENCODE_USERNAME ??= "opencode"
+  process.env.AGENTIC_OPENCODE_PASSWORD ??= password
+
   yield* Effect.promise(() => startAgenticBackend())
 
   if (!TEST_ONBOARDING && process.env.AGENTIC_IMPORT_OPENCODE_STATE === "1") migrate()
@@ -365,33 +397,6 @@ const main = Effect.gen(function* () {
       }),
     ),
   )
-
-  const port = yield* Effect.gen(function* () {
-    const fromEnv = process.env.OPENCODE_PORT
-    if (fromEnv) {
-      const parsed = Number.parseInt(fromEnv, 10)
-      if (!Number.isNaN(parsed)) return parsed
-    }
-
-    const res = yield* Deferred.make<number, unknown>()
-    const server = createServer()
-    server.on("error", (e) => Deferred.failSync(res, () => e))
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address()
-      if (typeof address !== "object" || !address) {
-        server.close()
-        Deferred.failSync(res, () => new Error("Failed to get port"))
-        return
-      }
-      const port = address.port
-      server.close(() => Effect.runSync(Deferred.succeed(res, port)))
-    })
-
-    return yield* Deferred.await(res)
-  })
-  const hostname = "127.0.0.1"
-  const url = `http://${hostname}:${port}`
-  const password = randomUUID()
 
   const loadingTask = yield* Effect.gen(function* () {
     logger.log("sidecar connection started", { url })

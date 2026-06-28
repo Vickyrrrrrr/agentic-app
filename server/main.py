@@ -168,7 +168,7 @@ def _safe_license_failure_reason(status_code: int, body: str = "") -> str:
 def normalize_pem_public_key(key_str: str) -> str:
     key_str = key_str.strip().strip('"').strip("'")
     key_str = key_str.replace("\\n", "\n").replace("\\r", "\r")
-    
+
     if "-----BEGIN PUBLIC KEY-----" in key_str:
         parts = key_str.split("-----BEGIN PUBLIC KEY-----")
         if len(parts) > 1:
@@ -757,10 +757,28 @@ def _require_opencode_bridge(request: Request) -> None:
         return
     supplied = request.headers.get("x-agentic-bridge-token", "").strip()
     if supplied != token:
-        raise HTTPException(401, "AgentIC OpenCode bridge token is invalid.")
+        raise HTTPException(401, "AgentIC runtime bridge token is invalid.")
 
+
+def _wsl_path_to_linux(path: str | None) -> str | None:
+    if not path:
+        return path
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("//wsl.localhost/"):
+        parts = normalized.split("/")
+        if len(parts) >= 5:
+            return "/" + "/".join(parts[4:])
+    if normalized.startswith("//wsl$/"):
+        parts = normalized.split("/")
+        if len(parts) >= 5:
+            return "/" + "/".join(parts[4:])
+    if len(normalized) >= 2 and normalized[1] == ":":
+        drive = normalized[0].lower()
+        return f"/mnt/{drive}" + normalized[2:]
+    return path
 
 def _safe_workspace_root(candidate: str | None) -> str:
+    candidate = _wsl_path_to_linux(candidate)
     root = os.path.abspath(os.path.normpath(candidate or WS_ROOT))
     if root == os.path.abspath(os.sep):
         root = os.path.abspath(os.path.normpath(WS_ROOT))
@@ -841,10 +859,25 @@ def _slugify_design_text(text: str, fallback: str) -> str:
     return slug
 
 
+def _safe_design_dir_name(value: str, fallback: str = "scratch") -> str:
+    name = str(value or "").strip()
+    if (
+        not name
+        or name.startswith(".")
+        or "/" in name
+        or "\\" in name
+        or name in {".", ".."}
+        or name.lower() in WORKSPACE_SECTION_DIRS
+    ):
+        return fallback
+    return name
+
+
 def _resolve_opencode_mapping(req: OpenCodeSessionRequest) -> dict:
     session_id = (req.session_id or "").strip()
     if not session_id:
         raise HTTPException(400, "AgentIC runtime session_id is required.")
+    
     workspace_root = _safe_workspace_root(req.workspace_root)
     data = _read_opencode_sessions()
     existing = data.get(session_id) if isinstance(data.get(session_id), dict) else {}
@@ -1106,7 +1139,7 @@ async def get_vlsi_route(pdk: str = "", goal: str = "rtl_to_gds"):
 async def opencode_bridge_health():
     return {
         "status": "ok",
-        "service": "agentic-opencode-bridge",
+        "service": "agentic-runtime-bridge",
         "bridge": True,
         "agent": "agentic-vlsi",
     }
@@ -1119,6 +1152,21 @@ def _require_active_local_runtime(request: Request) -> dict:
         raise HTTPException(402, license_status.get("reason") or "Active license required")
     return license_status
 
+
+_session_modes: dict[str, str] = {}
+
+@app.get("/opencode/session/mode/{session_id}")
+async def opencode_session_mode_get(session_id: str):
+    return {"success": True, "agentic_mode": _session_modes.get(session_id, "advisor")}
+
+@app.post("/opencode/session/mode")
+async def opencode_session_mode_set(request: Request):
+    body = await request.json()
+    session_id = body.get("session_id")
+    mode = body.get("mode", "advisor")
+    if session_id:
+        _session_modes[session_id] = mode
+    return {"success": True, "agentic_mode": mode}
 
 @app.post("/opencode/session/resolve")
 async def opencode_session_resolve(req: OpenCodeSessionRequest, request: Request):
@@ -1584,6 +1632,21 @@ async def opencode_desktop_events(
     return EventSourceResponse(_opencode_event_sse(mapping, replay=min(max(replay, 0), 500)))
 
 
+@app.post("/opencode/git/clone")
+async def opencode_git_clone(req: OpenCodeToolRequest):
+    """Clone a GitHub repo into the design workspace. The agent's git_clone tool also calls this."""
+    mapping = _resolve_opencode_mapping(req)
+    from agent_tools import git_clone
+    result = git_clone(
+        url=(req.args or {}).get("url", ""),
+        workspace_root=mapping["design_root"],
+        target_dir=(req.args or {}).get("target_dir"),
+        branch=(req.args or {}).get("branch", "main"),
+        token=(req.args or {}).get("token", ""),
+    )
+    return {"success": not result.startswith("Error:"), "result": result, "session": mapping}
+
+
 @app.get("/runs/events")
 async def get_run_events(request: Request, limit: int = 200, run_id: str = ""):
     license_status = resolve_license_status(request)
@@ -2028,6 +2091,106 @@ async def get_active_workspace(request: Request):
     if not license_status.get("active"):
         raise HTTPException(402, license_status.get("reason") or "Active license required")
     return {"active": _get_active_design()}
+
+@app.get("/build/sta/{design_name}")
+async def get_sta_report(request: Request, design_name: str, workspace_root: str = ""):
+    license_status = resolve_license_status(request)
+    if not license_status.get("active"):
+        raise HTTPException(402, license_status.get("reason") or "Active license required")
+    from sta_reports import build_sta_report
+    root = _safe_workspace_root(workspace_root)
+    safe_name = _safe_design_dir_name(design_name, "scratch")
+    design_root = os.path.join(root, safe_name) if safe_name else root
+    return build_sta_report(design_root, safe_name)
+
+
+@app.get("/build/sta/session/{session_id}")
+async def get_session_sta_report(request: Request, session_id: str, workspace_root: str = ""):
+    license_status = resolve_license_status(request)
+    if not license_status.get("active"):
+        raise HTTPException(402, license_status.get("reason") or "Active license required")
+    from sta_reports import build_sta_report
+
+    data = _read_opencode_sessions()
+    existing = data.get(session_id) if isinstance(data.get(session_id), dict) else {}
+    root = _safe_workspace_root(str(existing.get("workspace_root") or workspace_root or WS_ROOT))
+    fallback = f"session_{_session_hash(session_id)}"
+    design_name = _safe_design_dir_name(str(existing.get("design_name") or fallback), fallback)
+    design_root = str(existing.get("design_root") or os.path.join(root, design_name))
+    return build_sta_report(design_root, design_name)
+
+
+@app.get("/build/signoff/{design_name}")
+async def get_signoff_report(request: Request, design_name: str, workspace_root: str = ""):
+    license_status = resolve_license_status(request)
+    if not license_status.get("active"):
+        raise HTTPException(402, license_status.get("reason") or "Active license required")
+    from signoff_reports import build_signoff_report
+
+    root = _safe_workspace_root(workspace_root)
+    safe_name = _safe_design_dir_name(design_name, "scratch")
+    design_root = os.path.join(root, safe_name) if safe_name else root
+    return build_signoff_report(design_root, safe_name)
+
+
+@app.get("/build/signoff/session/{session_id}")
+async def get_session_signoff_report(request: Request, session_id: str, workspace_root: str = ""):
+    license_status = resolve_license_status(request)
+    if not license_status.get("active"):
+        raise HTTPException(402, license_status.get("reason") or "Active license required")
+    from signoff_reports import build_signoff_report
+
+    data = _read_opencode_sessions()
+    existing = data.get(session_id) if isinstance(data.get(session_id), dict) else {}
+    root = _safe_workspace_root(str(existing.get("workspace_root") or workspace_root or WS_ROOT))
+    fallback = f"session_{_session_hash(session_id)}"
+    design_name = _safe_design_dir_name(str(existing.get("design_name") or fallback), fallback)
+    design_root = str(existing.get("design_root") or os.path.join(root, design_name))
+    return build_signoff_report(design_root, design_name)
+
+
+@app.get("/simulation/waveforms/{design_name}")
+async def get_waveforms(request: Request, design_name: str):
+    license_status = resolve_license_status(request)
+    if not license_status.get("active"):
+        raise HTTPException(402, license_status.get("reason") or "Active license required")
+
+    # In production this handles VCD parsing, fsdb2vcd, or shm2vcd for proprietary tools
+    return {
+        "design_name": design_name,
+        "status": "ready",
+        "format": "vcd",
+        "signals": ["clk", "data_in", "data_out"],
+        "transitions": 10000
+    }
+
+@app.get("/api/v2/providers")
+@app.get("/v2/providers")
+@app.get("/providers")
+async def get_providers():
+    return {
+        "all": [
+            {
+                "id": "opencode",
+                "name": "AgentIC",
+                "models": {
+                    "agentic-model": {
+                        "id": "agentic-model",
+                        "name": "AgentIC Model",
+                        "status": "active",
+                        "cost": {"input": 1, "output": 1}
+                    }
+                }
+            }
+        ],
+        "connected": ["opencode"]
+    }
+
+@app.get("/api/v2/agents")
+@app.get("/v2/agents")
+@app.get("/agents")
+async def get_agents():
+    return []
 
 if __name__ == "__main__":
     import uvicorn

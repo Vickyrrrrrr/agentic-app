@@ -97,7 +97,7 @@ class DesignStateStore:
             "mental_model": _compact_mental_model(state.get("mental_model") or {}),
             "context_contract": state.get("context_contract"),
             "permission_scope": state.get("permission_scope"),
-            "flow_decision": state.get("flow_decision"),
+            "flow_decision": _compact_flow_decision(state.get("flow_decision", {})),
             "stage_status": state.get("stage_status", {}),
             "artifact_count": len(state.get("artifacts", {})),
             "artifact_index": summarize_artifact_index(state),
@@ -453,3 +453,23 @@ def _latest_evidence_nodes(graph: dict[str, Any], limit: int = 8) -> list[dict[s
         }
         for node in nodes[:limit]
     ]
+
+
+def _compact_flow_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    selected = decision.get("selected_pdk") or {}
+    return {
+        "profile": decision.get("profile"),
+        "backend": decision.get("backend"),
+        "confidence": decision.get("confidence"),
+        "selected_pdk": {
+            "name": selected.get("name"),
+            "family": selected.get("family"),
+            "node_nm": selected.get("node_nm"),
+            "class": selected.get("class"),
+            "readiness": selected.get("readiness"),
+        } if selected else None,
+        "rationale": decision.get("rationale", [])[:5],
+        "blockers": decision.get("blockers", [])[:8],
+        "setup_actions": decision.get("setup_actions", [])[:5],
+        "run_strategy": decision.get("run_strategy", {}),
+    }

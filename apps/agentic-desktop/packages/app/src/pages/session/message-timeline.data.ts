@@ -215,6 +215,9 @@ export namespace Timeline {
     const diffs = (userMessage.summary?.diffs ?? [])
       .reduceRight<SummaryDiff[]>((result, diff) => {
         if (!isSummaryDiff(diff)) return result
+        // Filter out internal AgentIC backend state files (.agentic/ directory)
+        // These are context_cache, design_state, etc. — backend-only, not user-relevant.
+        if (diff.file.includes("/.agentic/") || diff.file.startsWith(".agentic/")) return result
         if (result.some((item) => item.file === diff.file)) return result
         result.push(diff)
         return result

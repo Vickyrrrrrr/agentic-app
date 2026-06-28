@@ -44,7 +44,7 @@ export async function startAgenticBackend() {
     process.env.AGENTIC_LOCAL_URL = managedUrl
     writeLog(
       "agentic-backend",
-      "existing local backend is missing the OpenCode bridge; starting isolated AgentIC bridge",
+      "existing local backend is missing the AgentIC runtime bridge; starting isolated AgentIC bridge",
       { existing: baseUrl, managed: managedUrl },
       "warn",
     )

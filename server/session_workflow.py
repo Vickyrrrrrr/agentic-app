@@ -50,6 +50,9 @@ def classify_session_workflow(user_text: str, messages: list[dict]) -> WorkflowD
     if _is_simple_greeting(normalized):
         return _decision("greeting", "INFORMATIONAL", False, False, False, False, False, 1.0, "simple greeting", digest)
 
+    if _is_explicit_builder_mode_request(normalized):
+        return _decision("design_execute", "DESIGN_TASK", True, True, True, True, False, 0.99, "user explicitly requested builder mode", digest)
+
     previous_approval_gate = _previous_assistant_requested_approval(messages)
     approved_plan = _has_approved_plan_turn(messages)
     approval = _looks_like_approval(normalized)
@@ -339,3 +342,16 @@ def _is_information_request(text: str, tokens: set[str]) -> bool:
         "fork",
         "opencode",
     )
+
+
+def _is_explicit_builder_mode_request(text: str) -> bool:
+    return any(phrase in text for phrase in [
+        "builder mode",
+        "switch to builder",
+        "go to builder",
+        "allowing you to go to builder",
+        "allow builder",
+        "authorize builder",
+        "enable builder",
+        "move to builder"
+    ])

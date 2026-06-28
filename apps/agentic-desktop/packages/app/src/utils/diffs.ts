@@ -17,12 +17,17 @@ function object(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value)
 }
 
+/** Returns true for AgentIC internal backend state files that should never be shown to the user. */
+function isAgenticInternal(file: string): boolean {
+  return file.includes("/.agentic/") || file.startsWith(".agentic/")
+}
+
 export function diffs(value: unknown): Diff[] {
-  if (Array.isArray(value) && value.every(diff)) return value
-  if (Array.isArray(value)) return value.filter(diff)
-  if (diff(value)) return [value]
+  if (Array.isArray(value) && value.every(diff)) return value.filter((d) => !isAgenticInternal(d.file))
+  if (Array.isArray(value)) return value.filter(diff).filter((d) => !isAgenticInternal(d.file))
+  if (diff(value)) return isAgenticInternal(value.file) ? [] : [value]
   if (!object(value)) return []
-  return Object.values(value).filter(diff)
+  return Object.values(value).filter(diff).filter((d) => !isAgenticInternal((d as Diff).file))
 }
 
 export function message(value: Message): Message {

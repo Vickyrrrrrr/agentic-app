@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from tool_adapters import adapter_parser
 from closure_diagnostics import analyze_closure_log
+from report_parsers import parse_report
 
 # Tool-specific regex parsers.
 # Note: "generic" relies almost entirely on the exit code to prevent false failures.
@@ -152,6 +153,7 @@ class CheckpointEngine:
             "errors": list(set(errors))[:15],      # Dedup and cap at 15
             "warnings": list(set(warnings))[:15],  # Dedup and cap at 15
             "metrics": metrics,
+            "parsed_report": parse_report(stage=stage, tool=tool, text=log_content),
             "semantic_diagnostics": semantic_diagnostics,
         }
 

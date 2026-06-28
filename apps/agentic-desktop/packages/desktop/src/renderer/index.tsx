@@ -338,7 +338,7 @@ const createPlatform = (): Platform => {
 
       const notification = new Notification(title, {
         body: description ?? "",
-        icon: "https://opencode.ai/favicon-96x96-v3.png",
+        icon: "https://www.buildstack.live/favicon-96x96-v3.png",
       })
       notification.onclick = () => {
         void window.api.showWindow()
@@ -568,6 +568,7 @@ function AgenticLicensePage(props: {
 }
 
 function AgenticAuthGate(props: { apiBase: string; children: JSX.Element }) {
+  if (import.meta.env.DEV) return props.children
   const [session, setSession] = createSignal<AgenticAuthSession | null>(readStoredAgenticSession())
   const [licenseStatus, setLicenseStatus] = createSignal<AgenticLicenseStatus | null>(null)
   const [licenseChecking, setLicenseChecking] = createSignal(false)
@@ -729,7 +730,7 @@ render(() => {
           variant: "base",
           http: {
             url: data.url,
-            username: data.username ?? undefined,
+            username: undefined,
             password: data.password ?? undefined,
           },
         })

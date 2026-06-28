@@ -1,26 +1,43 @@
-# AgentIC
+# AgentIC: Local VLSI Design Agent Workspace
 
-AgentIC is a specialized development environment for digital circuit design and simulation, built around an autonomous AI coding agent. 
-
----
-
-## What is Agentic Development?
-
-Traditional AI assistants are passive—they generate code snippets in a chat interface for the user to manually copy, paste, compile, and debug. 
-
-In AgentIC, the AI agent is an active participant in the environment. Given a set of high-level goals, it is equipped with a secure execution sandbox and a suite of interactive tools to:
-* **Navigate and Modify**: Read, write, and refactor files directly within the workspace.
-* **Verify Compilations**: Execute terminal commands and trigger syntax/lint checks using digital design compilers (such as Verilator).
-* **Diagnose and Self-Correct**: Parse compiler warning and error logs to locate, modify, and fix code recursively until compilation succeeds.
-* **Engage Safety Controls**: Propose file modifications and terminal commands through a visual diff review, requiring user approval before execution (Human-in-the-Loop flow).
+AgentIC is an interactive development environment (IDE) and local runtime orchestration system built specifically for AI-driven chip design (VLSI engineering). It bridges standard Large Language Models (LLMs) with local Electronic Design Automation (EDA) tools and Process Design Kit (PDK) stacks.
 
 ---
 
-## What this Application Serves
+## Why AgentIC? (The Problem it Solves)
 
-This repository contains the split client frontends of the AgentIC architecture, organized as a monorepo containing:
-* **Web Client (`/web`)**: A React + Vite interface deployable to cloud hosts like Vercel. It manages user workspaces, auth, and database persistence through Supabase, while delegating EDA and compilation tasks to a remote server.
-* **Desktop Client (`/desktop`)**: An Electron-based desktop application. It runs the same interface with elevated system permissions, allowing it to interface directly with local file systems and system-installed EDA binaries (Verilator, Yosys, GTKWave) without relying on a remote API server.
+Digital circuit design (RTL-to-GDSII) is an extremely complex, highly iterative, and data-heavy process. A single chip design run requires coordinating dozens of specialized EDA compilers (Yosys, OpenROAD, Verilator, etc.), matching design logic to local PDK cell libraries (Sky130, ASAP7), and debugging physical violations across gigabytes of log outputs.
 
+Traditional software engineering approaches and generic coding agents fail in this domain because chip design is not just "writing code"—it is about meeting strict physical constraints (Timing, Power, Area, DRC, and LVS).
 
+---
 
+## AgentIC vs. Generic Coding Agents (Why a `SKILL.md` is Not Enough)
+
+A common question is: **"Why can't I just use standard LLMs (like Claude, GPT, or Codex) equipped with a `SKILL.md` instruction file?"**
+
+While a `SKILL.md` file tells a model *how* to run a hardware design tool, a raw model still lacks the infrastructure required to actually execute it. Here is how AgentIC's local backend runtime solves this:
+
+| Capability | Standard Agent + `SKILL.md` | AgentIC Workspace |
+| :--- | :--- | :--- |
+| **Log Management** | Standard agents dump raw terminal logs into the LLM context. A single compilation or DRC run can output **hundreds of megabytes** of logs, quickly exhausting context windows and causing hallucinations. | The AgentIC backend runs local python parsers (`report_parsers.py`, `sta_reports.py`) to compress gigabytes of log output, extracting and presenting only the precise timing violations or physical coordinates to the model. |
+| **State Recovery** | If aPlace-and-Route (PnR) run fails after 30 minutes, the workspace is left in an unstable state. Standard agents cannot easily undo partial tool steps. | The backend maintains a **durable Checkpoint Engine**. If a design stage fails, the agent can immediately rollback the workspace filesystem and DB state to a previous successful stage and try a different strategy. |
+| **PDK Integration** | A raw LLM does not know which physical cells or macros (e.g. SRAM, IO buffers) actually exist on your local machine, leading it to invent non-existent hardware. | The local runtime actively **indexes your PDK libraries** (LEF/LIB files). The agent queries this capability graph to verify cell availability before writing RTL or configuring synthesis. |
+| **Domain-Specific Logic** | Generic agents treat all terminal outputs as plain text. They have no understanding of VLSI-specific logic constraints. | AgentIC has built-in **validation schemas** and **contract checking** to enforce hardware budgets (e.g., negative slack, clock constraints) and verify compliance at each step of the flow. |
+
+---
+
+## Key Capabilities
+
+*   **RTL Linter & Auto-Repair:** Automatically analyzes Verilog/SystemVerilog using local compilers and repairs syntax or synthesis bugs.
+*   **Static Timing Analysis (STA) Parser:** Pinpoints timing, setup/hold, and critical path violations from complex timing reports.
+*   **Physical Verification Parsing:** Extracts DRC (Design Rule Check), LVS (Layout vs. Schematic), and Antenna violations from log files.
+*   **PDK and Capability Mapping:** Reads and indexes local PDK cell libraries to ground the agent's hardware decisions in reality.
+
+---
+
+## Who is AgentIC For?
+
+*   **Digital IC Design Engineers:** Looking to automate repetitive linting, constraint tuning, and debug loops in RTL-to-GDSII flows.
+*   **Hardware Prototypers:** Who want rapid, closed-loop compiler and simulation feedback when developing synthesizable hardware.
+*   **EDA & CAD Developers:** Seeking to test, benchmark, and optimize tool flow configurations autonomously.

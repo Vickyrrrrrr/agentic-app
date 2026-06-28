@@ -8,7 +8,7 @@ import { Spinner } from "@opencode-ai/ui/spinner"
 import { showToast } from "@/utils/toast"
 import { Tooltip, TooltipKeybind } from "@opencode-ai/ui/tooltip"
 import { getFilename } from "@opencode-ai/core/util/path"
-import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, For, onMount, Show, onCleanup } from "solid-js"
 import { createStore } from "solid-js/store"
 import { Portal } from "solid-js/web"
 import { useCommand } from "@/context/command"
@@ -27,6 +27,7 @@ import { Persist, persisted } from "@/utils/persist"
 import { StatusPopover, StatusPopoverV2 } from "../status-popover"
 import { IconButtonV2 } from "@opencode-ai/ui/v2/icon-button-v2"
 import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
+import { STASlackWidget } from "../sta-slack-widget"
 
 const OPEN_APPS = [
   "vscode",
@@ -195,6 +196,66 @@ export function SessionHeader() {
     ).then((entries) => {
       setExists(Object.fromEntries(entries) as Partial<Record<OpenApp, boolean>>)
     })
+  })
+
+  const [agenticMode, setAgenticMode] = createSignal<string>("advisor")
+
+  const fetchMode = async () => {
+    const id = params.id
+    if (!id) return
+    const base = localStorage.getItem("agentic_local_api_base")?.replace(/\/+$/, "") || "http://127.0.0.1:7860"
+    try {
+      const res = await fetch(`${base}/opencode/session/mode/${id}`)
+      if (res.ok) {
+        const data = await res.json()
+        if (data.success && data.agentic_mode) {
+          setAgenticMode(data.agentic_mode)
+        }
+      }
+    } catch (e) {
+      console.error("Failed to fetch agentic mode:", e)
+    }
+  }
+
+  const switchMode = async (mode: string) => {
+    const id = params.id
+    if (!id) return
+    const base = localStorage.getItem("agentic_local_api_base")?.replace(/\/+$/, "") || "http://127.0.0.1:7860"
+    try {
+      const res = await fetch(`${base}/opencode/session/mode`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session_id: id, mode }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.success) {
+          setAgenticMode(mode)
+          showToast({
+            variant: "success",
+            title: mode === "builder" ? "Upgraded to Builder" : "Switched to Advisor",
+            description:
+              mode === "builder"
+                ? "Agent is authorized to edit files and run tools."
+                : "Agent is now read-only. Use Builder mode to make changes.",
+          })
+        }
+      }
+    } catch (e) {
+      showToast({
+        variant: "error",
+        title: "Mode Switch Failed",
+        description: e instanceof Error ? e.message : String(e),
+      })
+    }
+  }
+
+  createEffect(() => {
+    const id = params.id
+    if (!id) return
+    void fetchMode()
+    const timer = setInterval(fetchMode, 3000)
+    onCleanup(() => clearInterval(timer))
   })
 
   const options = createMemo(() => {
@@ -439,6 +500,31 @@ export function SessionHeader() {
                     </div>
                   </Show>
                   <div class="flex items-center gap-1">
+                    <Show when={params.id}>
+                      <Show when={agenticMode() === "advisor"}>
+                        <Tooltip placement="bottom" value="Advisor Mode - Read-only. Click to switch to Builder Mode.">
+                          <Button
+                            variant="secondary"
+                            class="h-6 px-2 text-[11px] font-medium flex items-center gap-1 border border-amber-600/30 text-amber-500 hover:bg-amber-500/10 shrink-0 rounded"
+                            onClick={() => switchMode("builder")}
+                          >
+                            <span>Advisor Mode</span>
+                          </Button>
+                        </Tooltip>
+                      </Show>
+                      <Show when={agenticMode() === "builder"}>
+                        <Tooltip placement="bottom" value="Builder Mode - Click to switch back to Advisor Mode (read-only).">
+                          <Button
+                            variant="secondary"
+                            class="h-6 px-2 text-[11px] font-medium flex items-center gap-1 border border-emerald-600/30 bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 shrink-0 rounded"
+                            onClick={() => switchMode("advisor")}
+                          >
+                            <span class="text-xs">✓</span>
+                            <span>Builder Mode</span>
+                          </Button>
+                        </Tooltip>
+                      </Show>
+                    </Show>
                     <Show when={status()}>
                       <Tooltip placement="bottom" value={language.t("status.popover.trigger")}>
                         <StatusPopover />
@@ -510,7 +596,11 @@ export function SessionHeader() {
                 </div>
               }
             >
-              <SessionHeaderV2Actions state={v2ActionsState()} />
+              <SessionHeaderV2Actions
+                state={v2ActionsState()}
+                agenticMode={agenticMode()}
+                switchMode={switchMode}
+              />
             </Show>
           </Portal>
         )}
@@ -528,9 +618,38 @@ type SessionHeaderV2ActionsState = {
   onReviewToggle: () => void
 }
 
-function SessionHeaderV2Actions(props: { state: SessionHeaderV2ActionsState }) {
+function SessionHeaderV2Actions(props: {
+  state: SessionHeaderV2ActionsState
+  agenticMode: string
+  switchMode: (mode: string) => void
+}) {
+  const language = useLanguage()
   return (
     <div class="flex items-center gap-2">
+      <Show when={props.agenticMode === "advisor"}>
+        <Tooltip placement="bottom" value="Advisor Mode - Read-only. Click to switch to Builder Mode.">
+          <Button
+            variant="secondary"
+            class="h-6 px-2 text-[11px] font-medium flex items-center gap-1 border border-amber-600/30 text-amber-500 hover:bg-amber-500/10 shrink-0 rounded"
+            onClick={() => props.switchMode("builder")}
+          >
+            <span>Advisor Mode</span>
+          </Button>
+        </Tooltip>
+      </Show>
+      <Show when={props.agenticMode === "builder"}>
+        <Tooltip placement="bottom" value="Builder Mode - Click to switch back to Advisor Mode (read-only).">
+          <Button
+            variant="secondary"
+            class="h-6 px-2 text-[11px] font-medium flex items-center gap-1 border border-emerald-600/30 bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 shrink-0 rounded"
+            onClick={() => props.switchMode("advisor")}
+          >
+            <span class="text-xs">✓</span>
+            <span>Builder Mode</span>
+          </Button>
+        </Tooltip>
+      </Show>
+      <STASlackWidget />
       <Show when={props.state.statusVisible}>
         <Tooltip placement="bottom" value={props.state.statusLabel}>
           <StatusPopoverV2 />

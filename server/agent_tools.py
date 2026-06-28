@@ -119,12 +119,25 @@ def _normalize_text_content(path: str, content: str) -> str:
     return normalized
 
 
+SKIPPED_DIRS = {"obj_dir", "build", "__pycache__", ".git", "node_modules"}
+SKIPPED_EXTS = {".o", ".obj", ".exe", ".bin", ".so", ".dll", ".pyc", ".ko"}
+
+
 def read_file(path: str, workspace_root: str) -> str:
     full = _safe_workspace_path(path, workspace_root)
     if not full:
         return f"Error: path '{path}' is outside workspace"
     if not os.path.isfile(full):
         return f"Error: file not found: {path}"
+    parts = path.replace("\\", "/").split("/")
+    for d in SKIPPED_DIRS:
+        if d in parts:
+            return f"Skipped: generated build artifact under {d}/ (use grep/offset if you need specific info)"
+    ext = os.path.splitext(path)[1].lower()
+    if ext in SKIPPED_EXTS:
+        return f"Skipped: binary/object file ({ext})"
+    if os.path.getsize(full) > 5 * 1024 * 1024:
+        return f"Error: file is larger than 5MB"
     try:
         with open(full, "r", errors="replace") as f:
             content = f.read()
@@ -224,8 +237,225 @@ def workspace_tool(action: str, workspace_root: str, path: str = ".", pattern: s
         return grep_tool(pattern, path, workspace_root)
     elif action == "list":
         return glob_tool(pattern, workspace_root)
+    elif action == "lint":
+        return lint_file_tool(path, workspace_root)
+    elif action == "parse_module":
+        return parse_module_tool(path, workspace_root)
     else:
-        return f"Error: unknown action '{action}' for workspace tool. Use read, search, or list."
+        return f"Error: unknown action '{action}' for workspace tool. Use read, search, list, lint, or parse_module."
+
+
+def parse_module_tool(path: str, workspace_root: str) -> str:
+    full = _safe_workspace_path(path, workspace_root)
+    if not full or not os.path.isfile(full):
+        return json.dumps({"error": "File not found"})
+    try:
+        with open(full, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    # 1. Parse Ports
+    ports = []
+    # Regex matching input/output/inout wire/reg/logic [width] name
+    port_re = re.compile(
+        r'(input|output|inout)\s+(wire|reg|logic)?\s*(\[[^\]]+\])?\s*(\w+)',
+        re.MULTILINE
+    )
+    for match in port_re.finditer(content):
+        direction, net_type, width, name = match.groups()
+        ports.append({
+            "name": name,
+            "direction": direction,
+            "width": width.strip() if width else "1"
+        })
+
+    # 2. Parse Instantiations
+    instantiations = []
+    # Match: module_name instance_name (.port(wire))
+    inst_re = re.compile(
+        r'(\w+)\s+(\w+)\s*\((?:\s*\.\w+\s*\(\s*\w+\s*\)\s*,?)*\s*\);',
+        re.MULTILINE
+    )
+    for match in inst_re.finditer(content):
+        mod_type, inst_name = match.groups()
+        if mod_type not in ("module", "input", "output", "wire", "reg", "assign", "always", "initial", "generate", "endgenerate"):
+            instantiations.append({
+                "module": mod_type,
+                "instance": inst_name
+            })
+
+    # 3. Parse Register Map (address offsets)
+    registers = []
+    # Search for case/if assignments mapping addresses to registers (e.g. 6'h0: reg_ctrl <= ...)
+    addr_map_re = re.compile(
+        r"(\d+)'h([0-9a-fA-F]+)\s*:\s*(\w+)\s*<=",
+        re.MULTILINE
+    )
+    seen_regs = set()
+    for match in addr_map_re.finditer(content):
+        bit_width, hex_val, reg_name = match.groups()
+        offset = int(hex_val, 16) * 4 # 32-bit word alignment
+        if reg_name not in seen_regs:
+            seen_regs.add(reg_name)
+            registers.append({
+                "name": reg_name,
+                "address": f"0x{offset:02X}",
+                "access": "Read/Write",
+                "width": "32 bits"
+            })
+            
+    # Fallback to general registers if address decode cases aren't found
+    if not registers:
+        reg_decl_re = re.compile(
+            r'reg\s*(?:\[([^\]]+)\])?\s*(\w+);',
+            re.MULTILINE
+        )
+        idx = 0
+        for match in reg_decl_re.finditer(content):
+            width, name = match.groups()
+            if "clk" not in name and "rst" not in name and name not in seen_regs:
+                seen_regs.add(name)
+                registers.append({
+                    "name": name,
+                    "address": f"0x{idx*4:02X}",
+                    "access": "Read/Write",
+                    "width": width.strip() if width else "1 bit"
+                })
+                idx += 1
+
+    return json.dumps({
+        "ports": ports,
+        "instantiations": instantiations,
+        "registers": registers
+    })
+
+
+def lint_file_tool(path: str, workspace_root: str) -> str:
+    full = _safe_workspace_path(path, workspace_root)
+    if not full or not os.path.isfile(full):
+        return json.dumps({"errors": [{"severity": "error", "line": 1, "message": "File not found"}]})
+    
+    vlogan_tool = shutil.which("vlogan")      # Synopsys
+    xmvlog_tool = shutil.which("xmvlog")      # Cadence
+    vlog_tool = shutil.which("vlog")          # Siemens Questa
+    verilator_tool = shutil.which("verilator") # OSS Verilator
+    iverilog_tool = shutil.which("iverilog")   # OSS Icarus Verilog
+    
+    errors = []
+    
+    if vlogan_tool:
+        try:
+            proc = subprocess.run(
+                [vlogan_tool, "-sverilog", "-q", full],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+            output = proc.stdout + "\n" + proc.stderr
+            current_error = None
+            for line in output.splitlines():
+                line_str = line.strip()
+                if line_str.startswith("Error-[") or line_str.startswith("Warning-["):
+                    severity = "error" if "Error" in line_str else "warning"
+                    current_error = {"severity": severity, "message": line_str}
+                elif current_error and (line_str.startswith('"') or "," in line_str):
+                    m = re.search(r'"?([^",]+)"?,\s*(\d+)', line_str)
+                    if m:
+                        current_error["line"] = int(m.group(2))
+                        errors.append(current_error)
+                        current_error = None
+        except Exception:
+            pass
+            
+    elif xmvlog_tool:
+        try:
+            proc = subprocess.run(
+                [xmvlog_tool, "-sv", "-messages", full],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+            output = proc.stdout + "\n" + proc.stderr
+            for line in output.splitlines():
+                m = re.match(r"^xmvlog:\s*\*([EW]),[A-Z0-9_]+\s+\(([^,]+),(\d+)(?:\|(\d+))?\):\s*(.*)$", line.strip())
+                if m:
+                    severity = "error" if m.group(1) == "E" else "warning"
+                    errors.append({
+                        "severity": severity,
+                        "line": int(m.group(3)),
+                        "message": m.group(5)
+                    })
+        except Exception:
+            pass
+            
+    elif vlog_tool:
+        try:
+            proc = subprocess.run(
+                [vlog_tool, "-sv", "-lint", full],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+            output = proc.stdout + "\n" + proc.stderr
+            for line in output.splitlines():
+                m = re.match(r"^\*\*\s+(Error|Warning):\s+([^(]+)\((\d+)\):\s*(.*)$", line.strip())
+                if m:
+                    errors.append({
+                        "severity": m.group(1).lower(),
+                        "line": int(m.group(3)),
+                        "message": m.group(4)
+                    })
+        except Exception:
+            pass
+            
+    elif verilator_tool:
+        try:
+            proc = subprocess.run(
+                [verilator_tool, "--lint-only", full],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+            output = proc.stdout + "\n" + proc.stderr
+            for line in output.splitlines():
+                m = re.match(r"^(%Error|%Warning-[A-Z0-9_]+):\s+([^:]+):(\d+):(?:\d+:)?\s*(.*)$", line.strip())
+                if m:
+                    severity = "error" if "Error" in m.group(1) else "warning"
+                    errors.append({
+                        "severity": severity,
+                        "line": int(m.group(3)),
+                        "message": f"[{m.group(1).replace('%', '')}] {m.group(4)}"
+                    })
+        except Exception:
+            pass
+            
+    elif iverilog_tool:
+        try:
+            proc = subprocess.run(
+                [iverilog_tool, "-o", "/dev/null", "-t", "null", full],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+            output = proc.stdout + "\n" + proc.stderr
+            for line in output.splitlines():
+                m = re.match(r"^([^:]+):(\d+):\s*(error|warning):\s*(.*)$", line.strip(), re.IGNORECASE)
+                if m:
+                    errors.append({
+                        "severity": m.group(3).lower(),
+                        "line": int(m.group(2)),
+                        "message": m.group(4)
+                    })
+        except Exception:
+            pass
+            
+    return json.dumps({"errors": errors})
 
 
 def write_tool_combined(path: str, workspace_root: str, design_name: str = "scratch", content: str = "", old_string: str = "", new_string: str = "") -> str:
@@ -523,6 +753,32 @@ def ledger_tool(action: str, workspace_root: str, design_name: str, **kwargs) ->
     return f"Error: unknown ledger action '{action}'"
 
 
+def git_clone(url: str, workspace_root: str, target_dir: str | None = None, branch: str = "main", token: str = "") -> str:
+    import subprocess, shutil
+    url = url.strip()
+    if not url.startswith("http") and not url.startswith("git@"):
+        return "Error: provide a valid GitHub URL (https://github.com/... or git@github.com:...)"
+    if token:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(url)
+        authed = f"{parsed.scheme}://{token}@{parsed.netloc}{parsed.path}"
+        url = authed
+    name = target_dir or url.rstrip("/").split("/")[-1].replace(".git", "")
+    dest = os.path.join(workspace_root, name)
+    if os.path.exists(dest):
+        return f"Error: '{name}' already exists in workspace"
+    try:
+        cmd = ["git", "clone", "--branch", branch, "--depth", "1", url, dest]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            return f"Error: git clone failed:\n{result.stderr[:2000]}"
+        return f"Cloned '{name}' into workspace. {len(os.listdir(dest))} items."
+    except subprocess.TimeoutExpired:
+        return "Error: git clone timed out after 120s"
+    except Exception as e:
+        return f"Error: {e}"
+
+
 def dispatch_tool(name: str, args: dict, workspace_root: str, design_name: str = "scratch", on_output=None, cancel_checker=None) -> str:
     if name == "workspace":
         return workspace_tool(args.get("action", ""), workspace_root, args.get("path", "."), args.get("pattern", ""))
@@ -573,6 +829,8 @@ def dispatch_tool(name: str, args: dict, workspace_root: str, design_name: str =
         ledger_args = dict(args)
         action = ledger_args.pop("action", "")
         return ledger_tool(action, workspace_root, design_name, **ledger_args)
+    elif name == "git_clone":
+        return git_clone(args.get("url", ""), workspace_root, args.get("target_dir"), args.get("branch", "main"), args.get("token", ""))
     else:
         return f"Error: unknown tool '{name}'"
 

@@ -81,6 +81,8 @@ KIND_BY_SUFFIX = {
     ".def": "floorplan_or_route",
     ".spef": "parasitics",
     ".sdf": "delay",
+    ".vcd": "waveform",
+    ".fst": "waveform",
 }
 
 
@@ -294,6 +296,8 @@ def _stage_for_path(path: str, project_root: str | None) -> str:
     suffix = Path(local).suffix.lower()
     if suffix in {".rpt", ".log"}:
         return "report" if suffix == ".rpt" else "log"
+    if suffix in {".vcd", ".fst"}:
+        return "simulation"
     if suffix in {".gds", ".oas", ".lef", ".def"}:
         return "signoff"
     return "workspace"

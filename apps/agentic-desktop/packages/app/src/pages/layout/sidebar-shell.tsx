@@ -1,4 +1,4 @@
-import { createEffect, createMemo, For, Show, type Accessor, type JSX } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Show, type Accessor, type JSX } from "solid-js"
 import {
   DragDropProvider,
   DragDropSensors,
@@ -11,6 +11,7 @@ import { ConstrainDragXAxis } from "@/utils/solid-dnd"
 import { IconButton } from "@opencode-ai/ui/icon-button"
 import { Tooltip, TooltipKeybind } from "@opencode-ai/ui/tooltip"
 import { type LocalProject } from "@/context/layout"
+import { DialogGitClone } from "@/components/dialog-git-clone"
 
 export const SidebarContent = (props: {
   mobile?: boolean
@@ -35,6 +36,7 @@ export const SidebarContent = (props: {
   const expanded = createMemo(() => !!props.mobile || props.opened())
   const placement = () => (props.mobile ? "bottom" : "right")
   let panel: HTMLDivElement | undefined
+  const [showClone, setShowClone] = createSignal(false)
 
   createEffect(() => {
     const el = panel
@@ -108,7 +110,19 @@ export const SidebarContent = (props: {
               aria-label={props.helpLabel()}
             />
           </Tooltip>
+          <Tooltip placement={placement()} value="Clone a GitHub repository">
+            <IconButton
+              icon="github"
+              variant="ghost"
+              size="large"
+              onClick={() => setShowClone(true)}
+              aria-label="Clone GitHub repository"
+            />
+          </Tooltip>
         </div>
+        <Show when={showClone()}>
+          <DialogGitClone open={showClone()} onClose={() => setShowClone(false)} />
+        </Show>
       </div>
 
       <div
