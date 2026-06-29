@@ -1,6 +1,7 @@
 import copy
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import time
@@ -29,9 +30,13 @@ EDA_TOOLS = (
     "docker",
     "yosys",
     "iverilog",
+    "vvp",
     "verilator",
     "opensta",
     "openroad",
+    "openlane",
+    "openlane2",
+    "volare",
     "gtkwave",
     "magic",
     "klayout",
@@ -40,17 +45,34 @@ EDA_TOOLS = (
     "python3",
     # Proprietary tools
     "vcs",
+    "vlogan",
+    "vhdlan",
+    "dve",
+    "verdi",
     "xrun",
     "irun",
+    "xmvlog",
+    "xmelab",
+    "xmsim",
+    "ncvlog",
+    "ncelab",
+    "ncsim",
     "vsim",
     "questasim",
     "dc_shell",
+    "fm_shell",
+    "lc_shell",
+    "spyglass",
     "genus",
     "innovus",
     "icc2_shell",
     "tempus",
     "pt_shell",
+    "quantus",
+    "star_rcxt",
     "calibre",
+    "pegasus",
+    "assura",
 )
 
 CAPABILITY_TOOL_ENVS = {
@@ -124,6 +146,8 @@ def _environment_cache_key() -> tuple[tuple[str, str], ...]:
         "AGENTIC_OPENLANE_ROOT",
         "AGENTIC_ORFS_ROOT",
         "AGENTIC_EDA_TOOLS",
+        "AGENTIC_WSL_TOOL_SCAN",
+        "AGENTIC_WSL_PROBE_TIMEOUT_SECONDS",
         *manifest_env_names(),
         *CAPABILITY_INSTALL_ENVS.values(),
         *(env_name for env_name, _defaults in CAPABILITY_TOOL_ENVS.values()),
@@ -148,22 +172,134 @@ def _license_env_status() -> dict:
     return {key: bool(os.environ.get(key)) for key in keys}
 
 
+def _decode_wsl_output(raw: bytes) -> str:
+    if not raw:
+        return ""
+    if raw.count(b"\x00") > max(2, len(raw) // 8):
+        for encoding in ("utf-16le", "utf-16"):
+            try:
+                return raw.decode(encoding, errors="ignore")
+            except Exception:
+                pass
+    return raw.decode("utf-8", errors="replace")
+
+
+def _wsl_probe_timeout() -> float:
+    raw = os.environ.get("AGENTIC_WSL_PROBE_TIMEOUT_SECONDS", "8").strip()
+    try:
+        return max(1.0, min(30.0, float(raw)))
+    except ValueError:
+        return 8.0
+
+
+def _wsl_tool_scan_enabled() -> bool:
+    return os.environ.get("AGENTIC_WSL_TOOL_SCAN", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _wsl_status() -> dict:
     if platform.system().lower() != "windows":
-        return {"available": False, "required": False, "distros": []}
+        return {"available": False, "required": False, "distros": [], "tool_inventory": []}
     if not shutil.which("wsl"):
-        return {"available": False, "required": False, "distros": []}
+        return {"available": False, "required": False, "distros": [], "tool_inventory": []}
     try:
-        result = subprocess.run(["wsl", "-l", "-q"], capture_output=True, text=True,
+        result = subprocess.run(["wsl", "-l", "-q"], capture_output=True,
             creationflags=_NO_WINDOW, timeout=8)
+        stdout = _decode_wsl_output(result.stdout)
         distros = [
-            line.strip("\x00\r\n ")
-            for line in result.stdout.splitlines()
-            if line.strip("\x00\r\n ")
+            line.strip("*\x00\r\n ")
+            for line in stdout.splitlines()
+            if line.strip("*\x00\r\n ")
         ]
-        return {"available": result.returncode == 0, "required": False, "distros": distros}
+        return {
+            "available": result.returncode == 0,
+            "required": False,
+            "distros": distros,
+            "tool_inventory": _wsl_tool_inventory(distros) if result.returncode == 0 and _wsl_tool_scan_enabled() else [],
+        }
     except Exception:
-        return {"available": True, "required": False, "distros": []}
+        return {"available": True, "required": False, "distros": [], "tool_inventory": []}
+
+
+def _wsl_tool_inventory(distros: list[str]) -> list[dict]:
+    inventory = []
+    tool_names = configured_eda_tools()
+    license_names = ("LM_LICENSE_FILE", "CDS_LIC_FILE", "SNPSLMD_LICENSE_FILE", "MGLS_LICENSE_FILE", *license_env_names())
+    tool_loop = "\n".join(
+        [
+            f"candidate={shlex.quote(tool)}; path=$(command -v \"$candidate\" 2>/dev/null || true); "
+            "if [ -n \"$path\" ]; then printf 'TOOL\\t%s\\t%s\\n' \"$candidate\" \"$path\"; fi"
+            for tool in tool_names
+        ]
+    )
+    license_loop = "\n".join(
+        [
+            f"value=$(printenv {shlex.quote(name)} 2>/dev/null || true); "
+            f"if [ -n \"$value\" ]; then printf 'LICENSE\\t%s\\t1\\n' {shlex.quote(name)}; fi"
+            for name in license_names
+        ]
+    )
+    script = "\n".join(["set +e", tool_loop, license_loop])
+    for distro in distros:
+        entry = {
+            "distro": distro,
+            "can_execute": False,
+            "tools": {},
+            "paths": {},
+            "license_env": {},
+        }
+        try:
+            result = subprocess.run(
+                ["wsl", "-d", distro, "--", "sh", "-lc", script],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=_NO_WINDOW,
+                timeout=_wsl_probe_timeout(),
+            )
+            entry["can_execute"] = result.returncode == 0
+            if result.returncode != 0:
+                entry["error"] = (result.stderr or result.stdout or "").strip()[:500]
+            for line in (result.stdout or "").splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 3 and parts[0] == "TOOL":
+                    entry["tools"][parts[1]] = True
+                    entry["paths"][parts[1]] = parts[2]
+                elif len(parts) >= 3 and parts[0] == "LICENSE":
+                    entry["license_env"][parts[1]] = True
+        except Exception as exc:
+            entry["error"] = str(exc)
+        inventory.append(entry)
+    return inventory
+
+
+def _wsl_tool_presence(inventory: list[dict]) -> dict[str, bool]:
+    tools: dict[str, bool] = {}
+    for distro in inventory:
+        for name, available in (distro.get("tools") or {}).items():
+            tools[name] = bool(tools.get(name) or available)
+    return tools
+
+
+def _wsl_capabilities(wsl_tools: dict[str, bool]) -> dict[str, bool]:
+    return {
+        "simulation": any(wsl_tools.get(tool) for tool in configured_tools_for("simulation")),
+        "synthesis": any(wsl_tools.get(tool) for tool in configured_tools_for("synthesis")),
+        "pnr": any(wsl_tools.get(tool) for tool in configured_tools_for("pnr")),
+        "sta": any(wsl_tools.get(tool) for tool in configured_tools_for("sta")),
+        "waveform": bool(wsl_tools.get("gtkwave")),
+        "physical_verification": any(wsl_tools.get(tool) for tool in configured_tools_for("physical_verification")),
+    }
+
+
+def _subprocess_cwd(workspace_root: str) -> str | None:
+    if os.name == "nt" and str(workspace_root or "").startswith("\\\\"):
+        # cmd.exe cannot use UNC paths as its current directory. WSL commands
+        # should cd inside their own shell; this cwd only needs to launch wsl.exe.
+        return os.path.expanduser("~")
+    if workspace_root and os.path.isdir(workspace_root):
+        return workspace_root
+    return None
 
 
 def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_line=None, cancel_checker=None) -> dict:
@@ -180,7 +316,7 @@ def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_li
             stderr=subprocess.STDOUT,
             text=True,
             creationflags=_NO_WINDOW,
-            cwd=workspace_root,
+            cwd=_subprocess_cwd(workspace_root),
             **kwargs
         )
 
@@ -254,7 +390,7 @@ def run_bash(command: str, workspace_root: str, timeout: int = 300, cancel_check
             text=True,
             creationflags=_NO_WINDOW,
             timeout=timeout,
-            cwd=workspace_root,
+            cwd=_subprocess_cwd(workspace_root),
             **kwargs
         )
         return {
@@ -385,6 +521,8 @@ def detect_environment(force_refresh: bool = False) -> dict:
     capability_manifests = load_capability_manifests()
     exposed_pdk_index = _augment_pdk_index_with_manifests(pdk_index, capability_manifests)
     wsl = _wsl_status()
+    wsl_tools = _wsl_tool_presence(wsl.get("tool_inventory") or [])
+    wsl_capabilities = _wsl_capabilities(wsl_tools)
     has_sim = any(tools.get(tool) for tool in configured_tools_for("simulation"))
     has_synth = any(tools.get(tool) for tool in configured_tools_for("synthesis"))
     has_pnr_native = any(tools.get(tool) for tool in configured_tools_for("pnr"))
@@ -392,12 +530,12 @@ def detect_environment(force_refresh: bool = False) -> dict:
     has_physical_verify = any(tools.get(tool) for tool in configured_tools_for("physical_verification"))
 
     capabilities = {
-        "simulation": has_sim,
-        "synthesis": has_synth,
-        "pnr": has_pnr_native or has_pnr_docker,
-        "sta": any(tools.get(tool) for tool in configured_tools_for("sta")),
-        "waveform": bool(tools.get("gtkwave")),
-        "physical_verification": has_physical_verify,
+        "simulation": has_sim or wsl_capabilities["simulation"],
+        "synthesis": has_synth or wsl_capabilities["synthesis"],
+        "pnr": has_pnr_native or has_pnr_docker or wsl_capabilities["pnr"],
+        "sta": any(tools.get(tool) for tool in configured_tools_for("sta")) or wsl_capabilities["sta"],
+        "waveform": bool(tools.get("gtkwave")) or wsl_capabilities["waveform"],
+        "physical_verification": has_physical_verify or wsl_capabilities["physical_verification"],
         "pdk": bool(pdk_dirs or (capability_manifests.get("pdks") or [])),
         "docker": bool(tools.get("docker")),
         "wsl": wsl["available"],
@@ -434,11 +572,11 @@ def detect_environment(force_refresh: bool = False) -> dict:
     if not capabilities["pdk"]:
         missing.append({"capability": "pdk", "tools": ["PDK_ROOT", "PDKPATH", "AGENTIC_PDK_SEARCH_PATHS"]})
 
-    if capabilities["pnr"] and has_synth and has_sim and capabilities["pdk"]:
+    if capabilities["pnr"] and capabilities["synthesis"] and capabilities["simulation"] and capabilities["pdk"]:
         tier = "rtl_to_gds"
-    elif has_synth and has_sim:
+    elif capabilities["synthesis"] and capabilities["simulation"]:
         tier = "rtl_to_synth"
-    elif has_sim:
+    elif capabilities["simulation"]:
         tier = "rtl_simulation"
     else:
         tier = "setup_required"
@@ -473,6 +611,8 @@ def detect_environment(force_refresh: bool = False) -> dict:
         },
         "license_env": _license_env_status(),
         "wsl": wsl,
+        "wsl_tools": wsl_tools,
+        "wsl_capabilities": wsl_capabilities,
         "capabilities": capabilities,
         "missing": missing,
         "capability_tier": tier,

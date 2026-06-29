@@ -56,6 +56,39 @@ async function callAgentic<T>(path: string, payload: Record<string, unknown>): P
   return body as T
 }
 
+async function getAgentic<T>(path: string): Promise<T> {
+  const response = await fetch(`${agenticBaseUrl()}${path}`, {
+    method: "GET",
+    headers: agenticHeaders(),
+  })
+  const text = await response.text()
+  let body: any = text
+  try {
+    body = text ? JSON.parse(text) : {}
+  } catch {
+    body = { detail: text }
+  }
+  if (!response.ok) {
+    const detail = body?.detail || body?.error || text || response.statusText
+    throw new Error(`AgentIC bridge ${response.status} ${response.statusText}: ${detail}`)
+  }
+  return body as T
+}
+
+async function agenticModeForSession(sessionID?: string) {
+  if (sessionID) {
+    try {
+      const response = await getAgentic<{ success?: boolean; agentic_mode?: string }>(
+        `/opencode/session/mode/${encodeURIComponent(sessionID)}`,
+      )
+      if (response?.success && response.agentic_mode) return response.agentic_mode === "builder" ? "builder" : "advisor"
+    } catch {
+      // Fall through to the process default when the local bridge is not reachable yet.
+    }
+  }
+  return process.env.AGENTIC_MODE === "builder" ? "builder" : "advisor"
+}
+
 async function sessionAgent(input: PluginInput, sessionID?: string) {
   if (!sessionID) return undefined
   try {
@@ -101,7 +134,7 @@ function sessionPayload(input: PluginInput, context: ToolContext, extra: Partial
     session_id: extra.session_id || context.sessionID,
     message_id: extra.message_id || context.messageID,
     agent: extra.agent || context.agent || AGENT_NAME,
-    agentic_mode: extra.agentic_mode || process.env.AGENTIC_MODE || "advisor",
+    agentic_mode: extra.agentic_mode || (process.env.AGENTIC_MODE === "builder" ? "builder" : "advisor"),
     user_text: extra.user_text || "",
     workspace_root: extra.workspace_root || context.worktree || input.worktree,
     pdk_profile: extra.pdk_profile || process.env.AGENTIC_PDK_PROFILE || process.env.PDK || "",
@@ -111,12 +144,13 @@ function sessionPayload(input: PluginInput, context: ToolContext, extra: Partial
 
 async function runAgenticTool(input: PluginInput, context: ToolContext, payload: Omit<AgenticToolPayload, keyof AgenticSession>) {
   const worktree = await sessionDirectory(input, context.sessionID)
+  const agenticMode = await agenticModeForSession(context.sessionID)
   const response = await callAgentic<{
     success: boolean
     result: string
     session?: { design_name?: string; design_root?: string; run_id?: string }
   }>("/opencode/tool", {
-    ...sessionPayload(input, context, { workspace_root: worktree }),
+    ...sessionPayload(input, context, { workspace_root: worktree, agentic_mode: agenticMode }),
     ...payload,
   })
   const design = response.session?.design_name
@@ -147,13 +181,14 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
       if (activeAgent && activeAgent !== AGENT_NAME) return
       const userText = await latestUserText(input, ctxInput.sessionID)
       const worktree = await sessionDirectory(input, ctxInput.sessionID)
+      const agenticMode = await agenticModeForSession(ctxInput.sessionID)
       const response = await callAgentic<any>("/opencode/session/resolve", {
         session_id: ctxInput.sessionID,
         agent: activeAgent || AGENT_NAME,
         user_text: userText,
         workspace_root: worktree,
         pdk_profile: process.env.AGENTIC_PDK_PROFILE || process.env.PDK || "",
-        agentic_mode: process.env.AGENTIC_MODE || "advisor",
+        agentic_mode: agenticMode,
       }).catch((error) => ({ success: false, error: error instanceof Error ? error.message : String(error) }))
 
       if (!response?.success) {
@@ -174,11 +209,17 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
           `Session: ${response.session?.session_id}`,
           `Design: ${response.session?.design_name}`,
           `Design root: ${response.session?.design_root}`,
+          `Linux design root: ${response.session?.linux_design_root || "n/a"}`,
           `AgentIC mode: ${response.session?.agentic_mode || "advisor"}`,
           `Workflow: ${response.workflow?.mode} (${response.workflow?.intent})`,
           `Scope: ${response.kernel_scope}`,
           "",
           "Use the desktop runtime for session/tool UX, but use AgentIC bridge tools for VLSI-specific decisions.",
+          "This context was returned by the AgentIC local bridge, so the local backend server is active.",
+          "Do not confuse `flow_decision.backend: none` or `profile: setup_required` with the local backend being down; it means no usable EDA/PDK flow backend is selected yet.",
+          "On Windows, inspect `context_packet.environment_summary.wsl.tool_inventory`, `wsl_tools`, and `wsl_capabilities` before saying EDA tools are missing; this inventory includes open-source and proprietary commands detected across WSL distros.",
+          "If the user names a WSL distro, use that distro. If several distros expose relevant tools and the user did not choose one, ask which distro to use.",
+          "When builder mode is active and a WSL distro is selected, run discovery/execution through AgentIC bash with `wsl -d <distro> -- bash -lc 'cd <linux_design_root> && ...'` when `session.linux_design_root` is present.",
           "In advisor mode, do not write RTL/TB/scripts or run shell/EDA commands; only inspect/query and write docs/plans/diagrams/reports.",
           "In builder mode, make a plan, wait for approval when starting implementation, then use AgentIC tools for edits and execution.",
           "Do not invent PDK cells, SRAM macros, tool licenses, timing corners, or signoff readiness.",
@@ -207,8 +248,10 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
           design_name: z.string().optional(),
         },
         async execute(args, context) {
+          const agenticMode = await agenticModeForSession(context.sessionID)
           const response = await callAgentic<any>("/opencode/session/resolve", {
             ...sessionPayload(input, context, {
+              agentic_mode: agenticMode,
               user_text: args.user_text,
               pdk_profile: args.pdk_profile,
               design_name: args.design_name,
@@ -217,6 +260,9 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
           return {
             title: `AgentIC context: ${response.session?.design_name || context.sessionID}`,
             output: JSON.stringify({
+              bridge_status: "active",
+              bridge_note:
+                "AgentIC local bridge responded. `flow_decision.backend` describes the selected EDA flow backend, not whether this local server is running.",
               session: response.session,
               workflow: response.workflow,
               kernel_scope: response.kernel_scope,

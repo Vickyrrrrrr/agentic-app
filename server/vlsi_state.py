@@ -455,7 +455,9 @@ def _latest_evidence_nodes(graph: dict[str, Any], limit: int = 8) -> list[dict[s
     ]
 
 
-def _compact_flow_decision(decision: dict[str, Any]) -> dict[str, Any]:
+def _compact_flow_decision(decision: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(decision, dict):
+        decision = {}
     selected = decision.get("selected_pdk") or {}
     return {
         "profile": decision.get("profile"),

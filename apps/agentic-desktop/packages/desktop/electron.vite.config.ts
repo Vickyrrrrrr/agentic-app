@@ -2,8 +2,13 @@ import { sentryVitePlugin } from "@sentry/vite-plugin"
 import { defineConfig } from "electron-vite"
 import appPlugin from "@opencode-ai/app/vite"
 import * as fs from "node:fs/promises"
+import path from "node:path"
+import { pathToFileURL } from "node:url"
 
 const OPENCODE_SERVER_DIST = "../opencode/dist/node"
+const OPENCODE_SERVER_ENTRY = path.resolve(OPENCODE_SERVER_DIST, "node.js")
+const externalizeOpencodeServerInDev =
+  process.argv.includes("dev") && process.env.AGENTIC_BUNDLE_OPENCODE_SERVER_DEV !== "1"
 
 const channel = (() => {
   const raw = process.env.OPENCODE_CHANNEL
@@ -54,7 +59,20 @@ export default defineConfig({
         name: "opencode:virtual-server-module",
         enforce: "pre",
         resolveId(id) {
-          if (id === "virtual:opencode-server") return this.resolve(`${OPENCODE_SERVER_DIST}/node.js`)
+          if (id !== "virtual:opencode-server") return
+          if (externalizeOpencodeServerInDev) return "\0virtual:opencode-server"
+          return this.resolve(OPENCODE_SERVER_ENTRY)
+        },
+        load(id) {
+          if (id !== "\0virtual:opencode-server") return
+          const serverUrl = pathToFileURL(OPENCODE_SERVER_ENTRY).href
+          return [
+            `const mod = await import(${JSON.stringify(serverUrl)})`,
+            "export const Server = mod.Server",
+            "export const Database = mod.Database",
+            "export const Config = mod.Config",
+            "export const bootstrap = mod.bootstrap",
+          ].join("\n")
         },
       },
       {

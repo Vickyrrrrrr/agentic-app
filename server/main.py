@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import platform
 import re
 import time
 import urllib.error
@@ -765,20 +766,21 @@ def _wsl_path_to_linux(path: str | None) -> str | None:
         return path
     normalized = path.replace("\\", "/")
     if normalized.startswith("//wsl.localhost/"):
-        parts = normalized.split("/")
-        if len(parts) >= 5:
-            return "/" + "/".join(parts[4:])
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) >= 3:
+            return "/" + "/".join(parts[2:])
     if normalized.startswith("//wsl$/"):
-        parts = normalized.split("/")
-        if len(parts) >= 5:
-            return "/" + "/".join(parts[4:])
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) >= 3:
+            return "/" + "/".join(parts[2:])
     if len(normalized) >= 2 and normalized[1] == ":":
         drive = normalized[0].lower()
         return f"/mnt/{drive}" + normalized[2:]
     return path
 
 def _safe_workspace_root(candidate: str | None) -> str:
-    candidate = _wsl_path_to_linux(candidate)
+    if platform.system().lower() != "windows":
+        candidate = _wsl_path_to_linux(candidate)
     root = os.path.abspath(os.path.normpath(candidate or WS_ROOT))
     if root == os.path.abspath(os.sep):
         root = os.path.abspath(os.path.normpath(WS_ROOT))
@@ -788,6 +790,11 @@ def _safe_workspace_root(candidate: str | None) -> str:
         root = os.path.abspath(os.path.normpath(WS_ROOT))
         os.makedirs(root, exist_ok=True)
     return root
+
+
+def _linux_workspace_root(host_workspace_root: str) -> str | None:
+    linux_root = _wsl_path_to_linux(host_workspace_root)
+    return linux_root if linux_root and linux_root != host_workspace_root else None
 
 
 def _read_opencode_sessions() -> dict:
@@ -816,6 +823,14 @@ def _looks_like_design_request_for_name(text: str) -> bool:
 
 def _normalize_agentic_mode(value: str | None) -> str:
     return "builder" if str(value or "").strip().lower() == "builder" else "advisor"
+
+
+def _stored_agentic_mode(session_id: str) -> str:
+    if session_id in _session_modes:
+        return _normalize_agentic_mode(_session_modes.get(session_id))
+    data = _read_opencode_sessions()
+    existing = data.get(session_id) if isinstance(data.get(session_id), dict) else {}
+    return _normalize_agentic_mode(existing.get("agentic_mode"))
 
 
 def _advisor_write_allowed(path: str) -> bool:
@@ -898,24 +913,30 @@ def _resolve_opencode_mapping(req: OpenCodeSessionRequest) -> dict:
         else:
             design_name = f"session_{fallback}"
     design_root = os.path.join(workspace_root, design_name)
+    linux_workspace_root = _linux_workspace_root(workspace_root)
+    linux_design_root = os.path.join(linux_workspace_root, design_name) if linux_workspace_root else None
     os.makedirs(design_root, exist_ok=True)
     run_id = str(existing.get("run_id") or f"oc_{fallback}")
     now = time.time()
+    agentic_mode = _normalize_agentic_mode(_session_modes.get(session_id) or existing.get("agentic_mode") or req.agentic_mode)
     mapping = {
         "schema_version": "agentic.opencode.session.v1",
         "session_id": session_id,
         "message_id": req.message_id,
         "agent": req.agent or "agentic-vlsi",
-        "agentic_mode": _normalize_agentic_mode(req.agentic_mode or existing.get("agentic_mode")),
+        "agentic_mode": agentic_mode,
         "workspace_root": workspace_root,
         "design_name": design_name,
         "design_root": design_root,
+        "linux_workspace_root": linux_workspace_root,
+        "linux_design_root": linux_design_root,
         "run_id": run_id,
         "pdk_profile": req.pdk_profile or existing.get("pdk_profile") or "",
         "created_at": existing.get("created_at") or now,
         "updated_at": now,
         "last_user_text": req.user_text or existing.get("last_user_text") or "",
     }
+    _session_modes[session_id] = agentic_mode
     data[session_id] = mapping
     _write_opencode_sessions(data)
     _set_active_design(design_name)
@@ -1123,6 +1144,9 @@ async def get_tool_adapters(force_refresh: bool = False):
     return {
         "status": "OK",
         "tool_adapters": normalized_adapter_summary(env.get("tools") or {}),
+        "wsl_tools": env.get("wsl_tools") or {},
+        "wsl_capabilities": env.get("wsl_capabilities") or {},
+        "wsl": env.get("wsl") or {},
         "recommended_flow": env.get("recommended_flow") or {},
         "capability_graph": env.get("capability_graph") or {},
         "capability_index": env.get("capability_index") or {},
@@ -1157,15 +1181,22 @@ _session_modes: dict[str, str] = {}
 
 @app.get("/opencode/session/mode/{session_id}")
 async def opencode_session_mode_get(session_id: str):
-    return {"success": True, "agentic_mode": _session_modes.get(session_id, "advisor")}
+    return {"success": True, "agentic_mode": _stored_agentic_mode(session_id)}
 
 @app.post("/opencode/session/mode")
 async def opencode_session_mode_set(request: Request):
     body = await request.json()
-    session_id = body.get("session_id")
-    mode = body.get("mode", "advisor")
+    session_id = str(body.get("session_id") or "").strip()
+    mode = _normalize_agentic_mode(body.get("mode"))
     if session_id:
         _session_modes[session_id] = mode
+        data = _read_opencode_sessions()
+        existing = data.get(session_id) if isinstance(data.get(session_id), dict) else None
+        if existing is not None:
+            existing["agentic_mode"] = mode
+            existing["updated_at"] = time.time()
+            data[session_id] = existing
+            _write_opencode_sessions(data)
     return {"success": True, "agentic_mode": mode}
 
 @app.post("/opencode/session/resolve")

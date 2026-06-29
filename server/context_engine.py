@@ -104,7 +104,31 @@ def _environment_summary(env: dict[str, Any]) -> dict[str, Any]:
         ],
         "capability_index": _compact_capability_index(capability_index),
         "capability_graph": compact_capability_graph(capability_graph) if capability_graph else {},
+        "wsl": _compact_wsl_environment(env),
         "missing": env.get("missing", [])[:10],
+    }
+
+
+def _compact_wsl_environment(env: dict[str, Any]) -> dict[str, Any]:
+    wsl = env.get("wsl") or {}
+    inventory = []
+    for item in (wsl.get("tool_inventory") or [])[:8]:
+        tools = item.get("tools") or {}
+        paths = item.get("paths") or {}
+        inventory.append({
+            "distro": item.get("distro"),
+            "can_execute": bool(item.get("can_execute")),
+            "available_tools": sorted([name for name, available in tools.items() if available])[:80],
+            "paths": {name: paths.get(name) for name in sorted(paths)[:80]},
+            "license_env": sorted([name for name, present in (item.get("license_env") or {}).items() if present])[:20],
+            "error": item.get("error"),
+        })
+    return {
+        "available": bool(wsl.get("available")),
+        "distros": (wsl.get("distros") or [])[:12],
+        "tool_inventory": inventory,
+        "wsl_tools": sorted([name for name, available in (env.get("wsl_tools") or {}).items() if available])[:120],
+        "wsl_capabilities": env.get("wsl_capabilities") or {},
     }
 
 

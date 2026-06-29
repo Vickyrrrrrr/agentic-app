@@ -2,8 +2,14 @@ import type { SnapshotFileDiff, VcsFileDiff } from "@opencode-ai/sdk/v2"
 import type { Message } from "@opencode-ai/sdk/v2/client"
 
 type Diff = SnapshotFileDiff | VcsFileDiff
+type DisplayableDiff = Diff & {
+  file: string
+  patch: string
+  additions: number
+  deletions: number
+}
 
-function diff(value: unknown): value is Diff {
+function diff(value: unknown): value is DisplayableDiff {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false
   if (!("file" in value) || typeof value.file !== "string") return false
   if (!("patch" in value) || typeof value.patch !== "string") return false
@@ -27,7 +33,7 @@ export function diffs(value: unknown): Diff[] {
   if (Array.isArray(value)) return value.filter(diff).filter((d) => !isAgenticInternal(d.file))
   if (diff(value)) return isAgenticInternal(value.file) ? [] : [value]
   if (!object(value)) return []
-  return Object.values(value).filter(diff).filter((d) => !isAgenticInternal((d as Diff).file))
+  return Object.values(value).filter(diff).filter((d) => !isAgenticInternal(d.file))
 }
 
 export function message(value: Message): Message {

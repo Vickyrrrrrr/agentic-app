@@ -614,6 +614,9 @@ def query_pdk_tool(query_type: str, cell_type: str = "", workspace_root: str = "
             return json.dumps({
                 "status": "OK",
                 "tool_adapters": normalized_adapter_summary(env.get("tools") or {}),
+                "wsl_tools": env.get("wsl_tools") or {},
+                "wsl_capabilities": env.get("wsl_capabilities") or {},
+                "wsl": env.get("wsl") or {},
                 "recommended_flow": env.get("recommended_flow") or {},
                 "capability_graph": compact_capability_graph(graph),
             }, indent=2)
@@ -622,6 +625,9 @@ def query_pdk_tool(query_type: str, cell_type: str = "", workspace_root: str = "
                 "status": "OK",
                 "capability_graph": compact_capability_graph(graph),
                 "recommended_flow": env.get("recommended_flow") or {},
+                "wsl_tools": env.get("wsl_tools") or {},
+                "wsl_capabilities": env.get("wsl_capabilities") or {},
+                "wsl": env.get("wsl") or {},
                 "missing": env.get("missing") or [],
                 "manifest_status": {
                     "files": manifests.get("files") or [],

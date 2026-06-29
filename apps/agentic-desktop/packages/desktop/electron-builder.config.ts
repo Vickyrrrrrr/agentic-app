@@ -4,10 +4,11 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 
-import type { Configuration } from "electron-builder"
+import type { BeforePackContext, Configuration } from "electron-builder"
 
 const execFileAsync = promisify(execFile)
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
+const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)))
 const signScript = path.join(rootDir, "script", "sign-windows.ps1")
 
 async function signWindows(configuration: { path: string }) {
@@ -20,6 +21,23 @@ async function signWindows(configuration: { path: string }) {
     ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", signScript, configuration.path],
     { cwd: rootDir },
   )
+}
+
+async function verifyAgenticBackendRuntime(context: BeforePackContext) {
+  const platform = context.electronPlatformName || process.platform
+  const arch = process.arch
+  const executable = platform === "win32" ? "agentic-backend.exe" : "agentic-backend"
+  const backendPath = path.join(desktopDir, "resources", "backend", `${platform}-${arch}`, executable)
+
+  if (!existsSync(backendPath)) {
+    throw new Error(
+      [
+        `Missing AgentIC backend runtime: ${backendPath}`,
+        `Run "bun run build:agentic-backend" on ${platform} before packaging.`,
+        "The backend runtime is OS-specific and cannot be reused from another platform.",
+      ].join("\n"),
+    )
+  }
 }
 
 const channel = (() => {
@@ -35,6 +53,7 @@ const getBase = (): Configuration => ({
     buildResources: "resources",
   },
   files: ["out/**/*", "resources/**/*"],
+  beforePack: verifyAgenticBackendRuntime,
   extraResources: [
     {
       from: "native/",
