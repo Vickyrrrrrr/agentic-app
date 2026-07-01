@@ -20,6 +20,7 @@ import { getSessionHandoff } from "@/pages/session/handoff"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { createSessionTabs } from "@/pages/session/helpers"
 import { SessionWaveformTab } from "@/components/session"
+import { Markdown } from "@opencode-ai/ui/markdown"
 
 function FileCommentMenu(props: {
   moreLabel: string
@@ -447,6 +448,11 @@ export function FileTabContent(props: { tab: string }) {
         <Switch>
           <Match when={state()?.loaded && (path()?.endsWith(".vcd") || path()?.endsWith(".fst"))}>
             <SessionWaveformTab path={path()!} />
+          </Match>
+          <Match when={state()?.loaded && (path()?.endsWith(".md") || path()?.endsWith(".markdown"))}>
+            <div class="px-6 py-4 select-text">
+              <Markdown text={contents()} cacheKey={cacheKey()} />
+            </div>
           </Match>
           <Match when={state()?.loaded}>{renderFile(contents())}</Match>
           <Match when={state()?.loading}>

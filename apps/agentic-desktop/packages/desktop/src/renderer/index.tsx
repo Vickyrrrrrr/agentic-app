@@ -26,6 +26,7 @@ import { initializationData, initializationReady } from "./initialization"
 import { resetZoom, setPinchZoomEnabled, webviewZoom, zoomIn, zoomOut } from "./webview-zoom"
 import { availableStartupServer, readyWslConnections } from "./wsl/connections"
 import "./styles.css"
+import { GLOBAL_STORE } from "./store-keys"
 import { Splash } from "@opencode-ai/ui/logo"
 import { useTheme } from "@opencode-ai/ui/theme/context"
 
@@ -664,7 +665,7 @@ function AgenticAuthGate(props: { apiBase: string; children: JSX.Element }) {
 render(() => {
   const platform = createPlatform()
   const loadLocale = async () => {
-    const current = await platform.storage?.("opencode.global.dat").getItem("language")
+    const current = await platform.storage?.(GLOBAL_STORE).getItem("language")
     const legacy = current ? undefined : await platform.storage?.().getItem("language.v1")
     const raw = current ?? legacy
     if (!raw) return

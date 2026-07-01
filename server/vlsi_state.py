@@ -102,6 +102,8 @@ class DesignStateStore:
             "artifact_count": len(state.get("artifacts", {})),
             "artifact_index": summarize_artifact_index(state),
             "checkpoint_count": len(state.get("checkpoints", [])),
+            "latest_checkpoints": _latest_checkpoints(state.get("checkpoints", []), limit=6),
+            "latest_failing_checkpoint": _latest_checkpoint(state.get("checkpoints", []), passed=False),
             "evidence_count": len((state.get("evidence_graph") or {}).get("nodes", {})),
             "handoff_count": len(state.get("handoffs", [])),
             "latest_handoffs": state.get("handoffs", [])[-6:],
@@ -122,7 +124,9 @@ class DesignStateStore:
 
     def set_flow_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
         state = self.load()
-        state["flow_decision"] = decision
+        compact_decision = dict(decision)
+        compact_decision.pop("adapter_matrix", None)
+        state["flow_decision"] = compact_decision
         backend = decision.get("backend") or "none"
         self._append_event(state, "flow", "selected", {
             "backend": backend,
@@ -453,6 +457,33 @@ def _latest_evidence_nodes(graph: dict[str, Any], limit: int = 8) -> list[dict[s
         }
         for node in nodes[:limit]
     ]
+
+
+def _latest_checkpoints(checkpoints: list[Any], limit: int = 6) -> list[dict[str, Any]]:
+    compact = [_checkpoint_summary(item) for item in checkpoints if isinstance(item, dict)]
+    return [item for item in compact if item][-limit:]
+
+
+def _latest_checkpoint(checkpoints: list[Any], passed: bool) -> dict[str, Any] | None:
+    for item in reversed(checkpoints):
+        if isinstance(item, dict) and bool(item.get("pass")) is passed:
+            return _checkpoint_summary(item)
+    return None
+
+
+def _checkpoint_summary(item: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = item.get("semantic_diagnostics") if isinstance(item.get("semantic_diagnostics"), dict) else {}
+    return {
+        "tool": item.get("tool"),
+        "stage": item.get("stage"),
+        "pass": bool(item.get("pass")),
+        "exit_code": item.get("exit_code"),
+        "errors": (item.get("errors") or [])[:5],
+        "warnings": (item.get("warnings") or [])[:5],
+        "metrics": item.get("metrics") or {},
+        "dominant_class": diagnostics.get("dominant_class"),
+        "captured_at": item.get("captured_at"),
+    }
 
 
 def _compact_flow_decision(decision: dict[str, Any] | None) -> dict[str, Any]:

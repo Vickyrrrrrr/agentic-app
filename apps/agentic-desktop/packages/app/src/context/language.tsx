@@ -2,7 +2,7 @@ import * as i18n from "@solid-primitives/i18n"
 import { createEffect, createMemo, createResource } from "solid-js"
 import { createStore } from "solid-js/store"
 import { createSimpleContext } from "@opencode-ai/ui/context"
-import { Persist, persisted } from "@/utils/persist"
+import { Persist, persisted, GLOBAL_STORAGE } from "@/utils/persist"
 import { dict as en } from "@/i18n/en"
 import { dict as uiEn } from "@opencode-ai/ui/i18n/en"
 
@@ -183,7 +183,7 @@ export function normalizeLocale(value: string): Locale {
 function readStoredLocale() {
   if (typeof localStorage !== "object") return
   try {
-    const raw = localStorage.getItem("opencode.global.dat:language")
+    const raw = localStorage.getItem(`${GLOBAL_STORAGE}:language`)
     if (!raw) return
     const next = JSON.parse(raw) as { locale?: string }
     if (typeof next?.locale !== "string") return

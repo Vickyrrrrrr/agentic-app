@@ -22,8 +22,8 @@ type PersistTarget = {
   migrate?: (value: unknown) => unknown
 }
 
-const LEGACY_STORAGE = "default.dat"
-const GLOBAL_STORAGE = "opencode.global.dat"
+export const LEGACY_STORAGE = "default.dat"
+export const GLOBAL_STORAGE = "opencode.global.dat"
 const LOCAL_PREFIX = "opencode."
 const fallback = new Map<string, boolean>()
 

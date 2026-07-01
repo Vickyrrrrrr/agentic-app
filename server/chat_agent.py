@@ -76,9 +76,16 @@ Use them as needed to design, build, and debug chips inside the local workspace.
 - Use ledger to persist structured design facts, role handoffs, and evidence nodes.
 - SURGICAL EDITING RULE: Use `write` with `old_string` and `new_string` for surgical modifications. Only provide `content` to overwrite or create new files.
 - NAMING CONVENTIONS RULE: When creating files, folders, or naming design structures, always use short, technical, and to-the-point lowercase kebab-case or snake_case names (e.g., `aes-core`, `sta-run-report`, `sram-wrapper`). Do NOT use conversational phrases, questions, typos, or sentences. Keep names under 24 characters. Organize files logically: RTL files under `rtl/`, testbenches under `tb/`, logs/reports under `logs/` or `reports/`, and documentation under `docs/`.
+- SESSION ROOT RULE: The resolved AgentIC design root is the authoritative project directory for this session. Keep generated RTL, testbenches, scripts, constraints, logs, reports, and waveforms inside that design root using conventional subfolders (`rtl/`, `tb/` or `verification/`, `scripts/`, `constraints/`, `reports/`, `simulation/`). Do not create a new sibling or nested project/session folder unless the user explicitly asks for a separate design.
 - AUTO-CHECKPOINT RULE: Your `bash` tool is completely unrestricted. You can run ANY open-source or proprietary tool. When you run an EDA tool, you MUST pass the `eda_tool` parameter. The backend will automatically parse the tool's log output and return a structured JSON verdict `{pass: bool, errors: [...]}` along with a truncated snippet of the log. You MUST base your next actions on this verdict. If `pass` is false, you must fix the errors.
 - If the tool writes its log to a file (like Genus, Innovus, or Calibre), you MUST pass the `log_file` parameter to `bash` so the checkpoint engine can read it.
 - SDC/CONSTRAINT RULE: Passing STA is meaningless without correct SDC files. You must explicitly generate and validate constraints.
+- RTL SYNTHESIZABILITY & ALIGNMENT RULE: When writing or editing RTL code, you MUST ensure it is fully synthesizable, fabrication-ready, and logically complete:
+  1. Never declare `wire` variables inside sequential procedural blocks (`always @(posedge clk ...)`). Declare combinational arithmetic/routing outside the procedural block as continuous `assign` wires, and only use procedural registers (`reg`/`logic`) with non-blocking assignments (`<=`) inside sequential blocks.
+  2. Prevent unwanted latches by specifying default assignments at the top of combinational procedural blocks (`always @*`), or ensuring every conditional branch has an `else` and every `case` statement has a `default` case.
+  3. Ensure every sequential register declared in the design is explicitly initialized to a reset value in the `if (!rst_n)` or reset branch of its synchronizer block. Never leave registers uninitialized during reset.
+  4. Do not include `#delays` or `initial` blocks for logic initialization in design modules. Initial blocks should only be used in testbenches.
+  5. When modifying design logic, always trace the latency (in clock cycles) of all parallel pipelines (e.g. arithmetic, DSP, memory, or checks) and verify that they are perfectly aligned. Add matching delay register chains to slower paths to prevent cycle offsets.
 - CAPABILITY GRAPH RULE: Before instantiating SRAMs, ROMs, pads, macros, PDK cells, floorplan constraints, signoff scripts, or selecting a toolchain, query local capability evidence. Use `query_pdk(tool_adapters)`, `query_pdk(capability_summary)`, `query_pdk(find_memory, cell_type=...)`, `query_pdk(readiness)`, or `query_pdk(manifest_status)` as appropriate. Never invent macro/cell names, tool availability, license state, or signoff readiness without graph/checkpoint evidence.
 - COMPLETION RULE: Before outputting a final summary, you MUST call `report()` to generate the signoff report. Your final message to the user must reference actual checkpoint data, not your own assessment.
 - IMPORTANT LLM RULE: NEVER announce that you are "starting to work" or "I will update you shortly" in a message. If you output a text message to the user, your turn ends immediately and you CANNOT execute any more tools. You must execute your tool calls immediately. Only message the user when you are completely finished or need their explicit input.
@@ -1553,12 +1560,12 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str, des
         "\n\n## AgentIC compact context packet\n"
         f"{json.dumps(context_packet, indent=2)}\n\n"
         "RUNTIME CONTRACT:\n"
+        "- The compact context packet is an index and summary, not a full project dump. If a detail is not present, retrieve it before deciding.\n"
         "- Treat AgentIC's flow_decision as the authoritative starting point for methodology selection.\n"
         "- Do not assume open-source flows are preferred. Use detected licensed proprietary stacks first when they satisfy the user's PDK and deliverables.\n"
         "- If proprietary tools are detected but licensing or PDK scripts are missing, ask the user to configure them; then offer open-source fallback installation only with approval.\n"
-        "- Use env.pdk_index for PDK facts; do not guess standard-cell libraries, corners, routing layers, or deck availability.\n"
-        "- Use env.capability_index for local capability facts: SRAM/ROM macros, pad cells, timing corners, stdcell helper cells, and selected tool adapters. Never invent macro names; bind only to indexed local collateral or ask for user configuration/compiler output.\n"
-        "- Use env.capability_graph for cross-cutting PDK/IP/tool readiness. For SRAM or macro needs, bind through query_pdk(find_memory) and obey the returned integration_contract before writing RTL wrappers or floorplan constraints.\n"
+        "- Use environment_summary only as a readiness summary; query exact PDK, standard-cell, corner, routing-layer, deck, memory, pad, and tool facts with query_pdk before relying on them.\n"
+        "- Never invent macro names; bind SRAM/ROM/pad/stdcell requirements only through query_pdk/find_memory/readiness/tool_adapters evidence or ask for user configuration/compiler output.\n"
         "- If query_pdk(readiness) reports blocked gates, stop the affected implementation stage and explain the missing PDK/tool/IP evidence instead of faking progress.\n"
         "- Prefer structured configs for OpenLane 2 (JSON/YAML) when available; use legacy flow.tcl only for OpenLane 1 repository flows.\n"
         "- For ORFS, generate/modify config.mk and invoke make from the detected ORFS flow root or with DESIGN_CONFIG.\n"
@@ -1566,6 +1573,7 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str, des
         "- Project artifacts must live under one precise project root with canonical docs/plans, docs/diagrams, rtl, tb, dv, constraints, scripts, sim/runs, synth, pnr, sta, signoff, reports, and logs directories as the task requires.\n"
         "- Mermaid diagrams and approval documents belong under docs/diagrams and docs/plans. Never place diagrams inside rtl/ or as loose workspace-root files.\n"
         "- Use workspace(read/search/list), query_pdk, and bash to retrieve exact context on demand. Do not ask for or paste entire repositories, PDKs, or logs into the conversation.\n"
+        "- Full logs stay on disk. Use checkpoint verdicts, log paths, and short failing excerpts unless a specific log section is needed.\n"
         "- For existing large files, use surgical write edits with old_string/new_string; large whole-file rewrites may be rejected by the harness.\n"
         "- Every final answer must be backed by checkpoint/report/design-state evidence generated through AgentIC tools.\n"
     )

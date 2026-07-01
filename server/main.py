@@ -70,6 +70,7 @@ USAGE_LOG_PATH = STATE_DIR / "usage.jsonl"
 RUN_EVENTS_PATH = STATE_DIR / "run_events.jsonl"
 ACTIVE_DESIGN_PATH = STATE_DIR / "active_design.json"
 OPENCODE_SESSIONS_PATH = STATE_DIR / "opencode_sessions.json"
+AGENTIC_SESSIONS_PATH = STATE_DIR / "agentic_sessions.json"
 CANCELLED_RUNS: set[str] = set()
 ACTIVE_RUNS: dict[str, float] = {}
 WORKSPACE_SECTION_DIRS = {
@@ -102,6 +103,19 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _rotate_jsonl(path: Path, max_lines: int = 10_000) -> None:
+    """Trim a JSONL file to the last `max_lines` lines to prevent unbounded growth."""
+    try:
+        if not path.exists():
+            return
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        if len(lines) >= max_lines:
+            path.write_text("".join(lines[-max_lines:]), encoding="utf-8")
+    except Exception:
+        pass
+
 
 
 def _license_server_base() -> str:
@@ -714,6 +728,7 @@ def _append_run_event(event: dict) -> None:
         "design_name": event.get("design_name"),
     }
     safe = {key: value for key, value in safe.items() if value is not None}
+    _rotate_jsonl(RUN_EVENTS_PATH, max_lines=10_000)
     with RUN_EVENTS_PATH.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(safe) + "\n")
 
@@ -797,18 +812,23 @@ def _linux_workspace_root(host_workspace_root: str) -> str | None:
     return linux_root if linux_root and linux_root != host_workspace_root else None
 
 
-def _read_opencode_sessions() -> dict:
+def _read_agentic_sessions() -> dict:
     try:
-        data = json.loads(OPENCODE_SESSIONS_PATH.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        if AGENTIC_SESSIONS_PATH.exists():
+            data = json.loads(AGENTIC_SESSIONS_PATH.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        if OPENCODE_SESSIONS_PATH.exists():
+            data = json.loads(OPENCODE_SESSIONS_PATH.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
     except Exception:
-        return {}
+        pass
+    return {}
 
 
-def _write_opencode_sessions(data: dict) -> None:
-    tmp = OPENCODE_SESSIONS_PATH.with_suffix(".tmp")
+def _write_agentic_sessions(data: dict) -> None:
+    tmp = AGENTIC_SESSIONS_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(OPENCODE_SESSIONS_PATH)
+    tmp.replace(AGENTIC_SESSIONS_PATH)
 
 
 def _session_hash(session_id: str) -> str:
@@ -828,7 +848,7 @@ def _normalize_agentic_mode(value: str | None) -> str:
 def _stored_agentic_mode(session_id: str) -> str:
     if session_id in _session_modes:
         return _normalize_agentic_mode(_session_modes.get(session_id))
-    data = _read_opencode_sessions()
+    data = _read_agentic_sessions()
     existing = data.get(session_id) if isinstance(data.get(session_id), dict) else {}
     return _normalize_agentic_mode(existing.get("agentic_mode"))
 
@@ -888,22 +908,34 @@ def _safe_design_dir_name(value: str, fallback: str = "scratch") -> str:
     return name
 
 
+def _session_directory_as_design_root(workspace_root: str) -> tuple[str, str, str] | None:
+    root = os.path.abspath(os.path.normpath(workspace_root))
+    if root == os.path.abspath(os.path.normpath(WS_ROOT)):
+        return None
+    design_name = _safe_design_dir_name(os.path.basename(root), "")
+    if not design_name:
+        return None
+    parent = os.path.dirname(root) or root
+    return parent, design_name, root
+
+
 def _resolve_opencode_mapping(req: OpenCodeSessionRequest) -> dict:
     session_id = (req.session_id or "").strip()
     if not session_id:
         raise HTTPException(400, "AgentIC runtime session_id is required.")
     
     workspace_root = _safe_workspace_root(req.workspace_root)
-    data = _read_opencode_sessions()
+    data = _read_agentic_sessions()
     existing = data.get(session_id) if isinstance(data.get(session_id), dict) else {}
     fallback = _session_hash(session_id)
     requested_design = (req.design_name or "").strip()
+    design_root = None
+    session_root = _session_directory_as_design_root(workspace_root)
     if requested_design:
         design_name = _slugify_design_text(requested_design, fallback)
-    elif existing.get("design_name") and not (
-        str(existing.get("design_name")).startswith("session_")
-        and _looks_like_design_request_for_name(req.user_text)
-    ):
+    elif session_root:
+        workspace_root, design_name, design_root = session_root
+    elif existing.get("design_name"):
         design_name = str(existing["design_name"])
     else:
         if _looks_like_design_request_for_name(req.user_text):
@@ -912,9 +944,16 @@ def _resolve_opencode_mapping(req: OpenCodeSessionRequest) -> dict:
                 design_name = f"design_{design_name}_{fallback[:4]}"
         else:
             design_name = f"session_{fallback}"
-    design_root = os.path.join(workspace_root, design_name)
+    if design_root is None:
+        if design_name == os.path.basename(os.path.abspath(os.path.normpath(workspace_root))):
+            design_root = workspace_root
+        else:
+            design_root = os.path.join(workspace_root, design_name)
     linux_workspace_root = _linux_workspace_root(workspace_root)
-    linux_design_root = os.path.join(linux_workspace_root, design_name) if linux_workspace_root else None
+    if design_root == workspace_root:
+        linux_design_root = linux_workspace_root
+    else:
+        linux_design_root = os.path.join(linux_workspace_root, design_name) if linux_workspace_root else None
     os.makedirs(design_root, exist_ok=True)
     run_id = str(existing.get("run_id") or f"oc_{fallback}")
     now = time.time()
@@ -934,11 +973,11 @@ def _resolve_opencode_mapping(req: OpenCodeSessionRequest) -> dict:
         "pdk_profile": req.pdk_profile or existing.get("pdk_profile") or "",
         "created_at": existing.get("created_at") or now,
         "updated_at": now,
-        "last_user_text": req.user_text or existing.get("last_user_text") or "",
+        "last_user_text": (req.user_text or existing.get("last_user_text") or "")[:500],
     }
     _session_modes[session_id] = agentic_mode
     data[session_id] = mapping
-    _write_opencode_sessions(data)
+    _write_agentic_sessions(data)
     _set_active_design(design_name)
     return mapping
 
@@ -1115,6 +1154,7 @@ async def report_build_usage(req: UsageBuildRequest, request: Request):
         "total_builds": req.total_builds,
         "license_source": license_status.get("source"),
     }
+    _rotate_jsonl(USAGE_LOG_PATH, max_lines=10_000)
     with USAGE_LOG_PATH.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry) + "\n")
     return {"status": "recorded", "forwarded": _forward_usage(entry, request)}
@@ -1190,13 +1230,13 @@ async def opencode_session_mode_set(request: Request):
     mode = _normalize_agentic_mode(body.get("mode"))
     if session_id:
         _session_modes[session_id] = mode
-        data = _read_opencode_sessions()
+        data = _read_agentic_sessions()
         existing = data.get(session_id) if isinstance(data.get(session_id), dict) else None
         if existing is not None:
             existing["agentic_mode"] = mode
             existing["updated_at"] = time.time()
             data[session_id] = existing
-            _write_opencode_sessions(data)
+            _write_agentic_sessions(data)
     return {"success": True, "agentic_mode": mode}
 
 @app.post("/opencode/session/resolve")
@@ -1274,6 +1314,8 @@ async def opencode_session_resolve(req: OpenCodeSessionRequest, request: Request
         env=env,
         flow_decision=flow_decision,
         context_contract=kernel_contract,
+        session_id=mapping.get("session_id"),
+        agentic_mode=mapping.get("agentic_mode"),
     )
     return {
         "success": True,
@@ -1440,7 +1482,7 @@ async def _opencode_event_sse(mapping: dict, replay: int = 0):
             yield {"event": "message", "data": json.dumps(event)}
 
     import threading
-    from opencode_runtime import stream_events
+    from agentic_runtime import stream_events
 
     loop = asyncio.get_event_loop()
     queue: asyncio.Queue[tuple[str, dict | str | None]] = asyncio.Queue()
@@ -1491,7 +1533,7 @@ async def _opencode_event_sse(mapping: dict, replay: int = 0):
 @app.get("/opencode/runtime/status")
 async def opencode_runtime_status(request: Request):
     _require_active_local_runtime(request)
-    from opencode_runtime import discover_root, health
+    from agentic_runtime import discover_root, health
     status = health()
     root = discover_root()
     return {
@@ -1505,7 +1547,7 @@ async def opencode_runtime_status(request: Request):
 @app.post("/opencode/runtime/start")
 async def opencode_runtime_start(req: OpenCodeRuntimeStartRequest, request: Request):
     _require_active_local_runtime(request)
-    from opencode_runtime import start
+    from agentic_runtime import start
     try:
         return start(hostname=req.hostname, port=req.port, timeout=req.timeout)
     except Exception as exc:
@@ -1515,7 +1557,7 @@ async def opencode_runtime_start(req: OpenCodeRuntimeStartRequest, request: Requ
 @app.post("/opencode/desktop/sessions")
 async def opencode_desktop_create_session(req: OpenCodeDesktopSessionRequest, request: Request):
     _require_active_local_runtime(request)
-    from opencode_runtime import create_session, health
+    from agentic_runtime import create_session, health
     if not health().get("healthy"):
         raise HTTPException(503, "AgentIC runtime engine is not healthy. Start the local runtime or configure AGENTIC_OPENCODE_URL.")
 
@@ -1559,7 +1601,7 @@ async def opencode_desktop_create_session(req: OpenCodeDesktopSessionRequest, re
 @app.post("/opencode/desktop/message")
 async def opencode_desktop_message(req: OpenCodeDesktopMessageRequest, request: Request):
     _require_active_local_runtime(request)
-    from opencode_runtime import prompt_async
+    from agentic_runtime import prompt_async
     if not req.text.strip():
         raise HTTPException(400, "Message text is required.")
     mapping = _resolve_opencode_mapping(_desktop_mapping_request(
@@ -1603,7 +1645,7 @@ async def opencode_desktop_message(req: OpenCodeDesktopMessageRequest, request: 
 @app.get("/opencode/desktop/sessions/{session_id}/messages")
 async def opencode_desktop_messages(session_id: str, request: Request, workspace_root: str = "", design_name: str = "", pdk_profile: str = "", limit: int = 200):
     _require_active_local_runtime(request)
-    from opencode_runtime import list_messages
+    from agentic_runtime import list_messages
     mapping = _resolve_opencode_mapping(_desktop_mapping_request(
         session_id,
         workspace_root=workspace_root or None,
@@ -1620,7 +1662,7 @@ async def opencode_desktop_messages(session_id: str, request: Request, workspace
 @app.post("/opencode/desktop/sessions/{session_id}/abort")
 async def opencode_desktop_abort(session_id: str, request: Request, workspace_root: str = "", design_name: str = "", pdk_profile: str = ""):
     _require_active_local_runtime(request)
-    from opencode_runtime import abort_session
+    from agentic_runtime import abort_session
     mapping = _resolve_opencode_mapping(_desktop_mapping_request(
         session_id,
         workspace_root=workspace_root or None,
@@ -2142,7 +2184,7 @@ async def get_session_sta_report(request: Request, session_id: str, workspace_ro
         raise HTTPException(402, license_status.get("reason") or "Active license required")
     from sta_reports import build_sta_report
 
-    data = _read_opencode_sessions()
+    data = _read_agentic_sessions()
     existing = data.get(session_id) if isinstance(data.get(session_id), dict) else {}
     root = _safe_workspace_root(str(existing.get("workspace_root") or workspace_root or WS_ROOT))
     fallback = f"session_{_session_hash(session_id)}"
@@ -2171,7 +2213,7 @@ async def get_session_signoff_report(request: Request, session_id: str, workspac
         raise HTTPException(402, license_status.get("reason") or "Active license required")
     from signoff_reports import build_signoff_report
 
-    data = _read_opencode_sessions()
+    data = _read_agentic_sessions()
     existing = data.get(session_id) if isinstance(data.get(session_id), dict) else {}
     root = _safe_workspace_root(str(existing.get("workspace_root") or workspace_root or WS_ROOT))
     fallback = f"session_{_session_hash(session_id)}"

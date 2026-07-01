@@ -1,6 +1,9 @@
-import { createResource, createSignal, onMount, Show } from "solid-js"
+import { createResource, createSignal, createMemo, createEffect, onMount, onCleanup, untrack, Show, For } from "solid-js"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { callAgenticTool } from "@/utils/agentic"
+import { decode64 } from "@/utils/base64"
+import { useFile } from "@/context/file"
+import { showToast } from "@/utils/toast"
 
 interface VCDSignal {
   id: string
@@ -20,6 +23,9 @@ interface VCDData {
   changes: Map<string, VCDChange[]>
   duration: number
 }
+
+// Global cache to persist signal filter query across tab unmounts
+const waveformFilterCache = new Map<string, string>()
 
 function parseVCD(content: string): VCDData {
   const signals: VCDSignal[] = []
@@ -56,7 +62,7 @@ function parseVCD(content: string): VCDData {
       continue
     }
 
-    if (line.startsWith("$enddefinitions")) { i++; break }
+    if (line.startsWith("$enddefinitions")) { i++; continue }
     if (line.startsWith("$")) { i++; continue }
 
     if (line.startsWith("#")) {
@@ -96,16 +102,89 @@ function parseVCD(content: string): VCDData {
   return { timescale, signals, changes, duration }
 }
 
+const resolveSignalSource = async (sessionId: string, workspaceRoot: string, sigName: string) => {
+  const parts = sigName.split(".")
+  const baseName = parts[parts.length - 1]
+
+  try {
+    const res = await callAgenticTool(
+      "workspace",
+      { session_id: sessionId, workspace_root: workspaceRoot },
+      { action: "search", pattern: baseName }
+    )
+
+    if (!res.success || !res.result) return null
+
+    const matches = res.result.split("\n").filter(Boolean)
+    for (const match of matches) {
+      const tokens = match.split(":")
+      if (tokens.length < 3) continue
+      const relativePath = tokens[0].trim()
+      const lineNum = parseInt(tokens[1].trim(), 10)
+      const content = tokens.slice(2).join(":").trim()
+
+      if (!relativePath.endsWith(".v") && !relativePath.endsWith(".sv")) continue
+
+      const isDecl = new RegExp(`\\b(wire|reg|logic|input|output|inout)\\b.*\\b${baseName}\\b`).test(content)
+      if (isDecl) {
+        return { path: relativePath, line: lineNum }
+      }
+    }
+  } catch (e) {
+    console.error("Error resolving signal source:", e)
+  }
+  return null
+}
+
 export function SessionWaveformTab(props: { path: string }) {
-  const { params } = useSessionLayout()
+  const { params, tabs } = useSessionLayout()
+  const file = useFile()
   const [fetchError, setFetchError] = createSignal<string | null>(null)
 
+  // Read initial filter from global cache
+  const initialFilter = waveformFilterCache.get(props.path) || ""
+  const [filterText, setFilterText] = createSignal(initialFilter)
+
+  // Persist filter query reactively
+  createEffect(() => {
+    waveformFilterCache.set(props.path, filterText())
+  })
+
+  const openTab = (tabPath: string) => {
+    // 1. Fetch file content from backend to load it into cache
+    file.load(tabPath)
+
+    // 2. Open and activate tab in editor
+    const tab = file.tab(tabPath)
+    tabs().open(tab)
+    tabs().setActive(tab)
+  }
+
+  // Track both session ID and file path reactively
   const [vcdData] = createResource(
-    () => params.id,
-    async (sessionId) => {
+    () => ({ sessionId: params.id, path: props.path }),
+    async ({ sessionId, path }) => {
       setFetchError(null)
       try {
-        const res = await callAgenticTool("workspace", { session_id: sessionId }, { action: "read", path: props.path })
+        if (!sessionId) throw new Error("Session is not ready")
+        const workspaceRoot = decode64(params.dir) ?? ""
+
+        let filePath = path
+        // Slice path dynamically based on standard design subfolders
+        const subfolders = ["simulation/", "verification/", "rtl/", "schematic/"]
+        for (const sub of subfolders) {
+          const idx = filePath.indexOf(sub)
+          if (idx !== -1) {
+            filePath = filePath.slice(idx)
+            break
+          }
+        }
+
+        const res = await callAgenticTool(
+          "workspace",
+          { session_id: sessionId, workspace_root: workspaceRoot },
+          { action: "read", path: filePath }
+        )
         if (!res.success || !res.result) throw new Error(res.result || "Could not read file")
         const parsed = parseVCD(res.result)
         if (parsed.signals.length === 0) throw new Error("No signals found in VCD")
@@ -119,8 +198,27 @@ export function SessionWaveformTab(props: { path: string }) {
 
   return (
     <div class="flex flex-col w-full h-full bg-background-stronger font-sans">
-      <div class="flex items-center gap-2 px-3 py-1.5 border-b border-border-weaker-base text-12-regular text-text-strong">
+      <div class="flex items-center gap-2 px-3 py-1.5 border-b border-border-weaker-base text-12-regular text-text-strong shrink-0">
         <span class="truncate font-mono">{props.path}</span>
+
+        <div class="relative ml-4 w-48">
+          <input
+            type="text"
+            placeholder="Filter signals..."
+            value={filterText()}
+            onInput={(e) => setFilterText(e.currentTarget.value)}
+            class="w-full h-6 px-2 text-11-regular bg-background-base text-text-strong rounded border border-border-weaker-base focus:outline-none focus:border-border-strong transition-colors"
+          />
+          <Show when={filterText()}>
+            <button
+              onClick={() => setFilterText("")}
+              class="absolute right-1.5 top-1/2 -translate-y-1/2 text-text-weaker hover:text-text-strong text-12-bold"
+            >
+              ×
+            </button>
+          </Show>
+        </div>
+
         <Show when={vcdData()}>
           <span class="text-text-weaker text-11-regular ml-auto shrink-0">
             {vcdData()!.signals.length} sigs &middot; {vcdData()!.duration} {vcdData()!.timescale}
@@ -129,7 +227,7 @@ export function SessionWaveformTab(props: { path: string }) {
       </div>
 
       <Show when={vcdData.loading && !vcdData()}>
-        <div class="flex-1 flex items-center justify-center text-12-regular text-text-weak">
+        <div class="flex-1 flex items-center justify-center text-12-regular text-text-weaker px-4 text-center">
           Parsing VCD transitions...
         </div>
       </Show>
@@ -141,136 +239,420 @@ export function SessionWaveformTab(props: { path: string }) {
       </Show>
 
       <Show when={vcdData() && !vcdData.loading}>
-        <WaveformCanvas data={vcdData()!} />
+        <WaveformCanvas
+          data={vcdData()!}
+          filterText={filterText()}
+          openTab={openTab}
+          file={file}
+          tabPath={props.path}
+        />
       </Show>
     </div>
   )
 }
 
-function WaveformCanvas(props: { data: VCDData }) {
-  const { signals, changes, duration } = props.data
+function WaveformCanvas(props: { data: VCDData; filterText: string; openTab: (path: string) => void; file: any; tabPath: string }) {
+  const signals = () => props.data?.signals || []
+  const changes = () => props.data?.changes || new Map()
+  const duration = () => props.data?.duration || 0
+  const timeRange = () => props.data?.duration || 1
+
   const signalHeight = 28
   const nameWidth = 200
-  const pad = { top: 12, left: 16, right: 24 }
-  const displaySignals = signals.slice(0, 64)
-  const timeRange = duration || 1
-  const timeScale = 1
+  const pad = { top: 12, left: 16, right: 24, bottom: 20 }
 
   let canvasRef!: HTMLCanvasElement
   let containerRef!: HTMLDivElement
 
-  const write = (ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color = "rgba(255,255,255,0.618)", size = 10) => {
-    ctx.fillStyle = color
-    ctx.font = `${size}px "JetBrainsMono Nerd Font Mono", monospace`
-    ctx.textBaseline = "middle"
-    ctx.fillText(text, x, y)
+  // State
+  const [zoom, setZoom] = createSignal(1)
+  const [offsetX, setOffsetX] = createSignal(0)
+  const [hoveredRow, setHoveredRow] = createSignal<number | null>(null)
+  const [canvasWidth, setCanvasWidth] = createSignal(800)
+
+  const { params } = useSessionLayout()
+
+  // Filter signals reactively
+  const filteredSignals = createMemo(() => {
+    const query = props.filterText.toLowerCase().trim()
+    const sigs = signals()
+    if (!query) return sigs
+    return sigs.filter(sig => sig.name.toLowerCase().includes(query))
+  })
+
+  const canvasHeight = () => pad.top + filteredSignals().length * signalHeight + pad.bottom
+
+  // Helper to clamp horizontal offset
+  const clampOffset = (z: number, ox: number, width: number) => {
+    const waveWidth = width - nameWidth - pad.left - pad.right
+    const range = timeRange()
+    if (range * z <= waveWidth) {
+      return 0
+    }
+    const minOffset = waveWidth - range * z
+    return Math.max(Math.min(0, ox), minOffset)
   }
 
-  const drawGrid = (ctx: CanvasRenderingContext2D, w: number, h: number, n: number) => {
-    ctx.strokeStyle = "rgba(255,255,255,0.06)"
-    ctx.lineWidth = 1
-    for (let r = 0; r <= n; r++) {
-      const y = pad.top + r * signalHeight
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke()
-    }
-    const step = Math.max(Math.floor(timeRange / 20), 1)
-    for (let t = 0; t <= timeRange; t += step) {
-      const x = nameWidth + pad.left + t * timeScale
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke()
-      if (t % (step * 5) === 0) write(ctx, `${t}`, x + 2, h - 4, "rgba(255,255,255,0.284)", 9)
-    }
-  }
-
-  const drawWave = (ctx: CanvasRenderingContext2D, sig: VCDSignal, y: number, w: number) => {
-    const ch = changes.get(sig.id) || []
-    const cy = y + signalHeight / 2
-    const hy = cy - 7
-    const ly = cy + 7
-    const sx = nameWidth + pad.left
-    const ex = sx + timeRange * timeScale
-
-    ctx.save()
-    ctx.beginPath()
-    ctx.rect(sx, y + 1, w - sx, signalHeight - 2)
-    ctx.clip()
-
-    write(ctx, sig.name, pad.left, cy, "rgba(255,255,255,0.618)", 10)
-
-    if (ch.length === 0) {
-      ctx.fillStyle = "rgba(255,255,255,0.195)"
-      ctx.fillRect(sx, cy - 1, ex - sx, 2)
-      ctx.restore()
-      return
-    }
-
-    if (sig.width === 1) {
-      for (let i = 0; i < ch.length; i++) {
-        const c = ch[i]
-        const x = sx + c.time * timeScale
-        const hi = c.value === "1" || c.value === "h"
-        const curY = hi ? hy : ly
-
-        if (i > 0) {
-          const px = sx + ch[i - 1].time * timeScale
-          const wasHi = ch[i - 1].value === "1" || ch[i - 1].value === "h"
-          const prevY = wasHi ? hy : ly
-          ctx.strokeStyle = wasHi ? "rgba(67,181,129,0.8)" : "rgba(255,255,255,0.422)"
-          ctx.lineWidth = 1.5
-          ctx.beginPath(); ctx.moveTo(px, prevY); ctx.lineTo(x, prevY); ctx.stroke()
-          if (wasHi !== hi) {
-            ctx.strokeStyle = "rgba(255,255,255,0.618)"
-            ctx.lineWidth = 1
-            ctx.beginPath(); ctx.moveTo(x, prevY); ctx.lineTo(x, curY); ctx.stroke()
-          }
-        }
-
-        const nx = i < ch.length - 1 ? sx + ch[i + 1].time * timeScale : ex
-        ctx.strokeStyle = hi ? "rgba(67,181,129,0.8)" : "rgba(255,255,255,0.422)"
-        ctx.lineWidth = 1.5
-        ctx.beginPath(); ctx.moveTo(x, curY); ctx.lineTo(nx, curY); ctx.stroke()
-      }
-    } else {
-      for (let i = 0; i < ch.length; i++) {
-        const c = ch[i]
-        const x = sx + c.time * timeScale
-        const nx = i < ch.length - 1 ? sx + ch[i + 1].time * timeScale : ex
-        const mx = (x + nx) / 2
-        ctx.fillStyle = "rgba(67,181,129,0.8)"
-        ctx.font = '9px "JetBrainsMono Nerd Font Mono", monospace'
-        ctx.textBaseline = "middle"
-        ctx.textAlign = "center"
-        ctx.fillText(c.value.length > 8 ? c.value.slice(0, 8) + ".." : c.value, mx, cy)
-      }
-    }
-
-    ctx.restore()
-  }
-
-  onMount(() => {
-    const container = containerRef
-    if (!container) return
-    const w = container.clientWidth
-    const h = container.clientHeight
+  // Draw function
+  const redraw = () => {
     const canvas = canvasRef
     if (!canvas) return
-    canvas.width = w * window.devicePixelRatio
-    canvas.height = h * window.devicePixelRatio
     const ctx = canvas.getContext("2d")
     if (!ctx) return
-    ctx.scale(window.devicePixelRatio, window.devicePixelRatio)
 
+    const w = canvasWidth()
+    const h = canvasHeight()
+
+    // Clear background
     ctx.fillStyle = "rgba(18,18,18,1)"
     ctx.fillRect(0, 0, w, h)
 
-    drawGrid(ctx, w, h, displaySignals.length)
-    for (let i = 0; i < displaySignals.length; i++) {
-      drawWave(ctx, displaySignals[i], pad.top + i * signalHeight, w)
+    const activeSignals = filteredSignals()
+
+    // Highlight hovered row
+    const hr = hoveredRow()
+    if (hr !== null && hr >= 0 && hr < activeSignals.length) {
+      ctx.fillStyle = "rgba(255,255,255,0.03)"
+      ctx.fillRect(0, pad.top + hr * signalHeight, w, signalHeight)
     }
+
+    const currentZoom = zoom()
+    const currentOffset = offsetX()
+
+    // Draw Grid Rows
+    ctx.strokeStyle = "rgba(255,255,255,0.06)"
+    ctx.lineWidth = 1
+    for (let r = 0; r <= activeSignals.length; r++) {
+      const y = pad.top + r * signalHeight
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke()
+    }
+
+    // Determine grid step
+    const range = timeRange()
+    const step = Math.max(Math.floor(range / 20), 1)
+    const sx = nameWidth + pad.left
+
+    ctx.save()
+    // Clip grid lines to the wave area
+    ctx.beginPath()
+    ctx.rect(sx, 0, w - sx, h)
+    ctx.clip()
+
+    for (let t = 0; t <= range; t += step) {
+      const x = sx + t * currentZoom + currentOffset
+      if (x < sx || x > w) continue
+      ctx.strokeStyle = "rgba(255,255,255,0.06)"
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke()
+
+      if (t % (step * 2) === 0) {
+        ctx.fillStyle = "rgba(255,255,255,0.2)"
+        ctx.font = '9px "JetBrainsMono Nerd Font Mono", monospace'
+        ctx.textBaseline = "middle"
+        ctx.fillText(`${t}`, x + 2, h - 10)
+      }
+    }
+    ctx.restore()
+
+    const currentChanges = changes()
+
+    // Draw Waves
+    for (let i = 0; i < activeSignals.length; i++) {
+      const sig = activeSignals[i]
+      const y = pad.top + i * signalHeight
+      const cy = y + signalHeight / 2
+      const hy = cy - 7
+      const ly = cy + 7
+
+      ctx.save()
+      // Draw signal name
+      ctx.fillStyle = "rgba(255,255,255,0.7)"
+      ctx.font = '10px "JetBrainsMono Nerd Font Mono", monospace'
+      ctx.textBaseline = "middle"
+      ctx.textAlign = "left"
+      ctx.fillText(sig.name, pad.left, cy)
+
+      // Clip waves to the wave area
+      ctx.beginPath()
+      ctx.rect(sx, y + 1, w - sx, signalHeight - 2)
+      ctx.clip()
+
+      const ch = currentChanges.get(sig.id) || []
+      const exWave = sx + range * currentZoom + currentOffset
+
+      if (ch.length === 0) {
+        ctx.fillStyle = "rgba(255,255,255,0.15)"
+        ctx.fillRect(sx, cy - 1, exWave - sx, 2)
+      } else {
+        if (sig.width === 1) {
+          for (let idx = 0; idx < ch.length; idx++) {
+            const c = ch[idx]
+            const x = sx + c.time * currentZoom + currentOffset
+            const hi = c.value === "1" || c.value === "h"
+            const curY = hi ? hy : ly
+
+            if (idx > 0) {
+              const px = sx + ch[idx - 1].time * currentZoom + currentOffset
+              const wasHi = ch[idx - 1].value === "1" || ch[idx - 1].value === "h"
+              const prevY = wasHi ? hy : ly
+              ctx.strokeStyle = wasHi ? "rgba(67,181,129,0.8)" : "rgba(255,255,255,0.4)"
+              ctx.lineWidth = 1.5
+              ctx.beginPath(); ctx.moveTo(px, prevY); ctx.lineTo(x, prevY); ctx.stroke()
+              if (wasHi !== hi) {
+                ctx.strokeStyle = "rgba(255,255,255,0.5)"
+                ctx.lineWidth = 1
+                ctx.beginPath(); ctx.moveTo(x, prevY); ctx.lineTo(x, curY); ctx.stroke()
+              }
+            }
+
+            const nx = idx < ch.length - 1 ? sx + ch[idx + 1].time * currentZoom + currentOffset : exWave
+            ctx.strokeStyle = hi ? "rgba(67,181,129,0.8)" : "rgba(255,255,255,0.4)"
+            ctx.lineWidth = 1.5
+            ctx.beginPath(); ctx.moveTo(x, curY); ctx.lineTo(nx, curY); ctx.stroke()
+          }
+        } else {
+          // Bus rendering
+          for (let idx = 0; idx < ch.length; idx++) {
+            const c = ch[idx]
+            const x = sx + c.time * currentZoom + currentOffset
+            const nx = idx < ch.length - 1 ? sx + ch[idx + 1].time * currentZoom + currentOffset : exWave
+            const mx = (x + nx) / 2
+
+            // Draw bus outline
+            ctx.strokeStyle = "rgba(100,200,255,0.8)"
+            ctx.lineWidth = 1
+            ctx.beginPath()
+            ctx.moveTo(x, hy)
+            ctx.lineTo(nx, hy)
+            ctx.lineTo(nx, ly)
+            ctx.lineTo(x, ly)
+            ctx.closePath()
+            ctx.stroke()
+
+            // Draw bus value text
+            if (nx - x > 20) {
+              ctx.fillStyle = "rgba(255,255,255,0.8)"
+              ctx.font = '9px "JetBrainsMono Nerd Font Mono", monospace'
+              ctx.textBaseline = "middle"
+              ctx.textAlign = "center"
+              const textVal = c.value.length > 8 ? c.value.slice(0, 8) + ".." : c.value
+              ctx.fillText(textVal, mx, cy)
+            }
+          }
+        }
+      }
+      ctx.restore()
+    }
+  }
+
+  // Effect to handle canvas resizing (only runs when width or height changes)
+  createEffect(() => {
+    const w = canvasWidth()
+    const h = canvasHeight()
+    const canvas = canvasRef
+    if (canvas) {
+      const dpr = window.devicePixelRatio || 1
+      canvas.width = w * dpr
+      canvas.height = h * dpr
+      const ctx = canvas.getContext("2d")
+      if (ctx) {
+        ctx.resetTransform()
+        ctx.scale(dpr, dpr)
+      }
+    }
+    // Redraw without registering active zoom/offset dependencies on resize effect
+    untrack(() => redraw())
   })
 
+  // Effect to redraw on zoom, offset, or hover changes
+  createEffect(() => {
+    zoom()
+    offsetX()
+    hoveredRow()
+    canvasWidth()
+    canvasHeight()
+    redraw()
+  })
+
+  // Handle Resize
+  const updateSize = () => {
+    const container = containerRef
+    if (!container) return
+    const w = container.clientWidth
+
+    // Auto-fit on first load or resize
+    if (w !== canvasWidth()) {
+      const waveWidth = w - nameWidth - pad.left - pad.right
+      const range = timeRange()
+      const idealZoom = waveWidth / range
+      setZoom(idealZoom)
+      setOffsetX(0)
+      setCanvasWidth(w)
+    }
+  }
+
+  onMount(() => {
+    updateSize()
+    window.addEventListener("resize", updateSize)
+
+    // Resize Observer for container
+    const ro = new ResizeObserver(() => updateSize())
+    ro.observe(containerRef)
+
+    onCleanup(() => {
+      window.removeEventListener("resize", updateSize)
+      ro.disconnect()
+    })
+  })
+
+  // Drag Panning State
+  let isDragging = false
+  let startX = 0
+  let startOffset = 0
+
+  const handleMouseDown = (e: MouseEvent) => {
+    const rect = canvasRef.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    if (x < nameWidth + pad.left) return
+
+    isDragging = true
+    startX = e.clientX
+    startOffset = offsetX()
+  }
+
+  const handleMouseMove = (e: MouseEvent) => {
+    const rect = canvasRef.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+
+    const activeSignals = filteredSignals()
+    const row = Math.floor((y - pad.top) / signalHeight)
+    if (row >= 0 && row < activeSignals.length) {
+      setHoveredRow(row)
+    } else {
+      setHoveredRow(null)
+    }
+
+    if (isDragging) {
+      const dx = e.clientX - startX
+      const nextOffset = startOffset + dx
+      setOffsetX(clampOffset(zoom(), nextOffset, canvasWidth()))
+    }
+  }
+
+  const handleMouseUp = () => {
+    isDragging = false
+  }
+
+  const handleMouseLeave = () => {
+    isDragging = false
+    setHoveredRow(null)
+  }
+
+  const handleWheel = (e: WheelEvent) => {
+    const rect = canvasRef.getBoundingClientRect()
+    const mouseX = e.clientX - rect.left
+
+    // Zooming with Ctrl + Wheel
+    if (e.ctrlKey) {
+      e.preventDefault()
+      const waveX = mouseX - nameWidth - pad.left
+      const timeAtMouse = (waveX - offsetX()) / zoom()
+
+      const factor = e.deltaY < 0 ? 1.25 : 0.8
+      let nextZoom = zoom() * factor
+      const waveWidth = canvasWidth() - nameWidth - pad.left - pad.right
+      const range = timeRange()
+      const minZoom = waveWidth / range
+      const maxZoom = 10
+      nextZoom = Math.max(minZoom, Math.min(maxZoom, nextZoom))
+
+      const nextOffset = waveX - timeAtMouse * nextZoom
+      setZoom(nextZoom)
+      setOffsetX(clampOffset(nextZoom, nextOffset, canvasWidth()))
+    } else if (e.shiftKey) {
+      // Horizontal Pan with Shift + Wheel
+      e.preventDefault()
+      const nextOffset = offsetX() - e.deltaY
+      setOffsetX(clampOffset(zoom(), nextOffset, canvasWidth()))
+    }
+  }
+
+  // Double Click RTL Cross-Probing
+  const handleDblClick = async (e: MouseEvent) => {
+    const rect = canvasRef.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+
+    const activeSignals = filteredSignals()
+    const row = Math.floor((y - pad.top) / signalHeight)
+    if (row >= 0 && row < activeSignals.length) {
+      const sig = activeSignals[row]
+
+      showToast({
+        title: `Searching driver for signal: "${sig.name}"...`,
+        description: "Scanning Verilog source files...",
+      })
+
+      const match = await resolveSignalSource(
+        params.id!,
+        decode64(params.dir) ?? "",
+        sig.name
+      )
+
+      if (match) {
+        let resolvedPath = match.path
+
+        let prefix = ""
+        const subfolders = ["simulation/", "verification/", "rtl/", "schematic/"]
+        for (const sub of subfolders) {
+          const idx = props.tabPath.indexOf(sub)
+          if (idx > 0) {
+            prefix = props.tabPath.slice(0, idx)
+            break
+          }
+        }
+
+        if (prefix && !resolvedPath.startsWith(prefix)) {
+          resolvedPath = prefix + resolvedPath
+        }
+
+        showToast({
+          title: "Signal Driver Located!",
+          description: `Opened ${resolvedPath.split("/").pop()} at line ${match.line}`,
+        })
+        props.openTab(resolvedPath)
+        props.file.setSelectedLines(resolvedPath, { start: match.line, end: match.line })
+      } else {
+        showToast({
+          title: "Search Complete",
+          description: `Could not find Verilog declaration for: "${sig.name}"`,
+        })
+      }
+    }
+  }
+
   return (
-    <div ref={containerRef!} class="flex-1 overflow-auto relative">
-      <canvas ref={canvasRef!} class="block w-full h-full" />
+    <div ref={containerRef!} class="flex-1 overflow-auto relative h-full bg-background-stronger">
+      <div
+        class="absolute top-0 right-4 bg-background-base/80 backdrop-blur px-2 py-1 text-10-regular text-text-weaker rounded-md border border-border-weaker-base pointer-events-none z-10"
+        style="margin-top: 6px;"
+      >
+        Drag to Pan &middot; Ctrl+Scroll to Zoom &middot; Double-Click to Cross-Probe RTL
+      </div>
+      <canvas
+        ref={canvasRef!}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseLeave}
+        onDblClick={handleDblClick}
+        onWheel={handleWheel}
+        class="block cursor-grab active:cursor-grabbing"
+        style={{
+          width: `${canvasWidth()}px`,
+          height: `${canvasHeight()}px`
+        }}
+      />
     </div>
   )
 }

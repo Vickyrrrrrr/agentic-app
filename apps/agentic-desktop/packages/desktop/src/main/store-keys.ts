@@ -1,4 +1,6 @@
 export const SETTINGS_STORE = "opencode.settings"
+export const SETTINGS_DAT_STORE = "opencode.settings.dat"
+export const GLOBAL_STORE = "opencode.global.dat"
 export const DEFAULT_SERVER_URL_KEY = "defaultServerUrl"
 export const WSL_SERVERS_KEY = "wslServers"
 export const PINCH_ZOOM_ENABLED_KEY = "pinchZoomEnabled"

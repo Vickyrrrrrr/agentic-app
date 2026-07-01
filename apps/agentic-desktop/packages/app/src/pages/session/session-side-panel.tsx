@@ -40,9 +40,8 @@ function renderDiff(value: SnapshotFileDiff | VcsFileDiff): value is RenderDiff 
  * WaveformPanel — scans the real workspace for .vcd / .fst waveform files.
  * Shows an honest empty state if none exist. Never shows fake data.
  */
-function WaveformPanel() {
+function WaveformPanel(props: { openTab: (tab: string) => void; file: any }) {
   const { params } = useSessionLayout()
-  const [selected, setSelected] = createSignal<string | null>(null)
 
   const [vcdFiles] = createResource(
     () => params.id,
@@ -68,58 +67,40 @@ function WaveformPanel() {
 
   return (
     <div class="flex flex-col w-full h-full bg-background-stronger font-sans">
-      <Show when={!selected()}>
-        <div class="flex items-center justify-between px-3 py-1.5 border-b border-border-weaker-base text-12-medium text-text-strong shrink-0">
-          <span>Waveform Viewer</span>
-          <Show when={!vcdFiles.loading}>
-            <span class="text-11-regular text-text-weaker">{files().length} file{files().length !== 1 ? "s" : ""}</span>
-          </Show>
+      <div class="flex items-center justify-between px-3 py-1.5 border-b border-border-weaker-base text-12-medium text-text-strong shrink-0">
+        <span>Waveform Viewer</span>
+        <Show when={!vcdFiles.loading}>
+          <span class="text-11-regular text-text-weaker">{files().length} file{files().length !== 1 ? "s" : ""}</span>
+        </Show>
+      </div>
+
+      <Show when={vcdFiles.loading}>
+        <div class="flex-1 flex items-center justify-center text-12-regular text-text-weak">
+          Scanning workspace…
         </div>
-
-        <Show when={vcdFiles.loading}>
-          <div class="flex-1 flex items-center justify-center text-12-regular text-text-weak">
-            Scanning workspace…
-          </div>
-        </Show>
-
-        <Show when={!vcdFiles.loading && files().length === 0}>
-          <div class="flex-1 flex flex-col items-center justify-center gap-2 px-4 text-center pb-16">
-            <div class="text-12-medium text-text-weak">No waveform files found</div>
-            <div class="text-11-regular text-text-weaker max-w-[180px]">
-              Run a simulation to generate a .vcd file, then come back here.
-            </div>
-          </div>
-        </Show>
-
-        <Show when={!vcdFiles.loading && files().length > 0}>
-          <div class="flex-1 overflow-y-auto">
-            <For each={files()}>
-              {(f) => (
-                <div
-                  onClick={() => setSelected(f)}
-                  class="flex items-center gap-2 px-3 py-1.5 text-12-regular text-text-base hover:text-text-strong hover:bg-surface-base cursor-pointer border-b border-border-weaker-base last:border-b-0"
-                >
-                  <span class="font-mono truncate">{f}</span>
-                </div>
-              )}
-            </For>
-          </div>
-        </Show>
       </Show>
 
-      <Show when={selected()}>
-        <div class="flex items-center gap-2 px-3 py-1.5 border-b border-border-weaker-base shrink-0">
-          <button
-            onClick={() => setSelected(null)}
-            class="text-11-regular text-text-weaker hover:text-text-strong transition-colors"
-            aria-label="Back to file list"
-          >
-            ← Back
-          </button>
-          <span class="text-12-regular text-text-base truncate font-mono">{selected()}</span>
+      <Show when={!vcdFiles.loading && files().length === 0}>
+        <div class="flex-1 flex flex-col items-center justify-center gap-2 px-4 text-center pb-16">
+          <div class="text-12-medium text-text-weak">No waveform files found</div>
+          <div class="text-11-regular text-text-weaker max-w-[180px]">
+            Run a simulation to generate a .vcd file, then come back here.
+          </div>
         </div>
-        <div class="flex-1 min-h-0">
-          <SessionWaveformTab path={selected()!} />
+      </Show>
+
+      <Show when={!vcdFiles.loading && files().length > 0}>
+        <div class="flex-1 overflow-y-auto">
+          <For each={files()}>
+            {(f) => (
+              <div
+                onClick={() => props.openTab(props.file.tab(f))}
+                class="flex items-center gap-2 px-3 py-1.5 text-12-regular text-text-base hover:text-text-strong hover:bg-surface-base cursor-pointer border-b border-border-weaker-base last:border-b-0"
+              >
+                <span class="font-mono truncate">{f}</span>
+              </div>
+            )}
+          </For>
         </div>
       </Show>
     </div>
@@ -553,7 +534,7 @@ export function SessionSidePanel(props: {
                       <SchematicExplorer />
                     </Tabs.Content>
                     <Tabs.Content value="waves" class="bg-background-stronger h-full contain-strict">
-                      <WaveformPanel />
+                      <WaveformPanel openTab={openTab} file={file} />
                     </Tabs.Content>
                   </Tabs>
                 </div>

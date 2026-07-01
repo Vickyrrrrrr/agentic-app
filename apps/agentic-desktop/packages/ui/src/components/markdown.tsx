@@ -175,6 +175,55 @@ function markCodeLinks(root: HTMLDivElement) {
   }
 }
 
+function convertMermaidBlocks(root: HTMLDivElement) {
+  const codeBlocks = Array.from(root.querySelectorAll("pre > code.language-mermaid"))
+  for (const code of codeBlocks) {
+    const pre = code.parentElement
+    if (!pre) continue
+    const container = document.createElement("div")
+    container.className = "mermaid-block"
+    container.setAttribute("data-processed", "false")
+    const rawCode = code.textContent ?? ""
+    container.setAttribute("data-code", rawCode)
+    container.innerText = "Rendering diagram..."
+    pre.parentElement?.replaceChild(container, pre)
+  }
+}
+
+let mermaidPromise: Promise<any> | null = null
+function loadMermaid() {
+  if (!mermaidPromise) {
+    mermaidPromise = import("https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs").then((m) => {
+      m.default.initialize({ startOnLoad: false, theme: "dark", securityLevel: "loose" })
+      return m.default
+    })
+  }
+  return mermaidPromise
+}
+
+async function renderMermaid(root: HTMLDivElement) {
+  const blocks = Array.from(root.querySelectorAll(".mermaid-block[data-processed=\"false\"]"))
+  if (blocks.length === 0) return
+  try {
+    const mermaid = await loadMermaid()
+    for (const block of blocks) {
+      const code = block.getAttribute("data-code") ?? ""
+      const id = `mermaid-${Math.random().toString(36).substring(2, 9)}`
+      try {
+        const { svg } = await mermaid.render(id, code)
+        block.innerHTML = svg
+        block.setAttribute("data-processed", "true")
+      } catch (err) {
+        console.error("Mermaid render error", err)
+        block.innerHTML = `<pre style="color: var(--color-red-weak);">${escape(code)}</pre>`
+        block.setAttribute("data-processed", "failed")
+      }
+    }
+  } catch (err) {
+    console.error("Failed to load Mermaid", err)
+  }
+}
+
 function decorate(root: HTMLDivElement, labels: CopyLabels) {
   const blocks = Array.from(root.querySelectorAll("pre"))
   for (const block of blocks) {
@@ -306,6 +355,7 @@ export function Markdown(
     }
     const temp = document.createElement("div")
     temp.innerHTML = content
+    convertMermaidBlocks(temp)
     decorate(temp, labels)
 
     morphdom(container, temp, {
@@ -330,6 +380,8 @@ export function Markdown(
         copy: i18n.t("ui.message.copy"),
         copied: i18n.t("ui.message.copied"),
       }))
+
+    renderMermaid(container)
   })
 
   onCleanup(() => {

@@ -414,8 +414,17 @@ def lint_file_tool(path: str, workspace_root: str) -> str:
             
     elif verilator_tool:
         try:
+            cmd = [verilator_tool, "--lint-only"]
+            cmd.extend(["-I" + workspace_root])
+            cmd.extend(["-y", workspace_root])
+            for sub in ["rtl", "simulation", "verification"]:
+                subdir = os.path.join(workspace_root, sub)
+                if os.path.isdir(subdir):
+                    cmd.extend(["-I" + subdir])
+                    cmd.extend(["-y", subdir])
+            cmd.append(full)
             proc = subprocess.run(
-                [verilator_tool, "--lint-only", full],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -436,8 +445,17 @@ def lint_file_tool(path: str, workspace_root: str) -> str:
             
     elif iverilog_tool:
         try:
+            cmd = [iverilog_tool, "-o", "/dev/null", "-t", "null"]
+            cmd.extend(["-I", workspace_root])
+            cmd.extend(["-y", workspace_root])
+            for sub in ["rtl", "simulation", "verification"]:
+                subdir = os.path.join(workspace_root, sub)
+                if os.path.isdir(subdir):
+                    cmd.extend(["-I", subdir])
+                    cmd.extend(["-y", subdir])
+            cmd.append(full)
             proc = subprocess.run(
-                [iverilog_tool, "-o", "/dev/null", "-t", "null", full],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
