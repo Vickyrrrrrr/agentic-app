@@ -34,12 +34,25 @@ export async function startAgenticBackend() {
     return
   }
 
-  if (await isBridgeHealthy(baseUrl)) {
+  const hasBundledBinary = app.isPackaged && existsSync(packagedBackendExecutablePath())
+
+  // In dev mode (no bundled binary), attach to an existing dev backend if one is running.
+  // In packaged mode (has bundled binary), NEVER attach — always start our own on a
+  // dynamic port so there's no conflict with any dev backend on 7860.
+  if (!hasBundledBinary && await isBridgeHealthy(baseUrl)) {
     writeLog("agentic-backend", "attached to existing local AgentIC bridge", { url: baseUrl })
     return
   }
 
-  if (await isHealthy(baseUrl)) {
+  // If the preferred port (7860) is occupied by any process, find a free port.
+  if (hasBundledBinary && (await isHealthy(baseUrl) || await isBridgeHealthy(baseUrl))) {
+    const managedUrl = await nextManagedBackendUrl(baseUrl)
+    process.env.AGENTIC_LOCAL_URL = managedUrl
+    writeLog("agentic-backend", "preferred port occupied, allocated dynamic port", {
+      preferred: baseUrl,
+      managed: managedUrl,
+    })
+  } else if (await isHealthy(baseUrl)) {
     const managedUrl = await nextManagedBackendUrl(baseUrl)
     process.env.AGENTIC_LOCAL_URL = managedUrl
     writeLog(
