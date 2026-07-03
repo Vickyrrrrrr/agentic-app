@@ -48,6 +48,7 @@ import { FileMedia, type FileMediaOptions } from "./file-media"
 import { FileSearchBar } from "./file-search"
 
 const VIRTUALIZE_BYTES = 500_000
+const VIRTUALIZE_LINES = 5_000
 
 const codeMetrics = {
   ...DEFAULT_VIRTUAL_FILE_METRICS,
@@ -737,7 +738,7 @@ function TextViewer<T>(props: TextFileProps<T>) {
     return String(value).length
   })
 
-  const virtual = createMemo(() => bytes() > VIRTUALIZE_BYTES)
+  const virtual = createMemo(() => bytes() > VIRTUALIZE_BYTES || lineCount() > VIRTUALIZE_LINES)
 
   const virtuals = createLocalVirtualStrategy(() => viewer.wrapper, virtual)
 
@@ -1019,12 +1020,16 @@ function DiffViewer<T>(props: DiffFileProps<T>) {
     if (local.fileDiff) {
       const before = local.fileDiff.deletionLines.join("")
       const after = local.fileDiff.additionLines.join("")
-      return Math.max(before.length, after.length) > 500_000
+      const beforeLines = local.fileDiff.deletionLines.length
+      const afterLines = local.fileDiff.additionLines.length
+      return Math.max(before.length, after.length) > 500_000 || Math.max(beforeLines, afterLines) > VIRTUALIZE_LINES
     }
 
     const before = typeof local.before?.contents === "string" ? local.before.contents : ""
     const after = typeof local.after?.contents === "string" ? local.after.contents : ""
-    return Math.max(before.length, after.length) > 500_000
+    const beforeLines = before ? before.split("\n").length : 0
+    const afterLines = after ? after.split("\n").length : 0
+    return Math.max(before.length, after.length) > 500_000 || Math.max(beforeLines, afterLines) > VIRTUALIZE_LINES
   })
 
   const largeOptions = {

@@ -1,15 +1,16 @@
 import { createResource, createSignal, createEffect, For, Show, Switch, Match } from "solid-js"
 import { Icon } from "@opencode-ai/ui/icon"
+import { getFilename } from "@opencode-ai/core/util/path"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { callAgenticResolve, callAgenticTool } from "@/utils/agentic"
 import { decode64 } from "@/utils/base64"
+import { schematicTab } from "./schematic-viewer"
 
 export function SchematicExplorer() {
-  const { params } = useSessionLayout()
+  const { params, tabs } = useSessionLayout()
   const [selectedFile, setSelectedFile] = createSignal<string | null>(null)
   const [fetchError, setFetchError] = createSignal<string | null>(null)
   const [contextError, setContextError] = createSignal<string | null>(null)
-  const [copied, setCopied] = createSignal(false)
 
   const [context] = createResource(
     () => params.id,
@@ -114,102 +115,6 @@ export function SchematicExplorer() {
   const ctx = () => context() as Record<string, any> | undefined
   const rtl = () => rtlFiles() ?? []
   const mods = () => parsedMods() ?? []
-
-  const generateInstantiation = () => {
-    const parse = moduleParse()
-    if (!parse) return ""
-
-    const fileName = selectedFile()?.split("/").pop() || "module"
-    const moduleName = fileName.replace(/\.s?v$/, "")
-
-    const portsList = parse.ports || []
-    if (portsList.length === 0) {
-      return `${moduleName} u_${moduleName} ();`
-    }
-
-    const maxLen = Math.max(...portsList.map((p: any) => p.name.length))
-    const portMappings = portsList.map((p: any) => {
-      const padding = " ".repeat(maxLen - p.name.length)
-      return `    .${p.name}${padding} ( ${p.name}${padding} )`
-    })
-
-    return `${moduleName} u_${moduleName} (\n${portMappings.join(",\n")}\n);`
-  }
-
-  const renderSchematic = () => {
-    const parse = moduleParse()
-    if (!parse) return <div class="p-3 text-12-regular text-text-weak">No schematic data available.</div>
-    const portsList = parse.ports || []
-    const instsList = parse.instantiations || []
-
-    const inputs = portsList.filter((p: any) => p.direction === "input")
-    const outputs = portsList.filter((p: any) => p.direction === "output" || p.direction === "inout")
-
-    const height = Math.max(inputs.length, outputs.length, instsList.length, 3) * 24 + 60
-
-    const copyToClipboard = () => {
-      const template = generateInstantiation()
-      navigator.clipboard.writeText(template)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    }
-
-    return (
-      <div class="flex-1 flex flex-col p-3 overflow-auto bg-background-stronger space-y-3">
-        <div class="flex items-center justify-between bg-background-normal border border-border-weaker-base rounded px-3 py-2 shrink-0">
-          <div class="flex flex-col">
-            <span class="text-11-medium text-text-strong font-mono">{selectedFile()?.split("/").pop()}</span>
-            <span class="text-10-regular text-text-weaker">{portsList.length} Ports &middot; {instsList.length} Instances</span>
-          </div>
-          <button
-            onClick={copyToClipboard}
-            class="inline-flex items-center gap-1.5 px-2.5 py-1 text-10-medium bg-surface-base hover:bg-surface-stronger text-text-strong rounded border border-border-weaker-base focus:outline-none transition-colors"
-            classList={{ "text-green-500 border-green-500/30": copied() }}
-          >
-            <Icon name={copied() ? "check-small" : "copy"} size="small" class="text-icon-base shrink-0" />
-            <span>{copied() ? "Copied!" : "Copy Instantiation"}</span>
-          </button>
-        </div>
-
-        <svg width="100%" height={height} class="border border-border-weaker-base rounded bg-background-normal shrink-0">
-          <rect x="120" y="30" width="160" height={height - 60} rx="8" fill="var(--color-bg-normal, #1e1e2e)" stroke="var(--color-border-weaker-base, #3b3b4f)" stroke-width="2" />
-          <text x="200" y="20" text-anchor="middle" fill="var(--color-text-strong, #cdd6f4)" class="text-11-bold font-mono uppercase tracking-wider">
-            {selectedFile()?.split("/").pop()?.replace(/\.s?v$/, "")}
-          </text>
-
-          <For each={inputs}>
-            {(port: any, idx) => {
-              const y = 50 + idx() * 24
-              return (
-                <g>
-                  <text x="15" y={y + 4} fill="var(--color-text-base, #a6adc8)" class="text-10-regular font-mono">{port.name}</text>
-                  <line x1="85" y1={y} x2="120" y2={y} stroke="#10b981" stroke-width="1.5" />
-                  <circle cx="120" cy={y} r="3" fill="#10b981" />
-                </g>
-              )
-            }}
-          </For>
-
-          <For each={outputs}>
-            {(port: any, idx) => {
-              const y = 50 + idx() * 24
-              return (
-                <g>
-                  <text x="385" y={y + 4} text-anchor="end" fill="var(--color-text-base, #a6adc8)" class="text-10-regular font-mono">{port.name}</text>
-                  <line x1="280" y1={y} x2="315" y2={y} stroke="#3b82f6" stroke-width="1.5" />
-                  <circle cx="280" cy={y} r="3" fill="#3b82f6" />
-                </g>
-              )
-            }}
-          </For>
-
-          <text x="200" y={height / 2} text-anchor="middle" fill="var(--color-text-weaker, #6c7086)" class="text-10-regular font-mono italic">
-            {instsList.length} component{instsList.length !== 1 ? 's' : ''}
-          </text>
-        </svg>
-      </div>
-    )
-  }
 
   const renderRegisters = () => {
     const parse = moduleParse()
@@ -335,7 +240,7 @@ export function SchematicExplorer() {
             {(file) => (
               <div
                 onClick={() => setSelectedFile(file)}
-                title={lintStatuses()[file]?.hasErrors ? `This file has ${lintStatuses()[file].count} syntax error(s)` : "No syntax errors detected"}
+                title={file}
                 class="flex items-center justify-between gap-1.5 px-3 py-1.5 text-12-regular cursor-pointer border-b border-border-weaker-base last:border-b-0"
                 classList={{
                   "text-text-strong bg-surface-base": selectedFile() === file,
@@ -344,7 +249,7 @@ export function SchematicExplorer() {
               >
                 <div class="flex items-center gap-1.5 min-w-0">
                   <Icon name="code" size="small" class="text-icon-weak shrink-0" />
-                  <span class="truncate font-mono">{file}</span>
+                  <span class="truncate font-mono">{getFilename(file)}</span>
                 </div>
                 <Show when={lintStatuses()[file]?.hasErrors}>
                   <span class="shrink-0 inline-flex items-center justify-center px-1.5 py-0.5 rounded-full text-10-medium bg-red-500/10 text-red-500 border border-red-500/20 font-mono">
@@ -448,11 +353,30 @@ export function SchematicExplorer() {
               </div>
             </Match>
             <Match when={subTab() === "schematic"}>
-              <Show when={moduleParse.loading}>
-                <div class="p-3 text-12-regular text-text-weak font-mono">Drawing schematic...</div>
-              </Show>
-              <Show when={!moduleParse.loading}>
-                {renderSchematic()}
+              <Show
+                when={selectedFile()}
+                fallback={<div class="p-3 text-12-regular text-text-weak">Select an RTL file.</div>}
+              >
+                <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
+                  <Icon name="code-lines" class="text-text-weaker shrink-0" />
+                  <div class="text-12-medium text-text-strong font-mono">
+                    {selectedFile()!.split("/").pop()}
+                  </div>
+                  <div class="text-11-regular text-text-weak max-w-64">
+                    Open an interactive Yosys-generated schematic in a full viewer with pan, zoom, and hover-to-inspect.
+                  </div>
+                  <button
+                    class="inline-flex items-center gap-1.5 px-3 py-1.5 text-11-medium bg-surface-base hover:bg-surface-stronger text-text-strong rounded-md border border-border-weaker-base focus:outline-none transition-colors"
+                    onClick={() => {
+                      const tab = schematicTab(selectedFile()!)
+                      tabs().open(tab)
+                      tabs().setActive(tab)
+                    }}
+                  >
+                    <Icon name="expand" size="small" class="text-icon-base shrink-0" />
+                    <span>Open Schematic Viewer</span>
+                  </button>
+                </div>
               </Show>
             </Match>
             <Match when={subTab() === "registers"}>

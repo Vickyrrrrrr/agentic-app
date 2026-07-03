@@ -230,7 +230,7 @@ def glob_tool(pattern: str, workspace_root: str) -> str:
         return f"Error globbing: {e}"
 
 
-def workspace_tool(action: str, workspace_root: str, path: str = ".", pattern: str = "") -> str:
+def workspace_tool(action: str, workspace_root: str, path: str = ".", pattern: str = "", module: str = "") -> str:
     if action == "read":
         return read_file(path, workspace_root)
     elif action == "search":
@@ -241,8 +241,10 @@ def workspace_tool(action: str, workspace_root: str, path: str = ".", pattern: s
         return lint_file_tool(path, workspace_root)
     elif action == "parse_module":
         return parse_module_tool(path, workspace_root)
+    elif action == "schematic_json":
+        return schematic_json_tool(path, workspace_root, module)
     else:
-        return f"Error: unknown action '{action}' for workspace tool. Use read, search, list, lint, or parse_module."
+        return f"Error: unknown action '{action}' for workspace tool. Use read, search, list, lint, parse_module, or schematic_json."
 
 
 def parse_module_tool(path: str, workspace_root: str) -> str:
@@ -329,6 +331,108 @@ def parse_module_tool(path: str, workspace_root: str) -> str:
         "instantiations": instantiations,
         "registers": registers
     })
+
+
+def schematic_json_tool(path: str, workspace_root: str, module: str = "") -> str:
+    """Render a real RTL/gate-level schematic by running Yosys `write_json`.
+
+    Returns a JSON string with either:
+      { "available": true,  "module": "...", "yosys_json": {...}, "cells": n, "ports": n }
+      { "available": false, "reason": "yosys not found on PATH" }
+    Cached by file content hash under <workspace>/.agentic/schematic_cache/.
+    """
+    full = _safe_workspace_path(path, workspace_root)
+    if not full or not os.path.isfile(full):
+        return json.dumps({"available": False, "reason": f"File not found: {path}"})
+
+    yosys_bin = shutil.which("yosys")
+    if not yosys_bin:
+        return json.dumps({"available": False, "reason": "yosys not found on PATH"})
+
+    try:
+        with open(full, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception as e:
+        return json.dumps({"available": False, "reason": str(e)})
+
+    # Auto-detect top module from the file if not provided.
+    if not module:
+        m = re.search(r"module\s+(\w+)\s*[#(]", content)
+        if not m:
+            return json.dumps({"available": False, "reason": "No module declaration found in file"})
+        module = m.group(1)
+
+    cache_dir = os.path.join(workspace_root, ".agentic", "schematic_cache")
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except Exception:
+        pass
+    digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:16]
+    cache_key = f"{module}_{digest}"
+    cache_path = os.path.join(cache_dir, f"{cache_key}.json")
+
+    if os.path.isfile(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as cf:
+                return cf.read()
+        except Exception:
+            pass
+
+    # Build include dirs like lint_file_tool does.
+    inc_dirs = [workspace_root]
+    for sub in ["rtl", "simulation", "verification"]:
+        subdir = os.path.join(workspace_root, sub)
+        if os.path.isdir(subdir):
+            inc_dirs.append(subdir)
+
+    script_parts = [f"read_verilog {' '.join('-I' + d for d in inc_dirs)} {full}"]
+    script_parts.append(f"hierarchy -check -top {module}")
+    script_parts.append("prep -top %s" % module)
+    script_parts.append(f"write_json {cache_path}")
+    yosys_script = "; ".join(script_parts)
+
+    try:
+        proc = subprocess.run(
+            [yosys_bin, "-q", "-p", yosys_script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"available": False, "reason": "yosys timed out (design too large or complex)"})
+    except Exception as e:
+        return json.dumps({"available": False, "reason": f"yosys failed to run: {e}"})
+
+    if proc.returncode != 0 or not os.path.isfile(cache_path):
+        err = (proc.stderr or proc.stdout or "").strip()
+        return json.dumps({"available": False, "reason": "yosys synthesis failed", "log": err[-2000:]})
+
+    try:
+        with open(cache_path, "r", encoding="utf-8") as cf:
+            yosys_json = json.load(cf)
+    except Exception as e:
+        return json.dumps({"available": False, "reason": f"failed to parse yosys json: {e}"})
+
+    modules = yosys_json.get("modules", {}) if isinstance(yosys_json, dict) else {}
+    mod_data = modules.get(module, {})
+    ports = len(mod_data.get("ports", {}))
+    cells = len(mod_data.get("cells", {}))
+
+    result = json.dumps({
+        "available": True,
+        "module": module,
+        "yosys_json": yosys_json,
+        "ports": ports,
+        "cells": cells,
+    })
+
+    try:
+        with open(cache_path, "w", encoding="utf-8") as cf:
+            cf.write(result)
+    except Exception:
+        pass
+    return result
 
 
 def lint_file_tool(path: str, workspace_root: str) -> str:
@@ -805,7 +909,7 @@ def git_clone(url: str, workspace_root: str, target_dir: str | None = None, bran
 
 def dispatch_tool(name: str, args: dict, workspace_root: str, design_name: str = "scratch", on_output=None, cancel_checker=None) -> str:
     if name == "workspace":
-        return workspace_tool(args.get("action", ""), workspace_root, args.get("path", "."), args.get("pattern", ""))
+        return workspace_tool(args.get("action", ""), workspace_root, args.get("path", "."), args.get("pattern", ""), args.get("module", ""))
     elif name == "write":
         path = args.get("path", "")
         result = write_tool_combined(path, workspace_root, design_name, args.get("content", ""), args.get("old_string", ""), args.get("new_string", ""))

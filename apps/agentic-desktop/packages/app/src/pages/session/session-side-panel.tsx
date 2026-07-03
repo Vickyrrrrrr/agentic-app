@@ -14,7 +14,7 @@ import { useDialog } from "@opencode-ai/ui/context/dialog"
 
 import FileTree from "@/components/file-tree"
 import { SessionContextUsage } from "@/components/session-context-usage"
-import { SessionContextTab, SortableTab, FileVisual, PDKCatalogDock, DRCLVSDashboard, SchematicExplorer, SessionWaveformTab } from "@/components/session"
+import { SessionContextTab, SortableTab, FileVisual, PDKCatalogDock, DRCLVSDashboard, SchematicExplorer, SchematicTabContent, SessionWaveformTab } from "@/components/session"
 import { useCommand } from "@/context/command"
 import { useFile, type SelectedLineRange } from "@/context/file"
 import { useLanguage } from "@/context/language"
@@ -419,7 +419,14 @@ export function SessionSidePanel(props: {
                     </Show>
 
                     <Show when={activeFileTab()} keyed>
-                      {(tab) => <FileTabContent tab={tab} />}
+                      {(tab) => (
+                        <Show
+                          when={tab.startsWith("schematic:")}
+                          fallback={<FileTabContent tab={tab} />}
+                        >
+                          <SchematicTabContent tab={tab} />
+                        </Show>
+                      )}
                     </Show>
                   </Tabs>
                   <DragOverlay>

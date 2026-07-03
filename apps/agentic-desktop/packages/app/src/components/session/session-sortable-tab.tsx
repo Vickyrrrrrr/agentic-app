@@ -2,6 +2,7 @@ import { createMemo, Show } from "solid-js"
 import type { JSX } from "solid-js"
 import { createSortable } from "@thisbeyond/solid-dnd"
 import { FileIcon } from "@opencode-ai/ui/file-icon"
+import { Icon } from "@opencode-ai/ui/icon"
 import { IconButton } from "@opencode-ai/ui/icon-button"
 import { TooltipKeybind } from "@opencode-ai/ui/tooltip"
 import { Tabs } from "@opencode-ai/ui/tabs"
@@ -9,6 +10,7 @@ import { getFilename } from "@opencode-ai/core/util/path"
 import { useFile } from "@/context/file"
 import { useLanguage } from "@/context/language"
 import { useCommand } from "@/context/command"
+import { pathFromSchematicTab } from "./schematic-viewer"
 
 export function FileVisual(props: { path: string; active?: boolean }): JSX.Element {
   return (
@@ -33,7 +35,17 @@ export function SortableTab(props: { tab: string; onTabClose: (tab: string) => v
   const command = useCommand()
   const sortable = createSortable(props.tab)
   const path = createMemo(() => file.pathFromTab(props.tab))
+  const schematicPath = createMemo(() => pathFromSchematicTab(props.tab))
   const content = createMemo(() => {
+    const schematic = schematicPath()
+    if (schematic) {
+      return (
+        <div class="flex items-center gap-x-1.5 min-w-0">
+          <Icon name="code-lines" size="small" class="shrink-0 text-icon-base" />
+          <span class="text-14-medium truncate">{getFilename(schematic)}</span>
+        </div>
+      )
+    }
     const value = path()
     if (!value) return
     return <FileVisual path={value} />

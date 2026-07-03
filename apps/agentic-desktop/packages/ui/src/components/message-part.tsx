@@ -411,7 +411,7 @@ export function getToolInfo(
       return {
         icon: "console",
         title: i18n.t("ui.tool.shell"),
-        subtitle: input.description,
+        subtitle: input.description || input.command,
       }
     case "edit":
       return {
@@ -1871,8 +1871,10 @@ ToolRegistry.register({
     const i18n = useI18n()
     const pending = () => props.status === "pending" || props.status === "running"
     const sawPending = pending()
+    const command = createMemo(() => props.input.command ?? props.metadata.command ?? "")
+    const submessage = createMemo(() => props.input.description || command())
     const text = createMemo(() => {
-      const cmd = props.input.command ?? props.metadata.command ?? ""
+      const cmd = command()
       const out = stripAnsi(props.output || props.metadata.output || "").replace(/\r\n?/g, "\n")
       return `$ ${cmd}${out ? "\n\n" + out : ""}`
     })
@@ -1897,8 +1899,8 @@ ToolRegistry.register({
               <span data-slot="basic-tool-tool-title">
                 <TextShimmer text={i18n.t("ui.tool.shell")} active={pending()} />
               </span>
-              <Show when={!pending() && props.input.description}>
-                <ShellSubmessage text={props.input.description} animate={sawPending} />
+              <Show when={!pending() && submessage()}>
+                <ShellSubmessage text={submessage()} animate={sawPending} />
               </Show>
             </div>
           </div>
