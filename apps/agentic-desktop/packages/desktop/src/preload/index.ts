@@ -118,4 +118,16 @@ const api: ElectronAPI = {
   recordFatalRendererError: (error) => ipcRenderer.invoke("record-fatal-renderer-error", error),
 }
 
+// Sync the dynamically-allocated backend URL from the main process to localStorage.
+// The main process may allocate a free port (not 7860) for the bundled backend.
+// Without this, the renderer defaults to 7860 and can't reach the backend.
+const dynamicBackendUrl = process.env.AGENTIC_LOCAL_URL
+if (dynamicBackendUrl && dynamicBackendUrl.replace(/\/+$/, "") !== "http://127.0.0.1:7860") {
+  try {
+    localStorage.setItem("agentic_local_api_base", dynamicBackendUrl.replace(/\/+$/, ""))
+  } catch {
+    // localStorage may not be available in some contexts
+  }
+}
+
 contextBridge.exposeInMainWorld("api", api)
