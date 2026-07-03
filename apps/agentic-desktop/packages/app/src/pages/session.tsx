@@ -1714,9 +1714,6 @@ export default function Page() {
       <SessionHeader />
       <div
         class="flex-1 min-h-0 flex flex-col md:flex-row "
-        classList={{
-          "gap-2 p-2": settings.general.newLayoutDesigns(),
-        }}
       >
         <Show when={!isDesktop() && !!params.id}>
           <Tabs value={store.mobileTab} class="h-auto">
@@ -1749,7 +1746,6 @@ export default function Page() {
             "duration-[240ms] ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[width] motion-reduce:transition-none":
               !size.active() && !ui.reviewSnap,
             "transition-[width]": !isV2NewSessionPage(),
-            "rounded-[10px] shadow-[var(--v2-elevation-raised)]": settings.general.newLayoutDesigns() && !!params.id,
           }}
           style={{
             width: sessionPanelWidth(),
@@ -1757,9 +1753,6 @@ export default function Page() {
         >
           <div
             class="flex-1 min-h-0 overflow-hidden"
-            classList={{
-              "rounded-[10px]": settings.general.newLayoutDesigns(),
-            }}
           >
             <Switch>
               <Match when={params.id && mobileChanges()}>

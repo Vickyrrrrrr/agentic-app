@@ -31,6 +31,15 @@ SYSTEM_MODULES = {
     "pmos", "nmos", "cmos", "tran", "pullup", "pulldown",
 }
 
+# Non-synthesizable constructs in design modules (allowed only in testbenches).
+NON_SYNTH_RE = re.compile(r"(?m)^\s*(initial\b|#[0-9]|\$(?:display|finish|dumpfile|dumpvars|random|fopen|fwrite|fclose|readmem|writemem|stop)\b)")
+
+# Behavioral memory stub markers — comments that admit the memory is a placeholder.
+BEHAVIORAL_STUB_RE = re.compile(
+    r"(?i)behavioral\s+(?:register\s+)?array|for\s+simulat\w+.*(?:reg|mem|memory)|"
+    r"(?:reg|mem|memory).*stub|stub.*(?:reg|mem|memory)|not\s+a\s+real\s+sram|placeholder.*mem"
+)
+
 
 class QualityIssue(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -77,7 +86,7 @@ def evaluate_rtl_quality(path: str, content: str, intent: DesignIntent | None = 
     if not modules:
         issues.append(_issue("missing_module", "RTL file does not contain a Verilog module.", normalized))
     if len(modules) > 1:
-        issues.append(_issue("multiple_modules_in_owner_file", "Owner RTL file should contain one primary module.", normalized, "warning"))
+        issues.append(_issue("multiple_modules_in_file", "Each Verilog file must contain exactly ONE module (filename = module name). Split into separate files.", normalized))
 
     if intent and owner is None:
         issues.append(_issue("unowned_rtl", "RTL file is not owned by the active PROJECT_MANIFEST.", normalized))
@@ -182,6 +191,8 @@ def _policy_issues(content: str, path: str, intent: DesignIntent | None) -> list
     issues.extend(_missing_submodule_issues(content, modules, intent, path))
     issues.extend(_reset_style_issues(content, path))
     issues.extend(_large_inferred_memory_issues(content, intent, path))
+    issues.extend(_non_synthesizable_in_design_issues(content, path))
+    issues.extend(_top_module_logic_issues(content, path))
     return issues
 
 
@@ -243,13 +254,28 @@ def _missing_submodule_issues(content: str, modules: set[str], intent: DesignInt
         module_type, instance_name = match.group(1), match.group(2)
         if module_type in SYSTEM_MODULES or module_type in modules:
             continue
-        if module_type in {"module", "if", "for", "while", "case", "assign", "always"}:
+        if module_type in {
+            "module", "if", "for", "while", "case", "assign", "always", "begin", "end",
+            "endcase", "endmodule", "else", "default", "posedge", "negedge", "integer",
+            "wire", "reg", "logic", "input", "output", "inout", "parameter", "localparam",
+            "generate", "endgenerate", "genvar", "function", "endfunction", "task", "endtask",
+            "wait", "repeat", "forever", "disable", "force", "release", "deassign", "return",
+            "break", "continue", "typedef", "enum", "struct", "union", "package", "endpackage",
+            "import", "export", "class", "endclass", "covergroup", "endgroup", "property",
+            "endproperty", "sequence", "endsequence", "clocking", "endclocking", "modport",
+            "alias", "restrict", "assume", "assert", "cover", "cross", "wildcard",
+        }:
             continue
-        if instance_name in {"begin", "end"}:
+        if instance_name in {"begin", "end", "if", "else", "for", "while", "case", "default"}:
             continue
         if module_type in allowed_external:
             continue
-        severity = "warning" if _looks_like_foundry_cell(module_type) else "error"
+        if _looks_like_foundry_cell(module_type):
+            severity = "warning"
+        elif intent is None:
+            severity = "warning"
+        else:
+            severity = "error"
         issues.append(_issue(
             "missing_submodule_definition",
             f"Instance `{instance_name}` references `{module_type}`, but no local definition or approved macro binding is present.",
@@ -297,18 +323,108 @@ def _reset_style_issues(content: str, path: str) -> list[QualityIssue]:
 
 
 def _large_inferred_memory_issues(content: str, intent: DesignIntent | None, path: str) -> list[QualityIssue]:
+    return _memory_implementation_issues(content, intent, path)
+
+
+def _memory_implementation_issues(content: str, intent: DesignIntent | None, path: str) -> list[QualityIssue]:
+    """Reject behavioral register-array memories in design files.
+
+    In ASIC flows, `reg [W-1:0] mem [0:D-1]` infers D×W flip-flops instead of a
+    single SRAM macro — catastrophic for area/power. Force the agent to query the
+    PDK and instantiate a real macro (or explicitly request one via NEEDS_INPUT).
+    """
     issues: list[QualityIssue] = []
+    if _is_testbench_path(path):
+        return issues
     has_macro_binding = bool(getattr(intent, "capability_bindings", None))
+    if has_macro_binding:
+        return issues
+    behavioral_stub = bool(BEHAVIORAL_STUB_RE.search(content or ""))
     for width_range, name, depth_range in MEMORY_DECL_RE.findall(content or ""):
-        width = _range_width(width_range)
-        depth = _range_width(depth_range)
+        width = _range_width(width_range) if width_range else 1
+        depth = _range_width(depth_range) if depth_range else 1
         bits = width * depth
-        if bits > 8192 and not has_macro_binding:
+        if bits > 1024 or behavioral_stub:
             issues.append(_issue(
-                "large_inferred_memory_without_macro",
-                f"Memory `{name}` infers about {bits} bits of flops/registers; bind to a PDK/compiler macro or justify small-memory inference.",
+                "behavioral_memory_in_design",
+                f"Memory `{name}` ({bits} bits) is a behavioral register array, not a real SRAM macro. "
+                f"For ASIC, query `query_pdk(find_memory, cell_type=\"sram\")` and instantiate a foundry/compiler "
+                f"SRAM macro with synchronous read. If none is available, use NEEDS_INPUT to propose OpenRAM "
+                f"generation. Do NOT use `reg ... mem[...]` for memories > 1024 bits in design modules.",
                 path,
             ))
+            break
+    return issues
+
+
+def _is_testbench_path(path: str) -> bool:
+    lower = str(path or "").lower()
+    wrapped = f"/{lower}"
+    return (
+        any(section in wrapped for section in ("/tb/", "/dv/", "/verification/", "/formal/", "/testbench/", "/sim/"))
+        or lower.startswith("tb_")
+        or "_tb." in lower
+    )
+
+
+def _non_synthesizable_in_design_issues(content: str, path: str) -> list[QualityIssue]:
+    """Reject non-synthesizable constructs (initial, #delay, $system tasks) in design modules."""
+    issues: list[QualityIssue] = []
+    if _is_testbench_path(path):
+        return issues
+    lines = (content or "").splitlines()
+    for index, line in enumerate(lines, start=1):
+        stripped = re.sub(r"//.*$", "", line).strip()
+        if not stripped:
+            continue
+        match = NON_SYNTH_RE.match(line)
+        if not match:
+            continue
+        construct = match.group(1).strip()
+        issues.append(_issue(
+            "non_synthesizable_in_design",
+            f"Non-synthesizable construct `{construct}` (line {index}) in a design module. "
+            f"`initial`, `#delay`, and `$`-system tasks are only allowed in testbenches. "
+            f"For design modules, use synchronous reset and continuous/procedural assignments only.",
+            path,
+        ))
+        break
+    return issues
+
+
+def _top_module_logic_issues(content: str, path: str) -> list[QualityIssue]:
+    """Reject logic (always blocks, non-trivial assigns) in top-level structural modules.
+
+    A top module (chip_top, *_top.v) must be purely structural — instantiations and wiring only.
+    Logic at the top means the hierarchy is wrong; move it into a leaf module.
+    """
+    issues: list[QualityIssue] = []
+    lower_path = str(path or "").lower()
+    is_top = (
+        lower_path.endswith("_top.v")
+        or lower_path.endswith("_top.sv")
+        or "chip_top" in lower_path
+        or "/top/" in f"/{lower_path}"
+    )
+    if not is_top:
+        return issues
+    always_count = len(ALWAYS_RE.findall(content or ""))
+    # Count non-trivial assigns (exclude simple signal renaming: assign a = b;)
+    non_trivial_assigns = 0
+    for match in CONT_ASSIGN_RE.finditer(content or ""):
+        rhs_start = match.end()
+        rhs = (content or "")[rhs_start:rhs_start + 80].strip().rstrip(";")
+        # Trivial if it's just a signal name (renaming/buffering)
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_$]*(\[[^\]]*\])?$", rhs):
+            non_trivial_assigns += 1
+    if always_count > 0 or non_trivial_assigns > 2:
+        issues.append(_issue(
+            "logic_in_top_module",
+            f"Top-level module contains {always_count} always block(s) and {non_trivial_assigns} non-trivial assign(s). "
+            f"The top module must be STRUCTURAL ONLY (instantiations + wiring). Move all logic into leaf modules. "
+            f"Only simple signal renaming assigns are allowed at the top level.",
+            path,
+        ))
     return issues
 
 

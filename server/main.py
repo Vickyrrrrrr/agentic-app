@@ -64,6 +64,14 @@ WS_ROOT = os.environ.get("AGENTIC_WORKSPACE") or os.path.expanduser("~/AgentIC-w
 ensure_workspace(WS_ROOT)
 STATE_DIR = Path(WS_ROOT) / ".agentic"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Build channel baked into the PyInstaller bundle by build-agentic-backend.mjs.
+# In the shipped prod binary this is "prod"; in dev (run.sh) the module is absent -> "dev".
+try:
+    from _build_channel import CHANNEL as _BUILD_CHANNEL
+except Exception:
+    _BUILD_CHANNEL = "dev"
+
 ENTITLEMENT_PATH = STATE_DIR / "entitlement.json"
 AUTH_SESSION_PATH = STATE_DIR / "auth_session.json"
 USAGE_LOG_PATH = STATE_DIR / "usage.jsonl"
@@ -397,7 +405,7 @@ def _authorization_headers(request: Request) -> dict[str, str]:
 
 def resolve_license_status(request: Request) -> dict:
     try:
-        if _env_true("AGENTIC_LICENSE_BYPASS"):
+        if _env_true("AGENTIC_LICENSE_BYPASS") and _BUILD_CHANNEL != "prod":
             return _normalize_entitlement(
                 {"active": True, "plan": "developer", "expires_at": time.time() + 24 * 3600},
                 "developer_bypass",

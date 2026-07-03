@@ -14,6 +14,7 @@
   outline: none;
   padding: 0;
   cursor: default;
+  transition: background-color 150ms ease, background-image 150ms ease, box-shadow 150ms ease, color 150ms ease;
 }
 
 [data-component="icon-button-v2"]:focus {
@@ -71,34 +72,19 @@
 
 /* Contrast */
 [data-component="icon-button-v2"][data-variant="contrast"] {
-  background-image:
-    linear-gradient(180deg, var(--v2-alpha-light-20) 0%, var(--v2-alpha-light-0) 100%),
-    linear-gradient(90deg, var(--v2-background-bg-contrast) 0%, var(--v2-background-bg-contrast) 100%);
+  background-color: var(--v2-background-bg-contrast);
   color: var(--v2-text-text-contrast);
-  text-shadow: 0 0.5px 0.5px rgba(0, 0, 0, 0.3);
   box-shadow: var(--v2-elevation-button-contrast);
 }
 
 [data-component="icon-button-v2"][data-variant="contrast"]:is(:hover, [data-state="hover"]):not(:disabled) {
   background-image:
-    linear-gradient(
-      90deg,
-      var(--v2-overlay-simple-overlay-contrast-hover) 0%,
-      var(--v2-overlay-simple-overlay-contrast-hover) 100%
-    ),
-    linear-gradient(180deg, var(--v2-alpha-light-20) 0%, var(--v2-alpha-light-0) 100%),
-    linear-gradient(90deg, var(--v2-background-bg-contrast) 0%, var(--v2-background-bg-contrast) 100%);
+    linear-gradient(90deg, var(--v2-overlay-simple-overlay-contrast-hover) 0%, var(--v2-overlay-simple-overlay-contrast-hover) 100%);
 }
 
 [data-component="icon-button-v2"][data-variant="contrast"]:is(:active, [data-state="pressed"]):not(:disabled) {
   background-image:
-    linear-gradient(
-      90deg,
-      var(--v2-overlay-simple-overlay-contrast-pressed) 0%,
-      var(--v2-overlay-simple-overlay-contrast-pressed) 100%
-    ),
-    linear-gradient(180deg, var(--v2-alpha-light-20) 0%, var(--v2-alpha-light-0) 100%),
-    linear-gradient(90deg, var(--v2-background-bg-contrast) 0%, var(--v2-background-bg-contrast) 100%);
+    linear-gradient(90deg, var(--v2-overlay-simple-overlay-contrast-pressed) 0%, var(--v2-overlay-simple-overlay-contrast-pressed) 100%);
 }
 
 [data-component="icon-button-v2"][data-variant="contrast"]:is(:disabled, [data-state="disabled"]) {

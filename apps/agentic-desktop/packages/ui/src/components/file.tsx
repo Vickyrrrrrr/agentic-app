@@ -52,7 +52,7 @@ const VIRTUALIZE_LINES = 5_000
 
 const codeMetrics = {
   ...DEFAULT_VIRTUAL_FILE_METRICS,
-  lineHeight: 24,
+  lineHeight: 26,
   fileGap: 0,
 } satisfies Partial<VirtualFileMetrics>
 

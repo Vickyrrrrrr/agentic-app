@@ -230,7 +230,7 @@ export function Titlebar(props: { update?: TitlebarUpdate }) {
     <header
       classList={{
         "shrink-0 relative flex flex-row": true,
-        "h-9 bg-v2-background-bg-deep overflow-visible": useV2Titlebar(),
+        "h-9 bg-v2-background-bg-base overflow-visible border-b border-border-weaker-base": useV2Titlebar(),
         "h-10 bg-background-base overflow-hidden": !useV2Titlebar(),
       }}
       style={{
@@ -773,7 +773,7 @@ function TabNavItem(props: {
   return (
     <div
       ref={props.ref}
-      class="group relative flex h-7 min-w-24 max-w-60 flex-row items-center gap-1.5 overflow-hidden whitespace-nowrap rounded-[6px] bg-[var(--tab-bg)] px-1.5 [--tab-bg:var(--v2-background-bg-deep)] hover:[--tab-bg:var(--v2-background-bg-layer-02)] data-[active='true']:[--tab-bg:var(--v2-background-bg-layer-02)]"
+      class="group relative flex h-7 min-w-24 max-w-60 flex-row items-center gap-1.5 overflow-hidden whitespace-nowrap rounded-md px-1.5 hover:bg-[var(--v2-overlay-simple-overlay-hover)] data-[active='true']:bg-[var(--v2-overlay-simple-overlay-hover)] after:absolute after:bottom-0 after:left-2 after:right-2 after:h-0.5 after:rounded-full after:bg-[var(--v2-background-bg-accent)] after:opacity-0 data-[active='true']:after:opacity-100 after:transition-opacity"
       data-active={props.active}
       onMouseDown={(event) => {
         if (event.button !== 1) return

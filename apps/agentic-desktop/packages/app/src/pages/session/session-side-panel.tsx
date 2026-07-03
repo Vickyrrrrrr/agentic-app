@@ -3,6 +3,7 @@ import { createStore } from "solid-js/store"
 import { createMediaQuery } from "@solid-primitives/media"
 import { Tabs } from "@opencode-ai/ui/tabs"
 import { IconButton } from "@opencode-ai/ui/icon-button"
+import { Icon } from "@opencode-ai/ui/icon"
 import { TooltipKeybind } from "@opencode-ai/ui/tooltip"
 import { ResizeHandle } from "@opencode-ai/ui/resize-handle"
 import { Mark } from "@opencode-ai/ui/logo"
@@ -14,7 +15,7 @@ import { useDialog } from "@opencode-ai/ui/context/dialog"
 
 import FileTree from "@/components/file-tree"
 import { SessionContextUsage } from "@/components/session-context-usage"
-import { SessionContextTab, SortableTab, FileVisual, PDKCatalogDock, DRCLVSDashboard, SchematicExplorer, SchematicTabContent, SessionWaveformTab } from "@/components/session"
+import { SessionContextTab, SortableTab, FileVisual, PDKCatalogDock, DRCLVSDashboard, SchematicExplorer, SchematicTabContent, pathFromSchematicTab, SessionWaveformTab } from "@/components/session"
 import { useCommand } from "@/context/command"
 import { useFile, type SelectedLineRange } from "@/context/file"
 import { useLanguage } from "@/context/language"
@@ -194,6 +195,11 @@ export function SessionSidePanel(props: {
     return file.tab(tab)
   }
 
+  const pathFromTab = (tab: string): string | undefined => {
+    if (tab.startsWith("schematic:")) return pathFromSchematicTab(tab)
+    return file.pathFromTab(tab)
+  }
+
   const openReviewPanel = () => {
     if (!view().reviewPanel.opened()) view().reviewPanel.open()
   }
@@ -209,7 +215,7 @@ export function SessionSidePanel(props: {
 
   const tabState = createSessionTabs({
     tabs,
-    pathFromTab: file.pathFromTab,
+    pathFromTab,
     normalizeTab,
     review: reviewTab,
     hasReview: props.canReview,
@@ -288,17 +294,13 @@ export function SessionSidePanel(props: {
           "pointer-events-none": !open(),
           "transition-[width] duration-[240ms] ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[width] motion-reduce:transition-none":
             !props.size.active() && !props.reviewSnap,
-          "rounded-[10px] shadow-[var(--v2-elevation-raised)] overflow-hidden": settings.general.newLayoutDesigns(),
           "flex-1": reviewOpen(),
         }}
         style={{ width: panelWidth() }}
       >
         <Show when={open()}>
           <div
-            class="size-full flex"
-            classList={{
-              "border-l border-border-weaker-base": !settings.general.newLayoutDesigns(),
-            }}
+            class="size-full flex border-l border-border-weaker-base"
           >
             <div
               aria-hidden={!reviewOpen()}
@@ -462,88 +464,144 @@ export function SessionSidePanel(props: {
                   class="h-full flex flex-col overflow-hidden group/filetree"
                   classList={{ "border-l border-border-weaker-base": reviewOpen() }}
                 >
-                  <Tabs
-                    variant="pill"
-                    value={fileTreeTab()}
-                    onChange={setFileTreeTabValue}
-                    class="h-full"
-                    data-scope="filetree"
-                  >
-                    <Tabs.List>
-                      <Tabs.Trigger value="changes" class="flex-1" classes={{ button: "w-full" }}>
-                        {props.reviewCount()}{" "}
-                        {language.t(
-                          props.reviewCount() === 1 ? "session.review.change.one" : "session.review.change.other",
-                        )}
-                      </Tabs.Trigger>
-                      <Tabs.Trigger value="all" class="flex-1" classes={{ button: "w-full" }}>
-                        {language.t("session.files.all")}
-                      </Tabs.Trigger>
-                      <Tabs.Trigger value="pdk" class="flex-1" classes={{ button: "w-full" }}>
-                        PDK
-                      </Tabs.Trigger>
-                      <Tabs.Trigger value="signoff" class="flex-1" classes={{ button: "w-full" }}>
-                        Signoff
-                      </Tabs.Trigger>
-                      <Tabs.Trigger value="schematic" class="flex-1" classes={{ button: "w-full" }}>
-                        RTL
-                      </Tabs.Trigger>
-                      <Tabs.Trigger value="waves" class="flex-1" classes={{ button: "w-full" }}>
-                        Waves
-                      </Tabs.Trigger>
-                    </Tabs.List>
-                    <Tabs.Content value="changes" class="bg-background-stronger px-3 py-0">
+                  <div class="h-full flex flex-row">
+                    <div class="w-12 shrink-0 flex flex-col items-center gap-1 py-2 border-r border-border-weaker-base bg-background-base">
+                      <button
+                        onClick={() => setFileTreeTabValue("changes")}
+                        title={`${props.reviewCount()} ${language.t(props.reviewCount() === 1 ? "session.review.change.one" : "session.review.change.other")}`}
+                        class="relative w-9 h-9 flex items-center justify-center rounded-md transition-colors"
+                        classList={{
+                          "bg-surface-base text-text-strong": fileTreeTab() === "changes",
+                          "text-text-weaker hover:text-text-base hover:bg-surface-base": fileTreeTab() !== "changes",
+                        }}
+                      >
+                        <Icon name="branch" size="small" />
+                        <Show when={props.reviewCount() > 0}>
+                          <span class="absolute -top-0.5 -right-0.5 min-w-4 h-4 px-1 inline-flex items-center justify-center rounded-full text-10-medium font-mono bg-surface-interactive-base text-text-on-interactive-base">
+                            {props.reviewCount()}
+                          </span>
+                        </Show>
+                      </button>
+                      <button
+                        onClick={() => setFileTreeTabValue("all")}
+                        title={language.t("session.files.all")}
+                        class="w-9 h-9 flex items-center justify-center rounded-md transition-colors"
+                        classList={{
+                          "bg-surface-base text-text-strong": fileTreeTab() === "all",
+                          "text-text-weaker hover:text-text-base hover:bg-surface-base": fileTreeTab() !== "all",
+                        }}
+                      >
+                        <Icon name="file-tree" size="small" />
+                      </button>
+                      <button
+                        onClick={() => setFileTreeTabValue("pdk")}
+                        title="PDK"
+                        class="w-9 h-9 flex items-center justify-center rounded-md transition-colors"
+                        classList={{
+                          "bg-surface-base text-text-strong": fileTreeTab() === "pdk",
+                          "text-text-weaker hover:text-text-base hover:bg-surface-base": fileTreeTab() !== "pdk",
+                        }}
+                      >
+                        <Icon name="providers" size="small" />
+                      </button>
+                      <button
+                        onClick={() => setFileTreeTabValue("signoff")}
+                        title="Signoff"
+                        class="w-9 h-9 flex items-center justify-center rounded-md transition-colors"
+                        classList={{
+                          "bg-surface-base text-text-strong": fileTreeTab() === "signoff",
+                          "text-text-weaker hover:text-text-base hover:bg-surface-base": fileTreeTab() !== "signoff",
+                        }}
+                      >
+                        <Icon name="shield" size="small" />
+                      </button>
+                      <button
+                        onClick={() => setFileTreeTabValue("schematic")}
+                        title="RTL Schematic"
+                        class="w-9 h-9 flex items-center justify-center rounded-md transition-colors"
+                        classList={{
+                          "bg-surface-base text-text-strong": fileTreeTab() === "schematic",
+                          "text-text-weaker hover:text-text-base hover:bg-surface-base": fileTreeTab() !== "schematic",
+                        }}
+                      >
+                        <Icon name="code-lines" size="small" />
+                      </button>
+                      <button
+                        onClick={() => setFileTreeTabValue("waves")}
+                        title="Waves"
+                        class="w-9 h-9 flex items-center justify-center rounded-md transition-colors"
+                        classList={{
+                          "bg-surface-base text-text-strong": fileTreeTab() === "waves",
+                          "text-text-weaker hover:text-text-base hover:bg-surface-base": fileTreeTab() !== "waves",
+                        }}
+                      >
+                        <Icon name="sliders" size="small" />
+                      </button>
+                    </div>
+                    <div class="flex-1 min-w-0 overflow-hidden bg-background-stronger">
                       <Switch>
-                        <Match when={props.hasReview() || !props.diffsReady()}>
-                          <Show
-                            when={props.diffsReady()}
-                            fallback={
-                              <div class="px-2 py-2 text-12-regular text-text-weak">
-                                {language.t("common.loading")}
-                                {language.t("common.loading.ellipsis")}
-                              </div>
-                            }
-                          >
-                            <FileTree
-                              path=""
-                              class="pt-3"
-                              allowed={diffFiles()}
-                              kinds={kinds()}
-                              draggable={false}
-                              active={props.activeDiff}
-                              onFileClick={(node) => props.focusReviewDiff(node.path)}
-                            />
-                          </Show>
+                        <Match when={fileTreeTab() === "changes"}>
+                          <Switch>
+                            <Match when={props.hasReview() || !props.diffsReady()}>
+                              <Show
+                                when={props.diffsReady()}
+                                fallback={
+                                  <div class="px-2 py-2 text-12-regular text-text-weak">
+                                    {language.t("common.loading")}
+                                    {language.t("common.loading.ellipsis")}
+                                  </div>
+                                }
+                              >
+                                <FileTree
+                                  path=""
+                                  class="pt-3 px-3"
+                                  allowed={diffFiles()}
+                                  kinds={kinds()}
+                                  draggable={false}
+                                  active={props.activeDiff}
+                                  onFileClick={(node) => props.focusReviewDiff(node.path)}
+                                />
+                              </Show>
+                            </Match>
+                          </Switch>
+                        </Match>
+                        <Match when={fileTreeTab() === "all"}>
+                          <Switch>
+                            <Match when={nofiles()}>{empty(language.t("session.files.empty"))}</Match>
+                            <Match when={true}>
+                              <FileTree
+                                path=""
+                                class="pt-3 px-3"
+                                modified={diffFiles()}
+                                kinds={kinds()}
+                                onFileClick={(node) => openTab(file.tab(node.path))}
+                              />
+                            </Match>
+                          </Switch>
+                        </Match>
+                        <Match when={fileTreeTab() === "pdk"}>
+                          <div class="h-full contain-strict">
+                            <PDKCatalogDock />
+                          </div>
+                        </Match>
+                        <Match when={fileTreeTab() === "signoff"}>
+                          <div class="h-full contain-strict">
+                            <DRCLVSDashboard />
+                          </div>
+                        </Match>
+                        <Match when={fileTreeTab() === "schematic"}>
+                          <div class="h-full contain-strict overflow-y-auto">
+                            <SchematicExplorer />
+                          </div>
+                        </Match>
+                        <Match when={fileTreeTab() === "waves"}>
+                          <div class="h-full contain-strict">
+                            <WaveformPanel openTab={openTab} file={file} />
+                          </div>
                         </Match>
                       </Switch>
-                    </Tabs.Content>
-                    <Tabs.Content value="all" class="bg-background-stronger px-3 py-0">
-                      <Switch>
-                        <Match when={nofiles()}>{empty(language.t("session.files.empty"))}</Match>
-                        <Match when={true}>
-                          <FileTree
-                            path=""
-                            class="pt-3"
-                            modified={diffFiles()}
-                            kinds={kinds()}
-                            onFileClick={(node) => openTab(file.tab(node.path))}
-                          />
-                        </Match>
-                      </Switch>
-                    </Tabs.Content>
-                    <Tabs.Content value="pdk" class="bg-background-stronger h-full contain-strict">
-                      <PDKCatalogDock />
-                    </Tabs.Content>
-                    <Tabs.Content value="signoff" class="bg-background-stronger h-full contain-strict">
-                      <DRCLVSDashboard />
-                    </Tabs.Content>
-                    <Tabs.Content value="schematic" class="bg-background-stronger h-full contain-strict overflow-y-auto">
-                      <SchematicExplorer />
-                    </Tabs.Content>
-                    <Tabs.Content value="waves" class="bg-background-stronger h-full contain-strict">
-                      <WaveformPanel openTab={openTab} file={file} />
-                    </Tabs.Content>
-                  </Tabs>
+                    </div>
+                  </div>
                 </div>
                 <Show when={fileOpen()}>
                   <div onPointerDown={() => props.size.start()}>

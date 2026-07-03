@@ -109,6 +109,13 @@ def _candidate_sta_files(root: Path) -> list[Path]:
         "openroad/**/*timing*.rpt",
         "runs/**/*sta*.rpt",
         "runs/**/*timing*.rpt",
+        # Deep recursive patterns for nested OpenROAD-flow / OpenLane layouts
+        # (e.g. <design>/openlane*/runs/<run>/reports/signoff/.../*sta*.rpt)
+        "**/runs/**/reports/**/*sta*.rpt",
+        "**/runs/**/reports/signoff/**/*.rpt",
+        "**/signoff/**/*sta*.rpt",
+        "**/openlane*/**/*sta*.rpt",
+        "**/openlane*/**/reports/signoff/**/*.rpt",
     )
     seen: set[Path] = set()
     files: list[Path] = []

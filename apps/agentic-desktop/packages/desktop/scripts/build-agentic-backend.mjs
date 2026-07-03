@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process"
-import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs"
+import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -64,14 +64,24 @@ function pickPython() {
 
 const [python, prefixArgs] = pickPython()
 
+// Bake the production channel into the bundled backend so the AGENTIC_LICENSE_BYPASS
+// dev backdoor is compiled out of shipped binaries. Removed after build so dev (run.sh)
+// stays on the "dev" channel and the bypass stays available to the developer.
+const buildChannelPath = join(serverDir, "_build_channel.py")
+writeFileSync(buildChannelPath, 'CHANNEL = "prod"\n', "utf8")
+
 rmSync(venvDir, { recursive: true, force: true })
 run(python, [...prefixArgs, "-m", "venv", venvDir])
 run(venvPython, ["-m", "ensurepip", "--upgrade"])
 run(venvPython, ["-m", "pip", "install", "--upgrade", "pip"])
 run(venvPython, ["-m", "pip", "install", "-r", join(serverDir, "requirements-build.txt")])
-run(venvPython, ["-m", "PyInstaller", "--clean", "--noconfirm", "agentic_backend.spec"], {
-  cwd: serverDir,
-})
+try {
+  run(venvPython, ["-m", "PyInstaller", "--clean", "--noconfirm", "agentic_backend.spec"], {
+    cwd: serverDir,
+  })
+} finally {
+  rmSync(buildChannelPath, { force: true })
+}
 
 if (!existsSync(pyinstallerOutput)) {
   console.error(`Expected backend executable was not created: ${pyinstallerOutput}`)

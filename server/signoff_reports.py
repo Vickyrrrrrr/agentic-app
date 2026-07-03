@@ -116,6 +116,15 @@ def _candidate_files(root: Path, kind: str) -> list[Path]:
             "openroad/**/*drc*.rpt",
             "runs/**/*drc*.rpt",
             "runs/**/*drc*.log",
+            "runs/**/drt.drc",
+            "runs/**/*antenna*.rpt",
+            # Deep recursive patterns for nested OpenROAD-flow / OpenLane layouts
+            "**/runs/**/reports/**/*drc*",
+            "**/runs/**/reports/**/*antenna*",
+            "**/runs/**/drt.drc",
+            "**/runs/**/results/signoff/**/*drc*",
+            "**/signoff/**/*drc*",
+            "**/openlane*/**/*drc*",
         )
     else:
         patterns = (
@@ -126,6 +135,13 @@ def _candidate_files(root: Path, kind: str) -> list[Path]:
             "reports/**/*netgen*.log",
             "runs/**/*lvs*.rpt",
             "runs/**/*lvs*.log",
+            "runs/**/*xor*.rpt",
+            # Deep recursive patterns for nested OpenROAD-flow / OpenLane layouts
+            "**/runs/**/reports/**/*lvs*",
+            "**/runs/**/reports/**/*xor*",
+            "**/runs/**/results/signoff/**/*lvs*",
+            "**/signoff/**/*lvs*",
+            "**/openlane*/**/*lvs*",
         )
     seen: set[Path] = set()
     files: list[Path] = []

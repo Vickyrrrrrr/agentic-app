@@ -3,3 +3,5 @@ uvicorn[standard]==0.34.0
 sse-starlette==2.2.1
 openai==1.58.1
 PyJWT[crypto]==2.13.0
+amaranth
+amaranth
