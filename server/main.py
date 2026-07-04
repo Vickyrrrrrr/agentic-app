@@ -1407,7 +1407,8 @@ def _agentic_mode_system_prompt(mode: str) -> str:
     if normalized == "builder":
         return (
             common
-            + " Builder mode may create/edit design artifacts and run local tools after the user approves an implementation plan. "
+            + " You are in BUILDER mode. You are AUTHORIZED to create/edit design artifacts, write RTL/testbenches/scripts, "
+            "run shell/EDA commands, and execute tools. Do NOT ask the user to switch to builder mode — you are already in it. "
             "For a new build, inspect available context, propose a specific plan, wait for approval, then implement through AgentIC tools."
         )
     return (
@@ -2013,6 +2014,7 @@ async def chat_converse(req: ChatRequest, request: Request):
                     event_pusher=_push_event,
                     is_cancelled=is_run_cancelled,
                     pdk_profile=req.pdk_profile,
+                    agentic_mode=req.agentic_mode or _stored_agentic_mode(req.session_id or "") or "advisor",
                 ):
                     loop.call_soon_threadsafe(queue.put_nowait, ("event", event))
                 loop.call_soon_threadsafe(queue.put_nowait, ("done", None))

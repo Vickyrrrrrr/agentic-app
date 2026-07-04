@@ -1347,7 +1347,8 @@ def _progress_for_bash_output(line: str) -> dict:
 
 def converse_stream(messages: list[dict], api_key: str, workspace_root: str, design_name: str,
                     base_url: str | None = None, model: str = "gpt-4o",
-                    event_pusher=None, is_cancelled=None, pdk_profile: str = ""):
+                    event_pusher=None, is_cancelled=None, pdk_profile: str = "",
+                    agentic_mode: str = "advisor"):
     """Yields event dicts for SSE streaming. One call = one agent interaction.
     event_pusher: optional callable(event_dict) to push events mid-dispatch (for bash streaming)."""
 
@@ -1407,6 +1408,9 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str, des
 
     is_design_task = workflow_decision.requires_design_kernel or (intent == "DESIGN_TASK")
     execution_authorized = workflow_decision.execution_authorized or _execution_is_authorized(user_text, messages)
+    # Builder mode = execution is authorized. Don't ask the user to "switch to builder mode" — they already did.
+    if agentic_mode == "builder":
+        execution_authorized = True
     is_planning_round = workflow_decision.planning_round if is_design_task else False
     needs_spec_clarification = not execution_authorized and _needs_spec_clarification(user_text)
 
