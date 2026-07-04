@@ -20,6 +20,7 @@ import { getSessionHandoff } from "@/pages/session/handoff"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { createSessionTabs } from "@/pages/session/helpers"
 import { SessionWaveformTab } from "@/components/session"
+import { LogDiagnosisTab } from "@/components/session/log-diagnosis-tab"
 import { Markdown } from "@opencode-ai/ui/markdown"
 
 function FileCommentMenu(props: {
@@ -445,11 +446,14 @@ export function FileTabContent(props: { tab: string }) {
   return (
     <Tabs.Content value={props.tab} class="mt-3 relative h-full">
       <ScrollView class="h-full" viewportRef={scrollSync.setViewport} onScroll={scrollSync.handleScroll as any}>
-        <Switch>
-          <Match when={state()?.loaded && (path()?.endsWith(".vcd") || path()?.endsWith(".fst"))}>
-            <SessionWaveformTab path={path()!} />
-          </Match>
-          <Match when={state()?.loaded && (path()?.endsWith(".md") || path()?.endsWith(".markdown"))}>
+          <Switch>
+            <Match when={state()?.loaded && (path()?.endsWith(".vcd") || path()?.endsWith(".fst"))}>
+              <SessionWaveformTab path={path()!} />
+            </Match>
+            <Match when={state()?.loaded && (path()?.endsWith(".log") || path()?.endsWith(".rpt"))}>
+              <LogDiagnosisTab path={path()!} />
+            </Match>
+            <Match when={state()?.loaded && (path()?.endsWith(".md") || path()?.endsWith(".markdown"))}>
             <div class="px-6 py-4 select-text">
               <Markdown text={contents()} cacheKey={cacheKey()} />
             </div>

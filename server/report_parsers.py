@@ -19,6 +19,8 @@ def parse_report(*, stage: str, tool: str, text: str) -> dict[str, Any]:
         return parse_drc_report(content, tool=tool_norm or "generic")
     if stage_norm in {"lvs"} or tool_norm in {"netgen"}:
         return parse_lvs_report(content, tool=tool_norm or "generic")
+    if stage_norm in {"synthesis", "synth"} or tool_norm in {"yosys", "abc", "genus", "dc_shell"}:
+        return parse_synthesis_log(content, tool=tool_norm or "generic")
     return _base("generic", tool_norm or "generic", {"line_count": len(content.splitlines())}, [])
 
 
@@ -140,6 +142,71 @@ def parse_drc_report(text: str, *, tool: str = "generic") -> dict[str, Any]:
     if total is None:
         total = sum(int(item.get("count") or 1) for item in diagnostics)
     return _base("drc", tool, {"violation_count": total}, diagnostics)
+
+
+def parse_synthesis_log(text: str, *, tool: str = "generic") -> dict[str, Any]:
+    """Parse Yosys/OpenROAD/Design Compiler synthesis logs into structured summary."""
+    diagnostics: list[dict[str, Any]] = []
+    metrics: dict[str, Any] = {}
+
+    # Cell count (Yosys: "Number of cells: 1247", OpenROAD: "Core cells: 1247")
+    cell_count = _first_int(text, (
+        r"(?im)^\s*(?:Number of cells|Core cells|Total cells)\s*:?\s*(\d+)",
+        r"(?im)^\s*cells\s*:?\s*(\d+)",
+    ))
+    if cell_count is not None:
+        metrics["cell_count"] = cell_count
+
+    # Wires/nets count
+    wire_count = _first_int(text, (r"(?im)^\s*(?:Number of wires|Net count)\s*:?\s*(\d+)",))
+    if wire_count is not None:
+        metrics["wire_count"] = wire_count
+
+    # Scan for warnings and errors
+    for line_no, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Yosys: "Warning: message", "Error: message"
+        # OpenROAD: "[WARNING] message", "[ERROR] message"
+        # Verilator: "%Warning: message", "%Error: message"
+        warn_match = re.match(r"^(?:Warning:|\[WARNING\]|%Warning)\s*(.*)", stripped, re.I)
+        err_match = re.match(r"^(?:Error:|\[ERROR\]|%Error|ERROR:)\s*(.*)", stripped, re.I)
+
+        if err_match:
+            msg = err_match.group(1).strip()
+            file_ref = _extract_file_ref(stripped)
+            diagnostics.append({
+                "severity": "error",
+                "message": msg[:200],
+                "file": file_ref.get("file"),
+                "line": file_ref.get("line"),
+                "log_line": line_no,
+            })
+        elif warn_match:
+            msg = warn_match.group(1).strip()
+            file_ref = _extract_file_ref(stripped)
+            diagnostics.append({
+                "severity": "warning",
+                "message": msg[:200],
+                "file": file_ref.get("file"),
+                "line": file_ref.get("line"),
+                "log_line": line_no,
+            })
+
+    # Cap at 100 diagnostics to avoid explosion
+    diagnostics = diagnostics[:100]
+
+    return _base("synthesis", tool, metrics, diagnostics)
+
+
+def _extract_file_ref(text: str) -> dict[str, Any]:
+    """Extract file:line reference from a log line."""
+    match = re.search(r"([^\s:]+\.[vsvh]+):(\d+)", text)
+    if match:
+        return {"file": match.group(1), "line": int(match.group(2))}
+    return {}
 
 
 def parse_lvs_report(text: str, *, tool: str = "generic") -> dict[str, Any]:

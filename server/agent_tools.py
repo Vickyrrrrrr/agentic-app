@@ -240,11 +240,13 @@ def workspace_tool(action: str, workspace_root: str, path: str = ".", pattern: s
     elif action == "lint":
         return lint_file_tool(path, workspace_root)
     elif action == "parse_module":
-        return parse_module_tool(path, workspace_root)
+        return parse_module_tool(path, workspace_root, module)
+    elif action == "parse_log":
+        return parse_log_tool(path, workspace_root)
     elif action == "schematic_json":
         return schematic_json_tool(path, workspace_root, module)
     else:
-        return f"Error: unknown action '{action}' for workspace tool. Use read, search, list, lint, parse_module, or schematic_json."
+        return f"Error: unknown action '{action}' for workspace tool. Use read, search, list, lint, parse_module, parse_log, or schematic_json."
 
 
 def parse_module_tool(path: str, workspace_root: str) -> str:
@@ -333,10 +335,108 @@ def parse_module_tool(path: str, workspace_root: str) -> str:
     })
 
 
+def parse_log_tool(path: str, workspace_root: str) -> str:
+    """Parse any EDA log file into a structured diagnosis.
+
+    Auto-detects the tool (Yosys, OpenROAD, Magic, KLayout, iverilog, verilator, etc.)
+    and extracts: pass/fail, cell count, warnings, errors, file references.
+    Returns a JSON string with the structured diagnosis.
+    """
+    full = _safe_workspace_path(path, workspace_root)
+    if not full or not os.path.isfile(full):
+        return json.dumps({"error": f"Log file not found: {path}"})
+
+    try:
+        with open(full, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read(2 * 1024 * 1024)  # Read up to 2MB
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    # Detect tool from the first ~50 lines
+    head = "\n".join(text.splitlines()[:50])
+    tool = "generic"
+    if "yosys" in head.lower():
+        tool = "yosys"
+    elif "openroad" in head.lower():
+        tool = "openroad"
+    elif "magic" in head.lower():
+        tool = "magic"
+    elif "klayout" in head.lower():
+        tool = "klayout"
+    elif "iverilog" in head.lower():
+        tool = "iverilog"
+    elif "verilator" in head.lower():
+        tool = "verilator"
+    elif "opensta" in head.lower() or "sta " in head.lower():
+        tool = "opensta"
+    elif "netgen" in head.lower():
+        tool = "netgen"
+
+    # Detect stage from file path or content
+    stage = "synthesis"
+    lower_path = path.lower()
+    if "sta" in lower_path or "timing" in lower_path:
+        stage = "sta"
+    elif "drc" in lower_path:
+        stage = "drc"
+    elif "lvs" in lower_path:
+        stage = "lvs"
+    elif "lint" in lower_path:
+        stage = "lint"
+    elif "synth" in lower_path:
+        stage = "synthesis"
+    elif "sim" in lower_path or "test" in lower_path:
+        stage = "lint"  # Treat sim logs as lint-like
+
+    from report_parsers import parse_report
+    parsed = parse_report(stage=stage, tool=tool, text=text)
+
+    result = {
+        "path": path,
+        "tool": tool,
+        "stage": stage,
+        "line_count": len(text.splitlines()),
+        "summary": parsed.get("summary", {}),
+        "metrics": parsed.get("metrics", {}),
+        "diagnostics": parsed.get("diagnostics", [])[:50],
+        "compact_for_agent": _compact_log_summary(path, tool, stage, parsed),
+    }
+    return json.dumps(result, indent=2)
+
+
+def _compact_log_summary(path: str, tool: str, stage: str, parsed: dict) -> str:
+    """Generate a 2-3 line compact summary suitable for sending to the LLM."""
+    summary = parsed.get("summary", {})
+    metrics = parsed.get("metrics", {})
+    error_count = summary.get("error_count", 0)
+    warn_count = summary.get("warning_count", 0)
+    cell_count = metrics.get("cell_count")
+    wns = metrics.get("wns_ns")
+
+    parts = [f"{tool} {stage}: {path}"]
+    if cell_count is not None:
+        parts.append(f"{cell_count} cells")
+    if wns is not None:
+        parts.append(f"WNS={wns}ns")
+    parts.append(f"{warn_count} warnings, {error_count} errors")
+    if error_count == 0 and warn_count == 0:
+        parts.append("CLEAN")
+    elif error_count > 0:
+        parts.append("FAILED")
+    else:
+        parts.append("PASSED with warnings")
+
+    # Add first 3 error/warning messages
+    diags = parsed.get("diagnostics", [])[:3]
+    for d in diags:
+        msg = d.get("message", "")[:100]
+        parts.append(f"  - [{d.get('severity', '?')}] {msg}")
+
+    return "\n".join(parts)
+
+
 def schematic_json_tool(path: str, workspace_root: str, module: str = "") -> str:
     """Render a real RTL/gate-level schematic by running Yosys `write_json`.
-
-    Returns a JSON string with either:
       { "available": true,  "module": "...", "yosys_json": {...}, "cells": n, "ports": n }
       { "available": false, "reason": "yosys not found on PATH" }
     Cached by file content hash under <workspace>/.agentic/schematic_cache/.
