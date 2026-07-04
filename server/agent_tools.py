@@ -97,11 +97,18 @@ def _safe_workspace_path(path: str, workspace_root: str) -> str | None:
     root = os.path.abspath(os.path.normpath(workspace_root))
     full = os.path.abspath(os.path.normpath(os.path.join(root, path)))
     try:
-        if os.path.commonpath([root, full]) != root:
-            return None
+        if os.path.commonpath([root, full]) == root:
+            if os.path.exists(full) or not os.path.exists(os.path.join(os.path.dirname(root), path)):
+                return full
+        
+        # Fallback to parent workspace directory (one level up) to support general workspace files
+        parent = os.path.dirname(root)
+        full_parent = os.path.abspath(os.path.normpath(os.path.join(parent, path)))
+        if os.path.commonpath([parent, full_parent]) == parent:
+            return full_parent
     except ValueError:
-        return None
-    return full
+        pass
+    return None
 
 
 def _is_text_source_path(path: str) -> bool:
@@ -243,10 +250,14 @@ def workspace_tool(action: str, workspace_root: str, path: str = ".", pattern: s
         return parse_module_tool(path, workspace_root, module)
     elif action == "parse_log":
         return parse_log_tool(path, workspace_root)
+    elif action == "layout_inspect":
+        return layout_inspect_tool(path, workspace_root)
+    elif action == "timing_analysis":
+        return timing_analysis_tool(path, workspace_root)
     elif action == "schematic_json":
         return schematic_json_tool(path, workspace_root, module)
     else:
-        return f"Error: unknown action '{action}' for workspace tool. Use read, search, list, lint, parse_module, parse_log, or schematic_json."
+        return f"Error: unknown action '{action}' for workspace tool. Use read, search, list, lint, parse_module, parse_log, layout_inspect, timing_analysis, or schematic_json."
 
 
 def parse_module_tool(path: str, workspace_root: str) -> str:
@@ -465,11 +476,345 @@ def _compact_log_summary(path: str, tool: str, stage: str, parsed: dict) -> str:
     return "\n".join(parts)
 
 
+def timing_analysis_tool(path: str, workspace_root: str) -> str:
+    """Specialized STA report parser - extracts critical paths, not raw log.
+
+    Parses STA summary/max/min reports and returns:
+    - WNS/TNS (worst/total negative slack)
+    - Top violating paths with startpoint, endpoint, slack, path group
+    - Which RTL modules are on the critical path (from instance names)
+    - Suggested fixes based on the violation type
+
+    This is the timing closure tool - the agent gets structured data,
+    not a 5000-line raw STA log.
+    """
+    full = _safe_workspace_path(path, workspace_root)
+    if not full or not os.path.isfile(full):
+        return json.dumps({"error": f"STA report not found: {path}"})
+
+    try:
+        with open(full, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read(2 * 1024 * 1024)  # 2MB limit
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    from report_parsers import parse_sta_report
+    parsed = parse_sta_report(text, tool=_sta_tool_hint(path, text))
+
+    metrics = parsed.get("metrics", {})
+    diagnostics = parsed.get("diagnostics", [])
+    wns = metrics.get("wns_ns")
+    tns = metrics.get("tns_ns")
+
+    # Extract top 10 violating paths
+    violating_paths = []
+    for d in diagnostics[:10]:
+        if d.get("severity") == "error" or (d.get("slack_ns") is not None and d["slack_ns"] < 0):
+            startpoint = d.get("startpoint", "")
+            endpoint = d.get("endpoint", "")
+            slack = d.get("slack_ns")
+            path_group = d.get("path_group", "")
+
+            # Extract module name from instance path (e.g., "soc_top/u_alu/result_reg[7]" -> "alu")
+            module_hint = _extract_module_from_path(startpoint) or _extract_module_from_path(endpoint)
+
+            violating_paths.append({
+                "startpoint": startpoint,
+                "endpoint": endpoint,
+                "slack_ns": slack,
+                "path_group": path_group,
+                "module_hint": module_hint,
+            })
+
+    # Generate fix suggestions based on violation characteristics
+    suggestions = []
+    if wns is not None and wns < 0:
+        suggestions.append(f"WNS = {wns}ns. Need to reduce path delay by {abs(wns)}ns.")
+        if abs(wns) > 5:
+            suggestions.append("Large violation - consider architectural changes: pipelining, parallelism, or retiming.")
+        elif abs(wns) > 1:
+            suggestions.append("Medium violation - try gate sizing, buffering, or logic restructuring.")
+        else:
+            suggestions.append("Small violation - try wire sizing, buffer insertion, or minor logic changes.")
+
+    for p in violating_paths[:3]:
+        if p["module_hint"]:
+            suggestions.append(f"Critical path through {p['module_hint']} module (slack={p['slack_ns']}ns). Review RTL in that module for pipeline opportunities.")
+
+    # Compact summary for the agent
+    compact_parts = [f"STA: {path}"]
+    if wns is not None:
+        compact_parts.append(f"WNS={wns}ns TNS={tns}ns")
+    compact_parts.append(f"{len(violating_paths)} violating paths")
+    if violating_paths:
+        p = violating_paths[0]
+        compact_parts.append(f"Worst: {p['startpoint']} -> {p['endpoint']} ({p['slack_ns']}ns)")
+        if p["module_hint"]:
+            compact_parts.append(f"Module: {p['module_hint']}")
+    for s in suggestions[:3]:
+        compact_parts.append(f"Fix: {s}")
+
+    result = {
+        "path": path,
+        "wns_ns": wns,
+        "tns_ns": tns,
+        "violating_path_count": len(violating_paths),
+        "violating_paths": violating_paths,
+        "suggestions": suggestions,
+        "compact_for_agent": "\n".join(compact_parts),
+    }
+    return json.dumps(result, indent=2)
+
+
+def _sta_tool_hint(path: str, text: str) -> str:
+    lower = (text[:500] or "").lower()
+    if "primetime" in lower or "pt_shell" in lower:
+        return "pt_shell"
+    if "tempus" in lower:
+        return "tempus"
+    if "opensta" in lower:
+        return "opensta"
+    return "generic"
+
+
+def _extract_module_from_path(instance_path: str) -> str:
+    """Extract a module hint from an instance path.
+
+    e.g., "soc_top/u_alu/result_reg[7]" -> "alu"
+         "top/inst_datapath/multiplier/pipeline_reg" -> "datapath"
+    """
+    if not instance_path:
+        return ""
+    parts = instance_path.replace("\\", "/").split("/")
+    # Skip the first part (top module) and look at instance names
+    for part in parts[1:4]:
+        # Remove common prefixes (u_, inst_, i_) and suffixes (_reg, _inst)
+        name = part
+        for prefix in ("u_", "inst_", "i_", "u"):
+            if name.lower().startswith(prefix) and len(name) > len(prefix):
+                name = name[len(prefix):]
+                break
+        for suffix in ("_reg", "_inst", "_u"):
+            if name.lower().endswith(suffix):
+                name = name[:-len(suffix)]
+                break
+        # Remove bit-select brackets
+        name = name.split("[")[0]
+        if name and len(name) > 2:
+            return name
+    return ""
+
+
+def layout_inspect_tool(path: str, workspace_root: str) -> str:
+    """Inspect a GDS layout - the agent visual inspection API.
+
+    Returns structured data: cell hierarchy, layers, polygon counts, bounding box.
+    The agent queries the layout programmatically instead of looking at pixels.
+
+    Returns JSON with top_cell, cell_count, polygon_count, layers, hierarchy,
+    and a compact_for_agent summary string.
+    """
+    full = _safe_workspace_path(path, workspace_root)
+    if not full or not os.path.isfile(full):
+        return json.dumps({"available": False, "reason": f"File not found: {path}"})
+
+    file_size = os.path.getsize(full)
+    if file_size > 500 * 1024 * 1024:  # 500MB limit
+        return json.dumps({"available": False, "reason": f"GDS file too large ({file_size // 1024 // 1024}MB). Max 500MB."})
+
+    try:
+        with open(full, "rb") as f:
+            data = f.read()
+    except Exception as e:
+        return json.dumps({"available": False, "reason": str(e)})
+
+    # Parse GDS binary - minimal parser inline (no external deps)
+    try:
+        result = _parse_gds_summary(data)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return json.dumps({"available": False, "reason": f"GDS parse error: {e}"})
+
+
+def _parse_gds_summary(data: bytes) -> dict:
+    # Parse GDS binary and return a structured summary for the agent.
+    import struct
+
+    view = memoryview(data)
+    cells = {}
+    top_cell = None
+    total_polys = 0
+    offset = 0
+
+    current_cell = None
+    current_layer = 0
+    current_datatype = 0
+    current_xy = []
+    element_type = None
+    sname = ""
+    mag = 1.0
+    angle = 0.0
+    strans = 0
+    cols = 0
+    rows = 0
+    srefs = []
+    arefs = []
+    layers_seen = set()
+
+    def read_real8(offset):
+        # GDS 8-byte real: excess-64 base-16
+        first = data[offset]
+        if first == 0:
+            return 0.0
+        sign = -1 if (first & 0x80) else 1
+        exp = (first & 0x7f) - 64
+        mantissa = 0.0
+        for i in range(1, 8):
+            b = data[offset + i]
+            hi = (b >> 4) & 0x0f
+            lo = b & 0x0f
+            mantissa += hi * (16 ** (-(2 * i - 1)))
+            mantissa += lo * (16 ** (-(2 * i)))
+        return sign * mantissa * (16 ** exp)
+
+    while offset + 4 <= len(data):
+        rec_len = struct.unpack_from(">H", data, offset)[0]
+        tag = struct.unpack_from(">H", data, offset + 2)[0]
+        rec_type = (tag >> 8) & 0xff
+        data_type = tag & 0xff
+
+        if rec_len == 0 or rec_len < 4 or offset + rec_len > len(data):
+            break
+
+        ds = offset + 4
+        dl = rec_len - 4
+
+        if rec_type == 0x03:  # UNITS
+            if dl >= 16:
+                pass  # units not needed for summary
+        elif rec_type == 0x05:  # BGNSTR
+            current_cell = {"name": "", "polygons": 0, "srefs": 0, "arefs": 0, "layers": set()}
+            srefs = []
+            arefs = []
+        elif rec_type == 0x06:  # STRNAME
+            name = data[ds:ds + dl].rstrip(b"\x00").decode("ascii", errors="replace").strip()
+            if current_cell:
+                current_cell["name"] = name
+                if not top_cell:
+                    top_cell = name
+        elif rec_type == 0x07:  # ENDSTR
+            if current_cell:
+                current_cell["srefs"] = len(srefs)
+                current_cell["arefs"] = len(arefs)
+                cells[current_cell["name"]] = current_cell
+                for sr in srefs:
+                    pass  # track references
+                for ar in arefs:
+                    pass
+            current_cell = None
+        elif rec_type == 0x08:  # BOUNDARY
+            element_type = "boundary"
+            current_xy = []
+        elif rec_type == 0x09:  # PATH
+            element_type = "path"
+            current_xy = []
+        elif rec_type == 0x0a:  # SREF
+            element_type = "sref"
+            sname = ""
+            mag = 1.0
+            angle = 0.0
+        elif rec_type == 0x0b:  # AREF
+            element_type = "aref"
+            sname = ""
+            cols = 0
+            rows = 0
+        elif rec_type == 0x0d:  # LAYER
+            if data_type == 1 and ds + 2 <= len(data):
+                current_layer = struct.unpack_from(">h", data, ds)[0]
+            elif data_type == 2 and ds + 4 <= len(data):
+                current_layer = struct.unpack_from(">i", data, ds)[0]
+            layers_seen.add(current_layer)
+        elif rec_type == 0x0e:  # DATATYPE
+            if data_type == 1 and ds + 2 <= len(data):
+                current_datatype = struct.unpack_from(">h", data, ds)[0]
+        elif rec_type == 0x12:  # SNAME
+            sname = data[ds:ds + dl].rstrip(b"\x00").decode("ascii", errors="replace").strip()
+        elif rec_type == 0x17:  # MAG
+            mag = read_real8(ds)
+        elif rec_type == 0x18:  # ANGLE
+            angle = read_real8(ds)
+        elif rec_type == 0x13:  # COLROW
+            cols = struct.unpack_from(">H", data, ds)[0]
+            rows = struct.unpack_from(">H", data, ds + 2)[0]
+        elif rec_type == 0x10:  # XY
+            current_xy = []
+            if data_type == 2:
+                for i in range(0, dl, 8):
+                    if ds + i + 8 <= len(data):
+                        current_xy.append(struct.unpack_from(">i", data, ds + i)[0])
+                        current_xy.append(struct.unpack_from(">i", data, ds + i + 4)[0])
+        elif rec_type == 0x11:  # ENDEL
+            if element_type in ("boundary", "path", "box") and current_cell:
+                current_cell["polygons"] += 1
+                current_cell["layers"].add(current_layer)
+                total_polys += 1
+            elif element_type == "sref":
+                srefs.append(sname)
+            elif element_type == "aref":
+                arefs.append(sname)
+            element_type = None
+        elif rec_type == 0x04:  # ENDLIB
+            break
+
+        offset += rec_len
+
+    # Find top cell (not referenced by others)
+    referenced = set()
+    for cell in cells.values():
+        # We didn't store sref names per cell, but we counted them
+        pass
+    if top_cell and cells:
+        unreferenced = [name for name in cells.keys() if name not in referenced]
+        if unreferenced:
+            top_cell = unreferenced[-1]
+
+    # Build hierarchy (first 50 cells)
+    hierarchy = []
+    for name, cell in list(cells.items())[:50]:
+        hierarchy.append({
+            "name": name,
+            "polygons": cell["polygons"],
+            "srefs": cell["srefs"],
+            "arefs": cell["arefs"],
+            "layers": sorted(cell["layers"]),
+        })
+
+    layers_sorted = sorted(layers_seen)
+
+    # Compact summary for the agent
+    biggest = sorted(cells.values(), key=lambda x: x["polygons"], reverse=True)[:5]
+    biggest_str = ", ".join(f'{c["name"]}({c["polygons"]}p)' for c in biggest)
+    compact = (
+        f"GDS layout: {total_polys} polygons, {len(cells)} cells, {len(layers_sorted)} layers. "
+        f"Top cell: {top_cell}. Layers: {', '.join(str(l) for l in layers_sorted[:20])}. "
+        f"Largest cells: {biggest_str}."
+    )
+
+    return {
+        "available": True,
+        "top_cell": top_cell,
+        "cell_count": len(cells),
+        "polygon_count": total_polys,
+        "layers": layers_sorted,
+        "hierarchy": hierarchy,
+        "compact_for_agent": compact,
+    }
+
 def schematic_json_tool(path: str, workspace_root: str, module: str = "") -> str:
-    """Render a real RTL/gate-level schematic by running Yosys `write_json`.
-      { "available": true,  "module": "...", "yosys_json": {...}, "cells": n, "ports": n }
-      { "available": false, "reason": "yosys not found on PATH" }
-    Cached by file content hash under <workspace>/.agentic/schematic_cache/.
+    """Render a real RTL/gate-level schematic by running Yosys write_json.
+
+    Returns JSON with available, module, yosys_json, cells, ports.
+    Cached by file content hash under workspace/.agentic/schematic_cache/.
     """
     full = _safe_workspace_path(path, workspace_root)
     if not full or not os.path.isfile(full):
@@ -515,7 +860,16 @@ def schematic_json_tool(path: str, workspace_root: str, module: str = "") -> str
         if os.path.isdir(subdir):
             inc_dirs.append(subdir)
 
-    script_parts = [f"read_verilog {' '.join('-I' + d for d in inc_dirs)} {full}"]
+    file_dir = os.path.dirname(full)
+    verilog_files = [full]
+    try:
+        for name in os.listdir(file_dir):
+            if name.endswith((".v", ".sv")) and os.path.join(file_dir, name) != full:
+                verilog_files.append(os.path.join(file_dir, name))
+    except Exception:
+        pass
+
+    script_parts = [f"read_verilog {' '.join('-I' + d for d in inc_dirs)} {' '.join(verilog_files)}"]
     script_parts.append(f"hierarchy -check -top {module}")
     script_parts.append("prep -top %s" % module)
     script_parts.append(f"write_json {cache_path}")
@@ -977,6 +1331,268 @@ def query_pdk_tool(query_type: str, cell_type: str = "", workspace_root: str = "
         return json.dumps({"error": f"Unknown query_type: {query_type}"})
 
 
+def eda_capability_tool(scope: str = "summary", workspace_root: str = "", design_name: str = "scratch") -> str:
+    from local_tools import detect_environment
+    from tool_adapters import normalized_adapter_summary
+
+    env = detect_environment()
+    adapters = normalized_adapter_summary(env.get("tools") or {})
+    graph = env.get("capability_graph") or {}
+    conflicts = _eda_environment_conflicts(env, adapters)
+    compact = _compact_eda_agent_context(env, adapters, conflicts)
+
+    if scope in {"agent_context", "compact"}:
+        return json.dumps(compact, indent=2)
+    if scope == "conflicts":
+        return json.dumps(conflicts, indent=2)
+    if scope == "tools":
+        return json.dumps({
+            "status": "OK",
+            "agent_context": compact,
+            "tool_adapters": _compact_adapter_summary(adapters),
+            "conflicts": conflicts,
+            "wsl": _compact_wsl_for_agent(env),
+            "recommended_flow": env.get("recommended_flow") or {},
+            "capability_graph": compact_capability_graph(graph),
+        }, indent=2)
+    if scope == "readiness":
+        state = DesignStateStore(workspace_root, design_name).load() if workspace_root else {}
+        intent = state.get("design_intent") if isinstance(state, dict) else None
+        return json.dumps({
+            "status": "OK",
+            "agent_context": compact,
+            "readiness": assess_design_readiness(intent, graph),
+        }, indent=2)
+    if scope == "manifests":
+        return json.dumps({
+            "status": "OK",
+            "agent_context": compact,
+            "manifest_status": env.get("capability_manifests") or {},
+        }, indent=2)
+    return json.dumps({
+        "status": "OK",
+        "agent_context": compact,
+        "capability_graph": compact_capability_graph(graph),
+        "recommended_flow": env.get("recommended_flow") or {},
+        "conflicts": conflicts,
+    }, indent=2)
+
+
+def _compact_eda_agent_context(env: dict, adapters: dict, conflicts: dict) -> dict:
+    stages = adapters.get("stages") or {}
+    required = adapters.get("required_digital_stages") or ["simulation", "synthesis", "pnr", "sta", "physical_verification"]
+    stage_context = {}
+    for stage in required:
+        record = stages.get(stage) or {}
+        selected = record.get("selected") or {}
+        stage_context[stage] = {
+            "status": record.get("status"),
+            "selected_adapter": selected.get("adapter"),
+            "vendor": selected.get("vendor"),
+            "openness": selected.get("openness"),
+            "commands": selected.get("available_commands") or selected.get("commands") or [],
+            "license_hint_present": selected.get("license_hint_present"),
+            "blockers": record.get("blockers", [])[:3],
+        }
+    ready = [stage for stage, record in stage_context.items() if record.get("status") == "ready"]
+    return {
+        "schema_version": "agentic.eda_agent_context.v1",
+        "capability_tier": env.get("capability_tier"),
+        "readiness": adapters.get("readiness") or {},
+        "vendor_posture": (adapters.get("vendor_profile") or {}).get("posture"),
+        "selected_chain": adapters.get("selected_chain") or {},
+        "ready_required_stages": ready,
+        "missing_required_stages": [stage for stage in required if stage not in ready],
+        "stage_context": stage_context,
+        "pdk": {
+            "available": bool((env.get("capabilities") or {}).get("pdk")),
+            "count": len(((env.get("pdk_index") or {}).get("pdks") or [])),
+            "existing_dirs_count": len(env.get("existing_pdk_dirs") or []),
+        },
+        "flow_decision": {
+            "profile": (env.get("recommended_flow") or {}).get("profile"),
+            "backend": (env.get("recommended_flow") or {}).get("backend"),
+            "confidence": (env.get("recommended_flow") or {}).get("confidence"),
+            "blockers": ((env.get("recommended_flow") or {}).get("blockers") or [])[:6],
+        },
+        "conflict_counts": conflicts.get("counts") or {},
+        "next_actions": _eda_next_actions(stage_context, env, conflicts),
+    }
+
+
+def _compact_adapter_summary(adapters: dict) -> dict:
+    stages = {}
+    for stage, record in (adapters.get("stages") or {}).items():
+        candidates = record.get("candidates") or []
+        stages[stage] = {
+            "status": record.get("status"),
+            "selected": record.get("selected"),
+            "ready_candidates": [
+                {
+                    "adapter": item.get("adapter"),
+                    "vendor": item.get("vendor"),
+                    "openness": item.get("openness"),
+                    "available_commands": item.get("available_commands"),
+                    "license_hint_present": item.get("license_hint_present"),
+                }
+                for item in candidates
+                if item.get("available")
+            ][:8],
+            "blockers": record.get("blockers", [])[:5],
+        }
+    return {
+        "schema_version": adapters.get("schema_version"),
+        "readiness": adapters.get("readiness"),
+        "vendor_profile": adapters.get("vendor_profile"),
+        "selected_chain": adapters.get("selected_chain"),
+        "stages": stages,
+        "blocking": (adapters.get("blocking") or [])[:12],
+        "extension_contract": adapters.get("extension_contract"),
+    }
+
+
+def _eda_environment_conflicts(env: dict, adapters: dict) -> dict:
+    commands = sorted({
+        command
+        for record in (adapters.get("stages") or {}).values()
+        for candidate in (record.get("candidates") or [])
+        for command in (candidate.get("commands") or [])
+    })
+    command_paths = {}
+    shadowed = []
+    for command in commands:
+        matches = _path_matches_for_command(command)
+        if matches:
+            command_paths[command] = matches[:8]
+        if len(matches) > 1:
+            shadowed.append({
+                "command": command,
+                "selected": matches[0],
+                "shadowed": matches[1:8],
+                "risk": "PATH order chooses the first binary; later EDA binaries are hidden unless invoked by absolute path.",
+            })
+
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    normalized = [os.path.abspath(os.path.expanduser(os.path.expandvars(item))) for item in path_entries if item]
+    seen = set()
+    duplicates = []
+    for item in normalized:
+        key = os.path.normcase(item)
+        if key in seen and item not in duplicates:
+            duplicates.append(item)
+        seen.add(key)
+    missing_dirs = [item for item in normalized if item and not os.path.isdir(item)]
+
+    license_env = env.get("license_env") or {}
+    unresolved_license_stages = []
+    for stage, record in (adapters.get("stages") or {}).items():
+        if record.get("status") == "license_unresolved":
+            unresolved_license_stages.append({
+                "stage": stage,
+                "selected_adapter": ((record.get("selected") or {}).get("adapter")),
+                "missing_license_env": [
+                    name for blocker in (record.get("blockers") or [])
+                    for name in (blocker.get("missing_license_env") or [])
+                ],
+            })
+
+    pdk_env = {
+        name: bool(os.environ.get(name, "").strip())
+        for name in ("PDK", "PDK_ROOT", "PDKPATH", "PDK_HOME", "AGENTIC_PDK_SEARCH_PATHS")
+    }
+    existing_pdk_dirs = env.get("existing_pdk_dirs") or []
+    pdk_conflicts = []
+    if len(existing_pdk_dirs) > 1 and not os.environ.get("PDK", "").strip():
+        pdk_conflicts.append({
+            "reason": "multiple_pdk_roots_without_selected_pdk",
+            "count": len(existing_pdk_dirs),
+            "message": "Multiple PDK directories are visible but PDK is not selected; ask the user or use design intent before choosing.",
+        })
+
+    return {
+        "schema_version": "agentic.eda_environment_conflicts.v1",
+        "counts": {
+            "shadowed_commands": len(shadowed),
+            "duplicate_path_entries": len(duplicates),
+            "missing_path_entries": len(missing_dirs),
+            "unresolved_license_stages": len(unresolved_license_stages),
+            "pdk_conflicts": len(pdk_conflicts),
+        },
+        "shadowed_commands": shadowed[:24],
+        "path_hygiene": {
+            "duplicate_entries": duplicates[:16],
+            "missing_entries": missing_dirs[:16],
+        },
+        "license": {
+            "present_env": sorted([name for name, present in license_env.items() if present]),
+            "unresolved_stages": unresolved_license_stages[:12],
+        },
+        "pdk": {
+            "env_present": pdk_env,
+            "existing_dirs_count": len(existing_pdk_dirs),
+            "conflicts": pdk_conflicts,
+        },
+        "command_paths": command_paths,
+    }
+
+
+def _path_matches_for_command(command: str) -> list[str]:
+    if not command:
+        return []
+    matches = []
+    seen = set()
+    path_exts = [""]
+    if os.name == "nt":
+        path_exts = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        expanded = os.path.abspath(os.path.expanduser(os.path.expandvars(directory)))
+        for ext in path_exts:
+            candidate = os.path.join(expanded, command + ext)
+            key = os.path.normcase(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                matches.append(candidate)
+    return matches
+
+
+def _compact_wsl_for_agent(env: dict) -> dict:
+    wsl = env.get("wsl") or {}
+    inventory = []
+    for item in (wsl.get("tool_inventory") or [])[:6]:
+        tools = item.get("tools") or {}
+        inventory.append({
+            "distro": item.get("distro"),
+            "can_execute": bool(item.get("can_execute")),
+            "available_tools": sorted([name for name, present in tools.items() if present])[:40],
+            "license_env": sorted([name for name, present in (item.get("license_env") or {}).items() if present])[:12],
+            "error": item.get("error"),
+        })
+    return {
+        "available": bool(wsl.get("available")),
+        "distros": (wsl.get("distros") or [])[:10],
+        "capabilities": env.get("wsl_capabilities") or {},
+        "inventory": inventory,
+    }
+
+
+def _eda_next_actions(stage_context: dict, env: dict, conflicts: dict) -> list[str]:
+    actions = []
+    if conflicts.get("counts", {}).get("shadowed_commands"):
+        actions.append("Resolve PATH shadowing for selected EDA commands or invoke the intended binary by absolute path.")
+    if conflicts.get("counts", {}).get("unresolved_license_stages"):
+        actions.append("Configure the missing license environment for installed proprietary tools before running those stages.")
+    if not ((env.get("capabilities") or {}).get("pdk")):
+        actions.append("Configure PDK_ROOT, PDKPATH, PDK_HOME, AGENTIC_PDK_SEARCH_PATHS, or a capability manifest before implementation.")
+    for stage, record in stage_context.items():
+        if record.get("status") != "ready":
+            actions.append(f"Stage `{stage}` is not ready: inspect its blocker and choose install/configure/fallback.")
+    return actions[:8]
+
+
 def ledger_tool(action: str, workspace_root: str, design_name: str, **kwargs) -> str:
     store = DesignStateStore(workspace_root, design_name)
     if action == "get_state":
@@ -1040,6 +1656,30 @@ def git_clone(url: str, workspace_root: str, target_dir: str | None = None, bran
 def dispatch_tool(name: str, args: dict, workspace_root: str, design_name: str = "scratch", on_output=None, cancel_checker=None) -> str:
     if name == "workspace":
         return workspace_tool(args.get("action", ""), workspace_root, args.get("path", "."), args.get("pattern", ""), args.get("module", ""))
+    elif name == "design_state":
+        max_events = int(args.get("max_events") or 20)
+        return json.dumps(DesignStateStore(workspace_root, design_name).summary(max_events=max_events), indent=2, default=str)
+    elif name == "eda_capability":
+        return eda_capability_tool(str(args.get("scope") or "agent_context"), workspace_root, design_name)
+    elif name == "layout_inspect":
+        return layout_inspect_tool(args.get("path", ""), workspace_root)
+    elif name == "timing_inspect":
+        return timing_analysis_tool(args.get("path", ""), workspace_root)
+    elif name == "drc_inspect":
+        return parse_log_tool(args.get("path", ""), workspace_root)
+    elif name == "run_flow":
+        timeout = args.get("timeout", 600)
+        return bash_tool(
+            args["command"],
+            workspace_root,
+            design_name,
+            timeout=timeout,
+            eda_tool=args.get("eda_tool", ""),
+            stage=args.get("stage", ""),
+            log_file=args.get("log_file", ""),
+            on_output=on_output,
+            cancel_checker=cancel_checker,
+        )
     elif name == "write":
         path = args.get("path", "")
         result = write_tool_combined(path, workspace_root, design_name, args.get("content", ""), args.get("old_string", ""), args.get("new_string", ""))

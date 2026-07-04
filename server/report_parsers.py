@@ -133,12 +133,37 @@ def parse_drc_report(text: str, *, tool: str = "generic") -> dict[str, Any]:
             current_rule = line[:120]
             continue
         if current_rule and re.search(r"(?i)\b(box|rect|polygon|at|um|micron|violation)\b", line):
-            diagnostics.append({
-                "severity": "error",
-                "rule": current_rule,
-                "message": line[:200],
-                "log_line": line_no,
-            })
+            # Check for coordinates line, e.g. [12.34um, 5.67um] to [12.56um, 5.89um]
+            coord_match = re.search(
+                r"\[\s*([\d.-]+)(?:um)?[,\s]+([\d.-]+)(?:um)?\s*\]\s*(?:to|-|\s)\s*\[\s*([\d.-]+)(?:um)?[,\s]+([\d.-]+)(?:um)?\s*\]",
+                line
+            )
+            bbox = None
+            if coord_match:
+                try:
+                    x0 = float(coord_match.group(1))
+                    y0 = float(coord_match.group(2))
+                    x1 = float(coord_match.group(3))
+                    y1 = float(coord_match.group(4))
+                    bbox = [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
+                except Exception:
+                    pass
+
+            # Update last diagnostic if it doesn't have a bbox yet, otherwise add new one
+            if bbox and diagnostics and diagnostics[-1]["rule"] == current_rule and "bbox" not in diagnostics[-1]:
+                diagnostics[-1]["bbox"] = bbox
+                diagnostics[-1]["message"] = f"{diagnostics[-1]['message']} at {line[:100]}"
+            else:
+                diag: dict[str, Any] = {
+                    "severity": "error",
+                    "rule": current_rule,
+                    "message": line[:200],
+                    "log_line": line_no,
+                }
+                if bbox:
+                    diag["bbox"] = bbox
+                diagnostics.append(diag)
+            continue
     if total is None:
         total = sum(int(item.get("count") or 1) for item in diagnostics)
     return _base("drc", tool, {"violation_count": total}, diagnostics)
@@ -220,6 +245,8 @@ def _extract_file_ref(text: str) -> dict[str, Any]:
 def parse_lvs_report(text: str, *, tool: str = "generic") -> dict[str, Any]:
     lowered = text.lower()
     matched = bool(re.search(r"(?i)\b(netlists\s+match|circuits\s+match|lvs\s+clean)\b", text))
+    if not matched and ("total errors = 0" in lowered or ("unmatched nets = 0" in lowered and "unmatched devices = 0" in lowered and "unmatched pins = 0" in lowered)):
+        matched = True
     mismatched = bool(re.search(r"(?i)\b(netlists\s+do\s+not\s+match|mismatch|different|incorrect|failed)\b", text))
     diagnostics: list[dict[str, Any]] = []
     for line_no, line in enumerate(text.splitlines(), 1):

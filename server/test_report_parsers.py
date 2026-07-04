@@ -46,6 +46,8 @@ slack (VIOLATED) -0.05
             """
 Total DRC errors found: 3
 metal1 spacing: 2 violations
+  - metal1 spacing (metal1.2): 2 violations
+    [10.5um, 20.0um] to [11.5um, 21.0um]
 poly width: 1 violation
 """,
             tool="magic",
@@ -54,6 +56,7 @@ poly width: 1 violation
         self.assertEqual(report["metrics"]["violation_count"], 3)
         self.assertEqual(report["summary"]["error_count"], 2)
         self.assertEqual(report["diagnostics"][0]["rule"], "metal1 spacing")
+        self.assertEqual(report["diagnostics"][0]["bbox"], [10.5, 20.0, 11.5, 21.0])
 
     def test_lvs_report_detects_mismatch(self):
         report = parse_lvs_report(

@@ -118,7 +118,12 @@ def _candidate_files(root: Path, kind: str) -> list[Path]:
             "runs/**/*drc*.log",
             "runs/**/drt.drc",
             "runs/**/*antenna*.rpt",
-            # Deep recursive patterns for nested OpenROAD-flow / OpenLane layouts
+            # Deep recursive patterns for nested layouts / reports
+            "**/reports/**/*drc*",
+            "**/reports/**/*klayout*.rpt",
+            "**/reports/**/*magic*.drc",
+            "**/reports/**/*xor*.rpt",
+            "**/reports/**/*xor*.xml",
             "**/runs/**/reports/**/*drc*",
             "**/runs/**/reports/**/*antenna*",
             "**/runs/**/drt.drc",
@@ -136,7 +141,9 @@ def _candidate_files(root: Path, kind: str) -> list[Path]:
             "runs/**/*lvs*.rpt",
             "runs/**/*lvs*.log",
             "runs/**/*xor*.rpt",
-            # Deep recursive patterns for nested OpenROAD-flow / OpenLane layouts
+            # Deep recursive patterns for nested layouts / reports
+            "**/reports/**/*lvs*",
+            "**/reports/**/*netgen*.log",
             "**/runs/**/reports/**/*lvs*",
             "**/runs/**/reports/**/*xor*",
             "**/runs/**/results/signoff/**/*lvs*",

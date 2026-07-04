@@ -110,7 +110,7 @@ export function LogDiagnosisTab(props: { path: string }) {
             </div>
 
             {/* Metrics */}
-            <Show when={cellCount() !== null || Object.keys(d().metrics).length > 0}>
+            <Show when={cellCount() !== null || Object.keys(d().metrics ?? {}).length > 0}>
               <div class="flex flex-wrap gap-3">
                 <Show when={cellCount() !== null}>
                   <div class="px-3 py-2 rounded-md bg-surface-base border border-border-weaker-base">
@@ -118,20 +118,20 @@ export function LogDiagnosisTab(props: { path: string }) {
                     <div class="text-14-medium text-text-strong font-mono">{cellCount()?.toLocaleString()}</div>
                   </div>
                 </Show>
-                <Show when={(d().metrics as any).wire_count}>
+                <Show when={((d().metrics ?? {}) as any).wire_count}>
                   <div class="px-3 py-2 rounded-md bg-surface-base border border-border-weaker-base">
                     <div class="text-10-regular text-text-weaker uppercase tracking-wider">Wires</div>
-                    <div class="text-14-medium text-text-strong font-mono">{(d().metrics as any).wire_count?.toLocaleString()}</div>
+                    <div class="text-14-medium text-text-strong font-mono">{((d().metrics ?? {}) as any).wire_count?.toLocaleString()}</div>
                   </div>
                 </Show>
-                <Show when={(d().metrics as any).wns_ns !== undefined}>
+                <Show when={((d().metrics ?? {}) as any).wns_ns !== undefined}>
                   <div class="px-3 py-2 rounded-md bg-surface-base border border-border-weaker-base">
                     <div class="text-10-regular text-text-weaker uppercase tracking-wider">WNS</div>
                     <div class="text-14-medium font-mono" classList={{
-                      "text-red-500": (d().metrics as any).wns_ns < 0,
-                      "text-green-500": (d().metrics as any).wns_ns >= 0,
+                      "text-red-500": ((d().metrics ?? {}) as any).wns_ns < 0,
+                      "text-green-500": ((d().metrics ?? {}) as any).wns_ns >= 0,
                     }}>
-                      {(d().metrics as any).wns_ns}ns
+                      {((d().metrics ?? {}) as any).wns_ns}ns
                     </div>
                   </div>
                 </Show>
@@ -153,10 +153,10 @@ export function LogDiagnosisTab(props: { path: string }) {
             </Show>
 
             {/* Diagnostics list */}
-            <Show when={d().diagnostics.length > 0}>
+            <Show when={(d().diagnostics ?? []).length > 0}>
               <div class="space-y-1.5">
-                <div class="text-11-medium text-text-weaker uppercase tracking-wider pt-2">Diagnostics ({d().diagnostics.length})</div>
-                <For each={d().diagnostics}>
+                <div class="text-11-medium text-text-weaker uppercase tracking-wider pt-2">Diagnostics ({(d().diagnostics ?? []).length})</div>
+                <For each={d().diagnostics ?? []}>
                   {(diag) => (
                     <div
                       class="flex items-start gap-2.5 px-3 py-2 rounded-md border text-12-regular"
@@ -191,7 +191,7 @@ export function LogDiagnosisTab(props: { path: string }) {
             </Show>
 
             {/* Clean state */}
-            <Show when={d().diagnostics.length === 0 && status() === "clean"}>
+            <Show when={(d().diagnostics ?? []).length === 0 && status() === "clean"}>
               <div class="flex items-center gap-2 px-3 py-4 rounded-md bg-green-500/5 border border-green-500/20">
                 <Icon name="check" class="text-green-500" />
                 <span class="text-12-medium text-text-strong">No issues found. Log is clean.</span>

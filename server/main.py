@@ -1894,6 +1894,39 @@ async def get_workspace_artifact(request: Request, file_name: str):
     return content
 
 
+@app.get("/opencode/binary-file")
+async def get_binary_file(request: Request, directory: str = "", path: str = ""):
+    """Serve a binary file (GDS, OAS, etc.) from the workspace as a streaming response."""
+    license_status = resolve_license_status(request)
+    if not license_status.get("active"):
+        raise HTTPException(402, license_status.get("reason") or "Active license required")
+    root = _safe_workspace_root(directory or WS_ROOT)
+    # Resolve path safely (inline — _safe_workspace_path is in agent_tools.py)
+    import os as _os
+    full = _os.path.abspath(_os.path.normpath(_os.path.join(root, path))) if path else None
+    try:
+        if full and _os.path.commonpath([root, full]) != root:
+            full = None
+    except ValueError:
+        full = None
+    if not full or not _os.path.isfile(full):
+        raise HTTPException(404, f"File not found: {path}")
+    file_size = _os.path.getsize(full)
+    from starlette.responses import StreamingResponse
+    def iter_file():
+        with open(full, "rb") as f:
+            while chunk := f.read(1024 * 1024):
+                yield chunk
+    return StreamingResponse(
+        iter_file(),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{_os.path.basename(full)}"',
+            "Content-Length": str(file_size),
+        },
+    )
+
+
 @app.get("/build/artifacts/{design_name}/{file_name:path}")
 async def get_artifact(request: Request, design_name: str, file_name: str):
     license_status = resolve_license_status(request)

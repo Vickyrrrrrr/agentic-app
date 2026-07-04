@@ -31,8 +31,8 @@ from vlsi_capability_graph import assess_design_readiness
 
 TOOL_DEFS = [
     {"type": "function", "function": {
-        "name": "workspace", "description": "Read file content, search for patterns (grep), or list files (glob) in the workspace.",
-        "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["read", "search", "list"]}, "path": {"type": "string", "default": "."}, "pattern": {"type": "string", "default": ""}}, "required": ["action"]}}},
+        "name": "workspace", "description": "Workspace operations: read files, search (grep), list files (glob), lint RTL, parse Verilog modules, parse EDA logs (synthesis/STA/DRC/LVS from any tool — OSS or proprietary), inspect GDS layouts (cell hierarchy, polygon count, layers), analyze STA timing reports (critical paths, WNS/TNS, fix suggestions), and generate Yosys schematics. Use action='parse_log' for EDA log diagnosis, action='layout_inspect' for GDS inspection, action='timing_analysis' for STA timing closure, action='schematic_json' for interactive schematics, action='parse_module' for port/interface extraction, action='lint' for RTL linting.",
+        "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["read", "search", "list", "lint", "parse_module", "parse_log", "layout_inspect", "timing_analysis", "schematic_json"]}, "path": {"type": "string", "default": "."}, "pattern": {"type": "string", "default": ""}, "module": {"type": "string", "default": ""}}, "required": ["action"]}}},
     {"type": "function", "function": {
         "name": "write", "description": "Create new files or surgically edit existing files.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string", "default": ""}, "old_string": {"type": "string", "default": ""}, "new_string": {"type": "string", "default": ""}}, "required": ["path"]}}},
@@ -86,6 +86,7 @@ Use them as needed to design, build, and debug chips inside the local workspace.
   3. Ensure every sequential register declared in the design is explicitly initialized to a reset value in the `if (!rst_n)` or reset branch of its synchronizer block. Never leave registers uninitialized during reset.
   4. Do not include `#delays` or `initial` blocks for logic initialization in design modules. Initial blocks should only be used in testbenches.
   5. When modifying design logic, always trace the latency (in clock cycles) of all parallel pipelines (e.g. arithmetic, DSP, memory, or checks) and verify that they are perfectly aligned. Add matching delay register chains to slower paths to prevent cycle offsets.
+  6. Do not create custom wrappers, stubs, or adapter modules for SRAMs or memories. Always query the PDK using `query_pdk` to locate actual, pre-existing PDK SRAM cells or IP blocks, and instantiate those directly in your design.
 - RTL VERIFY-BEFORE-DONE RULE (NON-NEGOTIABLE): Textual self-review is NOT verification — you cannot catch real syntax/width/connectivity errors by reading the code. After EVERY `write` or edit of a `.v`/`.sv`/`.vh`/`.svh` file (design OR testbench), you MUST, in the same turn, actually run a compiler via `bash` before doing anything else:
   1. Probe once per session which linter is available: `command -v verilator iverilog vlog xmvlog vlogan` and remember the result. Use whichever is found first — OSS (verilator, iverilog) or proprietary (vlog, xmvlog, vlogan) are all acceptable.
   2. Lint the file you just wrote. Use the first available compiler: `verilator --lint-only -Wall` (OSS, best signal), `iverilog -g2012 -t null` (OSS), `vlogan -sverilog` (Synopsys), or `xmvlog -sv` (Cadence). For testbenches, compile-check with the same tool plus the design under test.
@@ -118,7 +119,28 @@ Use them as needed to design, build, and debug chips inside the local workspace.
   5. BLACK-BOX SYNTHESIS: The SRAM macro is a black box during synthesis (defined by its `.lib`). The synthesizer must NOT try to infer flip-flops for it. Include the macro's `.lib` in the synthesis file list.
   6. SYNCHRONOUS READ: Real SRAMs have 1-cycle registered read latency. Model this in the wrapper — a combinational `assign dout = mem[addr]` does NOT match real SRAM timing and will break the systolic array pipeline.
 - SIGNOFF AWARENESS RULE (simulation passing is NOT chip completion — a chip is done only when signoff is clean):
-  1. After simulation passes, you are at ~30% done. The remaining 70% is synthesis → STA → PnR → DRC/LVS → antenna → final STA.
+  1. After simulation passes, you are at ~30% done. The remaining 70% is synthesis -> STA -> PnR -> DRC/LVS -> antenna -> final STA.
+  2. SYNTHESIS: Run the available synthesizer (Yosys/DC/Genus) with SDC + Liberty + filelist. Check area/timing report.
+  3. STA: Run the available STA tool (OpenSTA/PrimeTime/Tempus) with netlist + SDC + SPEF. Every path must have non-negative slack.
+  4. PHYSICAL DESIGN: Run the available PnR tool (OpenROAD/Innovus/ICC2) — floorplan, placement, CTS, routing, extraction.
+  5. DRC: Run the available DRC tool (Magic/KLayout/Calibre) — zero violations.
+  6. LVS: Run the available LVS tool (Netgen/Calibre) — layout must match schematic.
+  7. ANTENNA: Check antenna violations.
+  8. ONLY when DRC=0, LVS=clean, STA>=0 (all corners), antenna=clean may you call report() and declare done.
+- VISUAL LAYOUT INSPECTION RULE (the agent's eyes on the physical design):
+  1. After PnR produces a GDS, call workspace(path, action="layout_inspect") to inspect it programmatically.
+  2. The tool returns: top cell name, cell count, polygon count, layer list, cell hierarchy with polygon counts per cell.
+  3. Use this to verify the layout: "Does the top cell have reasonable polygon count? Are all expected layers present? Are there unexpected cells?"
+  4. The user sees the layout in the GDS viewer tab (pan/zoom/layer toggle). The agent gets structured data, the user gets visual.
+  5. When DRC/STA reports have coordinates, tell the user to look at the GDS viewer — the violations are at specific (x, y) locations.
+  6. This is the visual agent: you inspect via structured queries, the user inspects via the visual viewer. You both see the same design.
+- TIMING CLOSURE RULE (use specialized parsers, not brute force):
+  1. When STA reports show timing violations, call workspace(path, action="timing_analysis") on the STA report file.
+  2. The tool parses the STA log in Python (not the LLM) and returns: WNS, TNS, top 10 violating paths with startpoint/endpoint/slack/module hint, and suggested fixes.
+  3. NEVER read raw STA logs into the LLM context — they can be thousands of lines. Always use the timing_analysis tool.
+  4. Use the module_hint to identify which RTL module is on the critical path, then read that module's RTL and propose targeted fixes (pipelining, gate sizing, logic restructuring).
+  5. After proposing a fix, apply it via write, re-run synthesis + STA, and call timing_analysis again to verify the slack improved.
+  6. This is the timing closure loop: parse -> diagnose -> fix -> re-run -> verify. Do not brute-force — use the structured data.
   2. SYNTHESIS: Run Yosys (or Design Compiler/Genus) with the SDC + Liberty + filelist. The netlist must synthesize with zero errors. Check the area/timing report — if area exceeds the budget or timing has negative slack, fix the RTL (pipeline, retime, restructure) and re-synth.
   3. STA: Run OpenSTA (or PrimeTime/Tempus) with the synthesized netlist + SDC + SPEF. Every path must have NON-NEGATIVE slack at the worst corner. Negative slack = the chip won't meet frequency. Fix by pipelining, gate sizing, or logic restructuring.
   4. PHYSICAL DESIGN: Run OpenROAD (or Innovus/ICC2) — floorplan → placement → CTS → routing → extraction.
@@ -1623,7 +1645,7 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str, des
         "- Do not assume open-source flows are preferred. Use detected licensed proprietary stacks first when they satisfy the user's PDK and deliverables.\n"
         "- If proprietary tools are detected but licensing or PDK scripts are missing, ask the user to configure them; then offer open-source fallback installation only with approval.\n"
         "- Use environment_summary only as a readiness summary; query exact PDK, standard-cell, corner, routing-layer, deck, memory, pad, and tool facts with query_pdk before relying on them.\n"
-        "- Never invent macro names; bind SRAM/ROM/pad/stdcell requirements only through query_pdk/find_memory/readiness/tool_adapters evidence or ask for user configuration/compiler output.\n"
+        "- Never invent macro names; bind SRAM/ROM/pad/stdcell requirements only through query_pdk/find_memory/readiness/tool_adapters evidence or ask for user configuration/compiler output. Do not create custom wrapper modules or adapter stubs for SRAMs; always query the PDK using query_pdk(find_memory) to locate actual, pre-existing PDK SRAM cells and instantiate them directly in the design.\n"
         "- If query_pdk(readiness) reports blocked gates, stop the affected implementation stage and explain the missing PDK/tool/IP evidence instead of faking progress.\n"
         "- Prefer structured configs for OpenLane 2 (JSON/YAML) when available; use legacy flow.tcl only for OpenLane 1 repository flows.\n"
         "- For ORFS, generate/modify config.mk and invoke make from the detected ORFS flow root or with DESIGN_CONFIG.\n"
