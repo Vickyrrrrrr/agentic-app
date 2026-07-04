@@ -193,7 +193,8 @@ function convertMermaidBlocks(root: HTMLDivElement) {
 let mermaidPromise: Promise<any> | null = null
 function loadMermaid() {
   if (!mermaidPromise) {
-    mermaidPromise = import("https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs").then((m) => {
+    // @ts-expect-error — mermaid is loaded from CDN at runtime, not a local module
+    mermaidPromise = import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs").then((m) => {
       m.default.initialize({ startOnLoad: false, theme: "dark", securityLevel: "loose" })
       return m.default
     })
