@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process"
+import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { get as httpGet } from "node:http"
 import { createServer } from "node:net"
@@ -63,13 +63,12 @@ export async function startAgenticBackend() {
     )
   }
 
-  const command = resolveBackendCommand()
+  const env = backendEnvironment()
+  const command = resolveBackendCommand(env)
   if (!command) {
     writeLog("agentic-backend", "AgentIC backend runtime is unavailable", {}, "warn")
     return
   }
-
-  const env = backendEnvironment()
   writeLog("agentic-backend", "starting AgentIC backend runtime", {
     command: command.executable,
     args: command.args,
@@ -111,7 +110,7 @@ export function stopAgenticBackend() {
   }
 }
 
-function resolveBackendCommand():
+function resolveBackendCommand(env?: NodeJS.ProcessEnv):
   | {
       executable: string
       args: string[]
@@ -119,11 +118,21 @@ function resolveBackendCommand():
       shell?: boolean
     }
   | undefined {
+  // Priority 1: WSL (Windows) — run backend natively inside WSL where EDA tools + PDKs live.
+  // This is the correct architecture: EDA tools are Linux-native, WSL provides Linux on Windows.
+  if (process.platform === "win32") {
+    const wslCommand = tryWslBackendCommand(env)
+    if (wslCommand) return wslCommand
+  }
+
+  // Priority 2: Bundled exe (packaged, Windows-native fallback — limited, no EDA tools)
   const bundled = packagedBackendExecutablePath()
   if (app.isPackaged && existsSync(bundled)) {
+    writeLog("agentic-backend", "using bundled Windows-native backend (limited — no EDA tools without WSL)", {}, "warn")
     return { executable: bundled, args: [], cwd: dirname(bundled) }
   }
 
+  // Priority 3: Dev mode — find server dir in the repo
   const serverDir = findRepoServerDir()
   if (!serverDir) return
 
@@ -136,6 +145,105 @@ function resolveBackendCommand():
 
   const python = process.platform === "win32" ? "python" : "python3"
   if (existsSync(mainScript)) return { executable: python, args: [mainScript], cwd: serverDir, shell: process.platform === "win32" }
+}
+
+function tryWslBackendCommand(env?: NodeJS.ProcessEnv):
+  | {
+      executable: string
+      args: string[]
+      cwd: string
+      shell?: boolean
+    }
+  | undefined {
+  const wslExe = existsSync("C:\\Windows\\System32\\wsl.exe")
+    ? "C:\\Windows\\System32\\wsl.exe"
+    : "wsl"
+
+  // Get default WSL distro
+  let distro: string
+  try {
+    const result = spawnSync(wslExe, ["-l", "-q"], {
+      windowsHide: true,
+      timeout: 5000,
+      encoding: "utf-8",
+    })
+    if (result.status !== 0 || !result.stdout) return undefined
+    let output = result.stdout
+    if (output.includes("\x00")) {
+      try {
+        output = Buffer.from(result.stdout, "utf-16le").toString("utf-8")
+      } catch {}
+    }
+    const lines = output.split("\n").map((l) => l.trim()).filter(Boolean)
+    if (lines.length === 0) return undefined
+    // Default distro has * prefix
+    const defaultLine = lines.find((l) => l.includes("*"))
+    distro = defaultLine ? defaultLine.replace(/\*/g, "").trim() : lines[0]
+    if (!distro) return undefined
+  } catch {
+    return undefined
+  }
+
+  // Check python3 exists in WSL
+  try {
+    const result = spawnSync(wslExe, ["-d", distro, "--", "bash", "-c", "command -v python3"], {
+      windowsHide: true,
+      timeout: 5000,
+      encoding: "utf-8",
+    })
+    if (result.status !== 0 || !result.stdout?.trim()) return undefined
+  } catch {
+    return undefined
+  }
+
+  // Find server directory in WSL (common locations — no hardcoded user paths)
+  const serverLocations = [
+    "$HOME/AgentIC-app/server",
+    "$HOME/.agentic/server",
+    "/opt/agentic/server",
+  ]
+  let serverDir: string | undefined
+  try {
+    const checkScript = serverLocations
+      .map((loc) => `[ -f "${loc}/main.py" ] && echo "${loc}" && exit 0`)
+      .join("; ")
+    const result = spawnSync(wslExe, ["-d", distro, "--", "bash", "-c", checkScript], {
+      windowsHide: true,
+      timeout: 5000,
+      encoding: "utf-8",
+    })
+    serverDir = result.stdout?.trim()
+    if (!serverDir) return undefined
+  } catch {
+    return undefined
+  }
+
+  writeLog("agentic-backend", "WSL backend found — running natively inside WSL", { distro, serverDir })
+
+  // Build env exports for the WSL bash command.
+  // Source .bashrc exports so PDK_ROOT, PATH (EDA tools), etc. are available.
+  const envExports = env
+    ? Object.entries(env)
+        .filter(([k]) => k.startsWith("AGENTIC_") || k === "PYTHONUNBUFFERED" || k === "OPENCODE_DEFAULT_AGENT" || k === "OPENCODE_CHANNEL")
+        .map(([k, v]) => `export ${k}='${String(v).replace(/'/g, "'\\''")}'`)
+        .join("; ")
+    : ""
+
+  const cmd = [
+    "for f in ~/.bashrc ~/.profile ~/.bash_profile; do [ -f \"$f\" ] && eval \"$(grep '^export ' \"$f\" 2>/dev/null)\"; done",
+    envExports,
+    `cd ${serverDir}`,
+    "exec python3 main.py",
+  ]
+    .filter(Boolean)
+    .join("; ")
+
+  return {
+    executable: wslExe,
+    args: ["-d", distro, "--", "bash", "-c", cmd],
+    cwd: ".",
+    shell: false,
+  }
 }
 
 function packagedBackendExecutablePath() {
