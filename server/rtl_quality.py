@@ -65,6 +65,18 @@ class RTLQualityResult(BaseModel):
 
 def evaluate_rtl_quality(path: str, content: str, intent: DesignIntent | None = None) -> RTLQualityResult:
     normalized = str(path or "").replace("\\", "/").lstrip("/")
+
+    # PDK/foundry-provided IP models are behavioral simulation models, not user-written RTL.
+    # Skip ALL quality gates for them — the agent doesn't write these files.
+    if _is_pdk_ip_path(normalized):
+        return RTLQualityResult(
+            accepted=True,
+            path=normalized,
+            quality_level="implementation",
+            issues=[],
+            metrics={"bytes": len(content or ""), "skipped": "pdk_ip"},
+        )
+
     modules = _modules(content)
     module_name = modules[0][0] if modules else None
     owner = _owner(intent, normalized, module_name) if intent else None
@@ -334,7 +346,7 @@ def _memory_implementation_issues(content: str, intent: DesignIntent | None, pat
     PDK and instantiate a real macro (or explicitly request one via NEEDS_INPUT).
     """
     issues: list[QualityIssue] = []
-    if _is_testbench_path(path):
+    if _is_testbench_path(path) or _is_pdk_ip_path(path):
         return issues
     has_macro_binding = bool(getattr(intent, "capability_bindings", None))
     if has_macro_binding:
@@ -367,10 +379,23 @@ def _is_testbench_path(path: str) -> bool:
     )
 
 
+def _is_pdk_ip_path(path: str) -> bool:
+    """Exempt PDK/foundry-provided IP models from design-only quality gates.
+
+    These are behavioral simulation models (with initial/$system tasks) provided
+    by the foundry — not user-written synthesizable RTL.
+    """
+    lower = str(path or "").lower()
+    filename = lower.rsplit("/", 1)[-1]
+    if any(filename.startswith(prefix) for prefix in ("sky130_", "gf180", "asap7", "saed", "nangate", "tsmc", "gf180mcu")):
+        return True
+    return any(section in f"/{lower}" for section in ("/ip/", "/lib/", "/libs.ref/", "/libs.tech/"))
+
+
 def _non_synthesizable_in_design_issues(content: str, path: str) -> list[QualityIssue]:
     """Reject non-synthesizable constructs (initial, #delay, $system tasks) in design modules."""
     issues: list[QualityIssue] = []
-    if _is_testbench_path(path):
+    if _is_testbench_path(path) or _is_pdk_ip_path(path):
         return issues
     lines = (content or "").splitlines()
     for index, line in enumerate(lines, start=1):

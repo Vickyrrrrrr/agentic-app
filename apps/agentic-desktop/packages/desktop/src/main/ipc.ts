@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process"
+import { execFile, spawn, spawnSync } from "node:child_process"
 import { stat } from "node:fs/promises"
 import { basename } from "node:path"
 import { app, BrowserWindow, Notification, clipboard, dialog, ipcMain, shell } from "electron"
@@ -12,6 +12,7 @@ import { getStore } from "./store"
 import { getPinchZoomEnabled, setPinchZoomEnabled, setTitlebar, updateTitlebar } from "./windows"
 import type { UpdaterController } from "./updater-controller"
 import { createUpdaterSubscriptions } from "./updater-subscriptions"
+import { getBackendMode } from "./agentic-backend"
 
 const pickerFilters = (ext?: string[]) => {
   if (!ext || ext.length === 0) return undefined
@@ -238,6 +239,52 @@ export function registerIpcHandlers(deps: Deps) {
       checkForUpdates: () => void deps.showUpdater(),
       relaunch: deps.relaunch,
     })
+  })
+
+  // Backend mode + WSL/Docker detection for the no-WSL banner
+  ipcMain.handle("get-backend-mode", () => getBackendMode())
+
+  ipcMain.handle("install-wsl", async () => {
+    try {
+      const child = spawn("wsl", ["--install"], {
+        stdio: "pipe",
+        windowsHide: false,
+        shell: true,
+      })
+      return new Promise<{ success: boolean; message: string }>((resolve) => {
+        let output = ""
+        child.stdout?.on("data", (d) => (output += d.toString()))
+        child.stderr?.on("data", (d) => (output += d.toString()))
+        child.on("close", (code) => {
+          if (code === 0) {
+            resolve({ success: true, message: "WSL installed. Please restart your computer, then relaunch AgentIC." })
+          } else {
+            resolve({ success: false, message: output.trim() || `WSL install exited with code ${code}. Try running 'wsl --install' manually in an admin terminal.` })
+          }
+        })
+        child.on("error", () => {
+          resolve({ success: false, message: "Failed to start WSL installer. Open an admin terminal and run: wsl --install" })
+        })
+      })
+    } catch {
+      return { success: false, message: "Failed to start WSL installer. Open an admin terminal and run: wsl --install" }
+    }
+  })
+
+  ipcMain.handle("check-docker", () => {
+    try {
+      const result = spawnSync("docker", ["--version"], {
+        windowsHide: true,
+        timeout: 5000,
+        encoding: "utf-8",
+      })
+      if (result.status === 0 && result.stdout) {
+        return { available: true, version: result.stdout.trim() }
+      }
+      return { available: false, version: null }
+    } catch {
+      return { available: false, version: null }
+    }
   })
 }
 

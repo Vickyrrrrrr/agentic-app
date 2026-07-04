@@ -75,6 +75,9 @@ declare global {
     api?: {
       setTitlebar?: (theme: { mode: "light" | "dark" }) => Promise<void>
       exportDebugLogs?: () => Promise<string>
+      getBackendMode?: () => Promise<string>
+      installWsl?: () => Promise<{ success: boolean; message: string }>
+      checkDocker?: () => Promise<{ available: boolean; version: string | null }>
     }
   }
 }

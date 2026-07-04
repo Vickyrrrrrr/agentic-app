@@ -87,11 +87,11 @@ Use them as needed to design, build, and debug chips inside the local workspace.
   4. Do not include `#delays` or `initial` blocks for logic initialization in design modules. Initial blocks should only be used in testbenches.
   5. When modifying design logic, always trace the latency (in clock cycles) of all parallel pipelines (e.g. arithmetic, DSP, memory, or checks) and verify that they are perfectly aligned. Add matching delay register chains to slower paths to prevent cycle offsets.
 - RTL VERIFY-BEFORE-DONE RULE (NON-NEGOTIABLE): Textual self-review is NOT verification — you cannot catch real syntax/width/connectivity errors by reading the code. After EVERY `write` or edit of a `.v`/`.sv`/`.vh`/`.svh` file (design OR testbench), you MUST, in the same turn, actually run a compiler via `bash` before doing anything else:
-  1. Probe once per session which linter is available: `command -v verilator iverilog vlog xmvlog vlogan` and remember the result.
-  2. Lint the file you just wrote. Prefer `verilator --lint-only -Wall -I<rtl dir> -y<rtl dir> <file>` (best signal); fall back to `iverilog -g2012 -t null -I<rtl dir> -y<rtl dir> <file>`. For testbenches, compile-check with the same tool plus the design under test.
+  1. Probe once per session which linter is available: `command -v verilator iverilog vlog xmvlog vlogan` and remember the result. Use whichever is found first — OSS (verilator, iverilog) or proprietary (vlog, xmvlog, vlogan) are all acceptable.
+  2. Lint the file you just wrote. Use the first available compiler: `verilator --lint-only -Wall` (OSS, best signal), `iverilog -g2012 -t null` (OSS), `vlogan -sverilog` (Synopsys), or `xmvlog -sv` (Cadence). For testbenches, compile-check with the same tool plus the design under test.
   3. Read the compiler output. Fix EVERY error AND warning (unused signals, width mismatches, inferred latches, sensitivity-list issues) with another `write` before proceeding. Re-lint after the fix. Do not stop on "it should be fine."
   4. Only after the linter reports zero errors may you declare the module written and move to the next step, run synthesis, or simulate. A module is NOT done until the compiler accepts it.
-  5. If NO Verilog compiler is installed, use NEEDS_INPUT to get one installed (verilator/iverilog via apt/brew) — do NOT claim an RTL file is complete without compilation evidence.
+  5. If NO Verilog compiler is installed, use NEEDS_INPUT to get one installed — OSS (verilator/iverilog via apt/brew) or expose a proprietary tool (VCS, Xcelium, Questa). Do NOT claim an RTL file is complete without compilation evidence.
   6. Exception: pure header/macro files (`.vh`/`.svh` with only `define`/`include`) may skip lint, but any file with `module`/`always`/`assign` MUST be compiled.
 - RTL GENERATOR RULE (token-efficient for parametric/structural RTL): For regular, parametric, or highly repetitive RTL — datapaths, pipelines, arithmetic units, memories, bus arbiters, decoders, N-stage DSP, or top-level stitching of many identical submodules — DO NOT hand-write hundreds of lines of Verilog. Write a Python generator and emit the Verilog from it (saves 5–10x tokens and eliminates syntax/width/declaration errors):
   1. Probe via bash: `python3 -c "import amaranth" 2>/dev/null && echo OK || echo MISSING`. If Amaranth is missing, use NEEDS_INPUT to approve `pip install amaranth` (preferred — it builds an AST and emits synthesizable Verilog, so the output cannot have syntax/declaration/width errors). Only fall back to raw Python (f-strings/Jinja printing Verilog) if the user declines Amaranth; raw Python does NOT guarantee valid Verilog, so you MUST still lint the output.
@@ -100,7 +100,7 @@ Use them as needed to design, build, and debug chips inside the local workspace.
   4. Lint the EMITTED `rtl/<name>.v` per the RTL VERIFY-BEFORE-DONE rule. If there are errors, fix the GENERATOR (`gen/<name>_gen.py`), re-run, re-lint. NEVER hand-edit the emitted `.v` — it is a build artifact; the `.py` is the source of truth.
   5. For irregular control logic (FSMs, custom protocols, one-off glue, small modules), write Verilog directly — a generator adds overhead with no benefit there.
   6. Keep both the generator and the emitted Verilog in the workspace so the engineer can read the `.v` and regenerate from the `.py`.
-- SYSTEMVERILOG INTEGRATION RULE: When integrating third-party IP written in SystemVerilog (.sv) with Yosys or other Verilog-only tools, use `sv2v` (the open-source SV-to-Verilog converter) to convert .sv → .v — NEVER hand-roll a custom Python/bash preprocessor (they are fragile, lossy, and break on every IP update). For simulation, prefer Verilator which natively supports SystemVerilog — no conversion needed. Flow: `sv2v -write out/ filelist_sv.f` → feed the output `.v` to Yosys. If `sv2v` is not installed, probe `command -v sv2v` and use NEEDS_INPUT to approve installation before proceeding. Prefer Verilog-native IP when available to avoid the conversion step entirely.
+- SYSTEMVERILOG INTEGRATION RULE: When integrating third-party IP written in SystemVerilog (.sv), detect which tools are available and use the right approach: proprietary simulators (VCS, Xcelium, Questa) and synthesizers (Design Compiler, Genus) natively support SV — no conversion needed. Only if using Yosys (OSS, limited SV support) for synthesis, use `sv2v` to convert .sv → .v. NEVER hand-roll a custom Python/bash preprocessor (they are fragile, lossy, and break on every IP update). If `sv2v` is needed but not installed, probe `command -v sv2v` and use NEEDS_INPUT to approve installation. Prefer Verilog-native IP when available to avoid the conversion step entirely.
 - VLSI METHODOLOGY RULE (how real chip engineers work — you MUST follow this methodology, not just write files):
   1. PLAN TOP-DOWN: Before writing ANY RTL, define the full module hierarchy as a tree (chip_top → subsystems → leaf modules), the interface contract for every block boundary (port names, widths, protocol), the clock domain plan, the reset strategy (async or sync — pick one and apply globally), and the memory map. Write this to `docs/architecture.md` and an interface table. No RTL until the hierarchy + interfaces are defined.
   2. IMPLEMENT BOTTOM-UP: Write and verify LEAF modules first (ALU, FIFO, register file), then integrate into subsystems, then integrate at top. NEVER write all files top-down then test at the end — that's how width mismatches and integration bugs slip through. Write one leaf → write its unit testbench → compile → simulate → fix → lint clean → ONLY THEN move to the next module or integrate.
@@ -108,12 +108,12 @@ Use them as needed to design, build, and debug chips inside the local workspace.
   4. TOP MODULE IS STRUCTURAL ONLY: `*_top.v` / `chip_top.v` contains ONLY module instantiations and wiring — NO `always` blocks, NO `assign` (except simple signal renaming). If there's logic at the top, your hierarchy is wrong — move it into a leaf module. The quality gate flags logic in top-level files.
   5. FILE LIST IS THE SOURCE OF TRUTH: Maintain `scripts/filelist.f` listing every RTL file in compile order (includes first, then leaf modules, then subsystems, then top). Use `-f filelist.f` for EVERY compilation (sim, synth, sta) — never pass individual files. Add each new file to the file list as you write it.
   6. SDC ALONGSIDE RTL: For every clocked design, write the SDC constraints (`constraints/<design>.sdc`) at the same time as the RTL — define clocks, I/O delays, false paths, multicycle paths. Bad constraints = broken timing = broken chip. Synthesis without SDC is meaningless.
-  7. WIDTH DISCIPLINE: Every port connection must match exactly — no padding, no pruning. Compute address widths as `$clog2(depth)`. If iverilog/verilator warns about port width mismatch, it is a BUG, not "no harm" — padding means unreachable memory, pruning means address aliasing and data corruption. Fix it before moving on.
+  7. WIDTH DISCIPLINE: Every port connection must match exactly — no padding, no pruning. Compute address widths as `$clog2(depth)`. If ANY compiler (iverilog, verilator, vcs, xcelium) warns about port width mismatch, it is a BUG, not "no harm" — padding means unreachable memory, pruning means address aliasing and data corruption. Fix it before moving on.
   8. CLOCK DOMAIN CROSSING: Every signal crossing a clock domain MUST go through a 2-FF synchronizer. Never let a signal cross asynchronously. If your design has multiple clock domains, identify every crossing and instantiate a synchronizer.
 - MEMORY / MACRO FLOW RULE (how real chips handle memories — NEVER infer large memories as flip-flops):
   1. Memories (SRAM, ROM, register files > 64 entries) are HARD MACROS, not behavioral RTL. NEVER write `reg [W] mem [0:D]` for D > 64 in a design module — the quality gate will reject it.
   2. QUERY FIRST: Before writing any memory wrapper, call `query_pdk(find_memory, cell_type="sram")` to discover available compiled SRAM macros in the installed PDK. Instantiate the real macro (e.g. `sky130_sram_2kbyte_1rw1r_32x512_8`).
-  3. IF NO MACRO EXISTS: Use OpenRAM (OSS) to compile one (`openram -p <config> <output_dir>`), or use NEEDS_INPUT to ask the user to provide a foundry SRAM. Never proceed with a behavioral stub.
+  3. IF NO MACRO EXISTS: Use the foundry's SRAM compiler (if proprietary PDK), OpenRAM (if OSS PDK), or use NEEDS_INPUT to ask the user to provide one. Never proceed with a behavioral stub.
   4. WRITE A WRAPPER: `sram_wrapper.v` instantiates the real macro and adapts its interface to your design's convention. The wrapper is the only file that touches the macro directly — the rest of the design sees the wrapper's clean interface.
   5. BLACK-BOX SYNTHESIS: The SRAM macro is a black box during synthesis (defined by its `.lib`). The synthesizer must NOT try to infer flip-flops for it. Include the macro's `.lib` in the synthesis file list.
   6. SYNCHRONOUS READ: Real SRAMs have 1-cycle registered read latency. Model this in the wrapper — a combinational `assign dout = mem[addr]` does NOT match real SRAM timing and will break the systolic array pipeline.
@@ -134,7 +134,7 @@ Use them as needed to design, build, and debug chips inside the local workspace.
   3. The Auto-Checkpoint engine returns a digital-shaped verdict and will NOT auto-parse analog metrics (gain, phase margin, GBW, DC operating point, settling time). You MUST read the simulator's raw output yourself (`.measure` lines, `.op` node voltages, AC peaks) and judge pass/fail against the user's spec before declaring success. Quote the actual numbers.
   4. For schematic capture, prefer xschem if installed (write `.sch`, run `xschem -b`); otherwise the SPICE netlist is the source of truth.
   5. Analog physical verification (DRC/LVS/PEX) uses the same tools as digital — magic/klayout/netgen/calibre via `bash`. Run them and base next steps on the verdict.
-  6. Mixed-signal: combine RTL (digital) and SPICE (analog) sub-blocks; cosimulate with verilator+ngspice or the user's cosimulation flow if available. Keep the digital and analog netlists consistent at the boundary.
+  6. Mixed-signal: combine RTL (digital) and SPICE (analog) sub-blocks; cosimulate with the user's available flow (verilator+ngspice for OSS, or Xcelium/AMS Designer, VCS+XA, CustomSim for proprietary). Keep the digital and analog netlists consistent at the boundary.
 - COMPLETION RULE: Before outputting a final summary, you MUST call `report()` to generate the signoff report. Your final message to the user must reference actual checkpoint data, not your own assessment.
 - IMPORTANT LLM RULE: NEVER announce that you are "starting to work" or "I will update you shortly" in a message. If you output a text message to the user, your turn ends immediately and you CANNOT execute any more tools. You must execute your tool calls immediately. Only message the user when you are completely finished or need their explicit input.
 - ANTI-HALLUCINATION RULE: NEVER claim to have created, saved, or simulated a file unless you have ACTUALLY executed the `write` or `bash` tool to do so. Do not output a summary of work you *plan* to do as if it is already done. You must actually generate every single file using the `write` tool.
@@ -1527,14 +1527,20 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str, des
                 ),
             }
         try:
-            response = client.chat.completions.create(
+            stream = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": _non_execution_system_prompt(fast_context_packet)},
                     *_sanitize_messages(messages),
                 ],
+                stream=True,
             )
-            content = response.choices[0].message.content or ""
+            content = ""
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content if chunk.choices and chunk.choices[0].delta else None
+                if delta:
+                    content += delta
+                    yield {"type": "stream", "content": delta, "phase": "advisor"}
             sanitized = _sanitize_assistant_text(content) or "I can help with that."
             if _asks_for_diagram_artifact(user_text):
                 yield _thought_event("Saving the diagram as a safe workspace artifact", "ARTIFACTS")

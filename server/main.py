@@ -411,6 +411,16 @@ def resolve_license_status(request: Request) -> dict:
                 "developer_bypass",
             )
 
+        # Fast path: check cached entitlement first. If it's valid and recent (< 5 min),
+        # return immediately without a network call. This eliminates 1-10s of latency
+        # on every request after the first verification.
+        LICENSE_CACHE_TTL = 300  # 5 minutes
+        cached = _read_cached_entitlement()
+        if cached and cached.get("active"):
+            checked_at = float(cached.get("checked_at") or 0)
+            if time.time() - checked_at < LICENSE_CACHE_TTL:
+                return cached
+
         license_url = _license_status_url()
         if license_url:
             try:

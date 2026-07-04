@@ -116,6 +116,9 @@ const api: ElectronAPI = {
   setBackgroundColor: (color: string) => ipcRenderer.invoke("set-background-color", color),
   exportDebugLogs: () => ipcRenderer.invoke("export-debug-logs"),
   recordFatalRendererError: (error) => ipcRenderer.invoke("record-fatal-renderer-error", error),
+  getBackendMode: () => ipcRenderer.invoke("get-backend-mode"),
+  installWsl: () => ipcRenderer.invoke("install-wsl"),
+  checkDocker: () => ipcRenderer.invoke("check-docker"),
 }
 
 // Sync the dynamically-allocated backend URL from the main process to localStorage.

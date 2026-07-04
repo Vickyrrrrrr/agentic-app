@@ -99,4 +99,7 @@ export type ElectronAPI = {
   setBackgroundColor: (color: string) => Promise<void>
   exportDebugLogs: () => Promise<string>
   recordFatalRendererError: (error: FatalRendererError) => Promise<void>
+  getBackendMode: () => Promise<string>
+  installWsl: () => Promise<{ success: boolean; message: string }>
+  checkDocker: () => Promise<{ available: boolean; version: string | null }>
 }

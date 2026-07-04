@@ -16,6 +16,13 @@ const BRIDGE_HEALTH_PATH = "/opencode/bridge/health"
 let backendProcess: ChildProcess | null = null
 let started = false
 
+export type BackendMode = "wsl" | "windows-native" | "linux" | "dev" | "unknown"
+let backendMode: BackendMode = "unknown"
+
+export function getBackendMode(): BackendMode {
+  return backendMode
+}
+
 export function getAgenticBackendUrl() {
   return process.env.AGENTIC_LOCAL_URL || DEFAULT_AGENTIC_URL
 }
@@ -119,15 +126,18 @@ function resolveBackendCommand(env?: NodeJS.ProcessEnv):
     }
   | undefined {
   // Priority 1: WSL (Windows) — run backend natively inside WSL where EDA tools + PDKs live.
-  // This is the correct architecture: EDA tools are Linux-native, WSL provides Linux on Windows.
   if (process.platform === "win32") {
     const wslCommand = tryWslBackendCommand(env)
-    if (wslCommand) return wslCommand
+    if (wslCommand) {
+      backendMode = "wsl"
+      return wslCommand
+    }
   }
 
   // Priority 2: Bundled exe (packaged, Windows-native fallback — limited, no EDA tools)
   const bundled = packagedBackendExecutablePath()
   if (app.isPackaged && existsSync(bundled)) {
+    backendMode = "windows-native"
     writeLog("agentic-backend", "using bundled Windows-native backend (limited — no EDA tools without WSL)", {}, "warn")
     return { executable: bundled, args: [], cwd: dirname(bundled) }
   }
@@ -140,11 +150,15 @@ function resolveBackendCommand(env?: NodeJS.ProcessEnv):
   const mainScript = join(serverDir, "main.py")
 
   if (process.platform !== "win32" && existsSync(runScript)) {
+    backendMode = process.platform === "linux" ? "linux" : "dev"
     return { executable: "bash", args: [runScript], cwd: serverDir }
   }
 
   const python = process.platform === "win32" ? "python" : "python3"
-  if (existsSync(mainScript)) return { executable: python, args: [mainScript], cwd: serverDir, shell: process.platform === "win32" }
+  if (existsSync(mainScript)) {
+    backendMode = "dev"
+    return { executable: python, args: [mainScript], cwd: serverDir, shell: process.platform === "win32" }
+  }
 }
 
 function tryWslBackendCommand(env?: NodeJS.ProcessEnv):
