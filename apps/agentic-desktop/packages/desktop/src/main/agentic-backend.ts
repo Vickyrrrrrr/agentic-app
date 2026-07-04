@@ -176,25 +176,40 @@ function tryWslBackendCommand(env?: NodeJS.ProcessEnv):
   // Get default WSL distro
   let distro: string
   try {
+    // Don't set encoding — we need the raw Buffer because WSL -l -q outputs UTF-16LE on Windows.
+    // If we decode as utf-8 first, the bytes are already corrupted and can't be recovered.
     const result = spawnSync(wslExe, ["-l", "-q"], {
       windowsHide: true,
       timeout: 5000,
-      encoding: "utf-8",
     })
-    if (result.status !== 0 || !result.stdout) return undefined
-    let output = result.stdout
-    if (output.includes("\x00")) {
-      try {
-        output = Buffer.from(result.stdout, "utf-16le").toString("utf-8")
-      } catch {}
+    if (result.status !== 0 || !result.stdout) {
+      writeLog("agentic-backend", "WSL detection: wsl -l -q failed", { status: result.status, error: result.error?.message }, "warn")
+      return undefined
     }
-    const lines = output.split("\n").map((l) => l.trim()).filter(Boolean)
-    if (lines.length === 0) return undefined
+    // result.stdout is a Buffer — decode properly
+    let output: string
+    const buf = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout as string)
+    // Detect UTF-16LE: null byte at odd positions
+    if (buf.length >= 2 && buf[0] !== 0 && buf[1] === 0) {
+      output = buf.toString("utf-16le")
+    } else {
+      output = buf.toString("utf-8")
+    }
+    const lines = output.split("\n").map((l) => l.trim().replace(/\r/g, "").replace(/\x00/g, "")).filter(Boolean)
+    if (lines.length === 0) {
+      writeLog("agentic-backend", "WSL detection: no distros found", { rawLength: buf.length, output: output.slice(0, 200) }, "warn")
+      return undefined
+    }
     // Default distro has * prefix
     const defaultLine = lines.find((l) => l.includes("*"))
     distro = defaultLine ? defaultLine.replace(/\*/g, "").trim() : lines[0]
-    if (!distro) return undefined
-  } catch {
+    if (!distro) {
+      writeLog("agentic-backend", "WSL detection: could not parse distro name", { lines }, "warn")
+      return undefined
+    }
+    writeLog("agentic-backend", "WSL detection: found distro", { distro, allDistros: lines })
+  } catch (err) {
+    writeLog("agentic-backend", "WSL detection: exception getting distros", { error: String(err) }, "warn")
     return undefined
   }
 
@@ -203,10 +218,14 @@ function tryWslBackendCommand(env?: NodeJS.ProcessEnv):
     const result = spawnSync(wslExe, ["-d", distro, "--", "bash", "-c", "command -v python3"], {
       windowsHide: true,
       timeout: 5000,
-      encoding: "utf-8",
     })
-    if (result.status !== 0 || !result.stdout?.trim()) return undefined
-  } catch {
+    const pythonOut = result.stdout ? (Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf-8") : result.stdout as string) : ""
+    if (result.status !== 0 || !pythonOut.trim()) {
+      writeLog("agentic-backend", "WSL detection: python3 not found in WSL", { distro, status: result.status }, "warn")
+      return undefined
+    }
+  } catch (err) {
+    writeLog("agentic-backend", "WSL detection: exception checking python3", { error: String(err) }, "warn")
     return undefined
   }
 
@@ -224,10 +243,13 @@ function tryWslBackendCommand(env?: NodeJS.ProcessEnv):
     const result = spawnSync(wslExe, ["-d", distro, "--", "bash", "-c", checkScript], {
       windowsHide: true,
       timeout: 5000,
-      encoding: "utf-8",
     })
-    serverDir = result.stdout?.trim()
-    if (!serverDir) return undefined
+    const serverOut = result.stdout ? (Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf-8") : result.stdout as string) : ""
+    serverDir = serverOut.trim()
+    if (!serverDir) {
+      writeLog("agentic-backend", "WSL detection: server not found in common locations", { distro, searched: serverLocations }, "warn")
+      return undefined
+    }
   } catch {
     return undefined
   }
