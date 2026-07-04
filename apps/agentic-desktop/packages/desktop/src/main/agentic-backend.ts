@@ -92,10 +92,23 @@ export function stopAgenticBackend() {
   if (!backendProcess) return
   const current = backendProcess
   backendProcess = null
-  current.kill("SIGTERM")
-  setTimeout(() => {
-    if (!current.killed) current.kill("SIGKILL")
-  }, 3000).unref()
+  // Force-kill immediately. On Windows, kill() calls TerminateProcess (force).
+  // On Linux/Mac, SIGKILL is immediate. No setTimeout — the app may exit before it fires.
+  try {
+    if (process.platform === "win32") {
+      // Kill the entire process tree (PyInstaller may spawn child processes like wsl.exe)
+      const { execFileSync } = require("node:child_process")
+      execFileSync("taskkill", ["/PID", String(current.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      })
+    } else {
+      current.kill("SIGKILL")
+    }
+  } catch {
+    // Process may have already exited
+    try { current.kill() } catch {}
+  }
 }
 
 function resolveBackendCommand():

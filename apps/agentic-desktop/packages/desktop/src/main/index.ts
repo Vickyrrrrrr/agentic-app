@@ -284,11 +284,15 @@ const main = Effect.gen(function* () {
   })
 
   app.on("before-quit", () => {
-    void stopSidecars()
+    stopAgenticBackend()
+    void killSidecar()
+    wslServers.stopAll()
   })
 
   app.on("will-quit", () => {
-    void stopSidecars()
+    stopAgenticBackend()
+    void killSidecar()
+    wslServers.stopAll()
   })
 
   app.on("child-process-gone", (_event, details) => {

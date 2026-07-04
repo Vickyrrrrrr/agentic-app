@@ -5,8 +5,13 @@ import re
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
+
+# Suppress visible console windows on Windows when spawning subprocesses (e.g. wsl.exe).
+# Without this, every WSL call pops a flickering cmd.exe window.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
 
 
 PDK_ROOT_ENVS = ("PDK_ROOT", "PDKPATH", "PDK_HOME", "AGENTIC_PDK_SEARCH_PATHS")
@@ -83,7 +88,7 @@ def _wsl_distros() -> list[str]:
     if not shutil.which("wsl"):
         return []
     try:
-        result = subprocess.run(["wsl", "-l", "-q"], capture_output=True, timeout=8)
+        result = subprocess.run(["wsl", "-l", "-q"], capture_output=True, timeout=8, creationflags=_NO_WINDOW)
         raw = result.stdout.decode("utf-8", errors="replace")
         if raw.count("\x00") > 4:
             try:
@@ -105,21 +110,28 @@ def _linux_to_wsl_unc(linux_path: str, distro: str) -> str:
 
 
 def _probe_wsl_pdk_roots(distro: str) -> list[str]:
+    # Source export lines from shell config files so PDK_ROOT etc. are picked up
+    # even though we run non-interactively (bash -c, not bash -ic).
     script = (
+        'for f in ~/.bashrc ~/.profile ~/.bash_profile ~/.zshrc; do '
+        '[ -f "$f" ] && eval "$(grep "^export " "$f" 2>/dev/null)"; done; '
         'for v in PDK_ROOT PDKPATH PDK_HOME AGENTIC_PDK_SEARCH_PATHS; do '
         'val=$(printenv "$v" 2>/dev/null || true); '
         '[ -n "$val" ] && printf "ENV\\t%s\\t%s\\n" "$v" "$val"; '
         'done; '
-        'for p in "$HOME/.volare" "$HOME/pdks" "$HOME/pdk" "/usr/share/pdk" "/usr/local/share/pdk" "/opt/pdk" "/opt/pdks"; do '
+        'for p in "$HOME/.volare" "$HOME/pdks" "$HOME/pdk" "$HOME/.ciel" '
+        '"$HOME/.skywater" "$HOME/.open_pdks" "/usr/share/pdk" "/usr/local/share/pdk" '
+        '"/opt/pdk" "/opt/pdks" "/usr/share/open-pdks"; do '
         '[ -d "$p" ] && printf "PATH\\t%s\\n" "$p"; '
         'done'
     )
     try:
         result = subprocess.run(
-            ["wsl", "-d", distro, "--", "bash", "-lc", script],
+            ["wsl", "-d", distro, "--", "bash", "-c", script],
             capture_output=True,
             text=True,
             timeout=12,
+            creationflags=_NO_WINDOW,
         )
     except Exception:
         return []
