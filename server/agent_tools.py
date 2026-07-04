@@ -352,41 +352,68 @@ def parse_log_tool(path: str, workspace_root: str) -> str:
     except Exception as e:
         return json.dumps({"error": str(e)})
 
-    # Detect tool from the first ~50 lines
-    head = "\n".join(text.splitlines()[:50])
+    # Detect tool from the first ~50 lines — supports both OSS and proprietary
+    head_lower = "\n".join(text.splitlines()[:50]).lower()
     tool = "generic"
-    if "yosys" in head.lower():
-        tool = "yosys"
-    elif "openroad" in head.lower():
-        tool = "openroad"
-    elif "magic" in head.lower():
-        tool = "magic"
-    elif "klayout" in head.lower():
-        tool = "klayout"
-    elif "iverilog" in head.lower():
-        tool = "iverilog"
-    elif "verilator" in head.lower():
-        tool = "verilator"
-    elif "opensta" in head.lower() or "sta " in head.lower():
-        tool = "opensta"
-    elif "netgen" in head.lower():
-        tool = "netgen"
+    stage_from_tool = None
 
-    # Detect stage from file path or content
-    stage = "synthesis"
-    lower_path = path.lower()
-    if "sta" in lower_path or "timing" in lower_path:
-        stage = "sta"
-    elif "drc" in lower_path:
-        stage = "drc"
-    elif "lvs" in lower_path:
-        stage = "lvs"
-    elif "lint" in lower_path:
-        stage = "lint"
-    elif "synth" in lower_path:
+    # Proprietary tools (check first — they have distinctive headers)
+    if "design compiler" in head_lower or "dc_shell" in head_lower:
+        tool, stage_from_tool = "dc_shell", "synthesis"
+    elif "genus" in head_lower:
+        tool, stage_from_tool = "genus", "synthesis"
+    elif "innovus" in head_lower:
+        tool, stage_from_tool = "innovus", "synthesis"
+    elif "ic compiler" in head_lower or "icc2" in head_lower:
+        tool, stage_from_tool = "icc2", "synthesis"
+    elif "primetime" in head_lower or "pt_shell" in head_lower:
+        tool, stage_from_tool = "pt_shell", "sta"
+    elif "tempus" in head_lower:
+        tool, stage_from_tool = "tempus", "sta"
+    elif "calibre" in head_lower:
+        tool, stage_from_tool = "calibre", "drc"
+    elif "vcs" in head_lower and "synopsys" in head_lower:
+        tool, stage_from_tool = "vcs", "lint"
+    elif "xcelium" in head_lower or "xrun" in head_lower or "xmvlog" in head_lower:
+        tool, stage_from_tool = "xcelium", "lint"
+    elif "questa" in head_lower or "vsim" in head_lower:
+        tool, stage_from_tool = "questa", "lint"
+    # OSS tools
+    elif "yosys" in head_lower:
+        tool, stage_from_tool = "yosys", "synthesis"
+    elif "openroad" in head_lower:
+        tool, stage_from_tool = "openroad", "synthesis"
+    elif "opensta" in head_lower or "sta " in head_lower:
+        tool, stage_from_tool = "opensta", "sta"
+    elif "magic" in head_lower:
+        tool, stage_from_tool = "magic", "drc"
+    elif "klayout" in head_lower:
+        tool, stage_from_tool = "klayout", "drc"
+    elif "iverilog" in head_lower:
+        tool, stage_from_tool = "iverilog", "lint"
+    elif "verilator" in head_lower:
+        tool, stage_from_tool = "verilator", "lint"
+    elif "netgen" in head_lower:
+        tool, stage_from_tool = "netgen", "lvs"
+
+    # Stage: prefer tool-based detection, fall back to filename, then default
+    if stage_from_tool:
+        stage = stage_from_tool
+    else:
         stage = "synthesis"
-    elif "sim" in lower_path or "test" in lower_path:
-        stage = "lint"  # Treat sim logs as lint-like
+        lower_path = path.lower()
+        if "sta" in lower_path or "timing" in lower_path:
+            stage = "sta"
+        elif "drc" in lower_path:
+            stage = "drc"
+        elif "lvs" in lower_path:
+            stage = "lvs"
+        elif "lint" in lower_path:
+            stage = "lint"
+        elif "synth" in lower_path:
+            stage = "synthesis"
+        elif "sim" in lower_path or "test" in lower_path:
+            stage = "lint"
 
     from report_parsers import parse_report
     parsed = parse_report(stage=stage, tool=tool, text=text)
@@ -416,6 +443,9 @@ def _compact_log_summary(path: str, tool: str, stage: str, parsed: dict) -> str:
     parts = [f"{tool} {stage}: {path}"]
     if cell_count is not None:
         parts.append(f"{cell_count} cells")
+    area = metrics.get("area_um2")
+    if area is not None:
+        parts.append(f"area={area}")
     if wns is not None:
         parts.append(f"WNS={wns}ns")
     parts.append(f"{warn_count} warnings, {error_count} errors")

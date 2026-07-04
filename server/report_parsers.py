@@ -157,6 +157,14 @@ def parse_synthesis_log(text: str, *, tool: str = "generic") -> dict[str, Any]:
     if cell_count is not None:
         metrics["cell_count"] = cell_count
 
+    # Area (Design Compiler, Genus, Innovus — proprietary tools report area)
+    area = _first_float(text, (
+        r"(?im)^\s*(?:Total area|Combinational area|Total core area)\s*[=:]\s*(\d+(?:\.\d+)?)",
+        r"(?im)^\s*area\s*[=:]\s*(\d+(?:\.\d+)?)",
+    ))
+    if area is not None:
+        metrics["area_um2"] = area
+
     # Wires/nets count
     wire_count = _first_int(text, (r"(?im)^\s*(?:Number of wires|Net count)\s*:?\s*(\d+)",))
     if wire_count is not None:
