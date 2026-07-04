@@ -538,7 +538,7 @@ export function SessionSidePanel(props: {
                         <Icon name="sliders" size="small" />
                       </button>
                     </div>
-                    <div class="flex-1 min-w-0 overflow-hidden bg-background-stronger">
+                    <div class="flex-1 min-w-0 overflow-y-auto overflow-x-hidden bg-background-stronger">
                       <Switch>
                         <Match when={fileTreeTab() === "changes"}>
                           <Switch>
