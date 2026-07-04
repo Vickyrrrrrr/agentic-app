@@ -21,6 +21,7 @@ import { useSessionLayout } from "@/pages/session/session-layout"
 import { createSessionTabs } from "@/pages/session/helpers"
 import { SessionWaveformTab } from "@/components/session"
 import { LogDiagnosisTab } from "@/components/session/log-diagnosis-tab"
+import { GdsLayoutTab } from "@/components/session/gds-layout-tab"
 import { Markdown } from "@opencode-ai/ui/markdown"
 
 function FileCommentMenu(props: {
@@ -452,6 +453,9 @@ export function FileTabContent(props: { tab: string }) {
             </Match>
             <Match when={state()?.loaded && (path()?.endsWith(".log") || path()?.endsWith(".rpt"))}>
               <LogDiagnosisTab path={path()!} />
+            </Match>
+            <Match when={state()?.loaded && (path()?.endsWith(".gds") || path()?.endsWith(".gds.gz") || path()?.endsWith(".oas"))}>
+              <GdsLayoutTab path={path()!} />
             </Match>
             <Match when={state()?.loaded && (path()?.endsWith(".md") || path()?.endsWith(".markdown"))}>
             <div class="px-6 py-4 select-text">
