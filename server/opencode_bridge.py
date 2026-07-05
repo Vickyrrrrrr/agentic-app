@@ -245,6 +245,53 @@ def run_pipeline(payload):
     }
 
 def main():
+    if "--daemon" in sys.argv:
+        try:
+            while True:
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                if line == "exit":
+                    break
+                try:
+                    payload = json.loads(line)
+                    action = payload.get("action")
+                    if action == "tool":
+                        res = run_tool(payload)
+                    elif action == "pipeline":
+                        res = run_pipeline(payload)
+                    elif action == "get_mode":
+                        res = run_get_mode(payload)
+                    elif action == "set_mode":
+                        res = run_set_mode(payload)
+                    elif action == "git_clone":
+                        res = run_git_clone(payload)
+                    elif action == "license_status":
+                        res = run_license_status(payload)
+                    elif action == "signoff_report":
+                        res = run_signoff_report(payload)
+                    elif action == "sta_report":
+                        res = run_sta_report(payload)
+                    elif action == "waveforms":
+                        res = run_waveforms(payload)
+                    elif action == "auth_profile":
+                        res = run_auth_profile(payload)
+                    elif action == "auth_logout":
+                        res = run_auth_logout(payload)
+                    else:
+                        res = {"success": False, "error": f"Unknown action: {action}"}
+                except Exception as e:
+                    import traceback
+                    res = {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+                sys.stdout.write(json.dumps(res) + "\n")
+                sys.stdout.flush()
+        except KeyboardInterrupt:
+            pass
+        return
+
     try:
         payload = json.loads(sys.stdin.read())
         action = payload.get("action")
@@ -279,3 +326,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -420,7 +420,7 @@ export function SchematicViewer(props: { file: string }) {
             {resp()!.reason}
           </div>
           <div class="text-10-regular text-text-weaker max-w-72">
-            Install Yosys on the backend PATH, or ask the agent to install it, to enable interactive schematics.
+            Check your Verilog file for syntax errors or verify that all instantiated sub-modules exist in the design directory.
           </div>
         </div>
       </Show>
@@ -475,8 +475,15 @@ export function SchematicViewer(props: { file: string }) {
             height="100%"
             style={{ overflow: "visible" }}
           >
+            <defs>
+              <pattern id="eda-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+                <circle cx="1.5" cy="1.5" r="1" fill="rgba(255, 255, 255, 0.05)" />
+              </pattern>
+            </defs>
+            <rect width="100%" height="100%" fill="url(#eda-grid)" />
             <g transform={`translate(${view().tx} ${view().ty}) scale(${view().scale})`}>
               <For each={visibleEdges()}>
+
                 {(edge) => {
                   const from = nodeById().get(edge.from)
                   const to = nodeById().get(edge.to)
@@ -486,13 +493,21 @@ export function SchematicViewer(props: { file: string }) {
                   const x2 = to.x
                   const y2 = to.y + to.h / 2
                   const mx = (x1 + x2) / 2
+                  
+                  const isHovered = () => {
+                    const h = hover()
+                    if (!h) return false
+                    return h.node.id === edge.from || h.node.id === edge.to
+                  }
+
                   return (
                     <path
                       d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`}
                       fill="none"
-                      stroke="var(--border-weak-base, #444)"
-                      stroke-width="1"
-                      stroke-opacity="0.5"
+                      stroke={isHovered() ? "var(--text-interactive-base, #9dbefe)" : "var(--border-base, #3e3e42)"}
+                      stroke-width={isHovered() ? "1.8" : "1"}
+                      stroke-opacity={hover() ? (isHovered() ? "1" : "0.15") : "0.5"}
+                      style={{ transition: "stroke 0.2s, stroke-width 0.2s, stroke-opacity 0.2s" }}
                       vector-effect="non-scaling-stroke"
                     />
                   )
@@ -501,28 +516,38 @@ export function SchematicViewer(props: { file: string }) {
               <For each={visibleNodes()}>
                 {(node) => {
                   const isPort = node.kind === "port"
+                  const isHovered = () => hover()?.node.id === node.id
+                  const isAnyHovered = () => hover() !== null
+                  
                   const accent = node.direction === "input"
                     ? "var(--surface-success-strong, #12c905)"
                     : node.direction === "output"
                       ? "var(--border-interactive-active, #034cff)"
                       : node.direction === "inout"
                         ? "var(--surface-warning-strong, #fbdd46)"
-                        : "var(--border-weak-base, #555)"
+                        : "var(--text-interactive-base, #9dbefe)"
+
                   const accentX = node.direction === "output" ? node.w - 3 : 0
+                  
                   return (
                     <g
                       transform={`translate(${node.x}, ${node.y})`}
                       onMouseEnter={(e: MouseEvent) => setHover({ node, x: e.clientX, y: e.clientY })}
                       onMouseLeave={() => setHover(null)}
-                      style={{ cursor: "pointer" }}
+                      style={{ 
+                        cursor: "pointer", 
+                        opacity: isAnyHovered() ? (isHovered() ? "1" : "0.4") : "1",
+                        transition: "opacity 0.2s"
+                      }}
                     >
                       <rect
                         width={node.w}
                         height={node.h}
-                        rx="7"
-                        fill={isPort ? "var(--surface-weak, rgba(255,255,255,0.08))" : "var(--surface-base, rgba(255,255,255,0.05))"}
-                        stroke={isPort ? "var(--border-weak-base, #333)" : "var(--border-base, #444)"}
-                        stroke-width="1"
+                        rx="8"
+                        fill={isPort ? "var(--surface-weak, rgba(25, 25, 28, 0.75))" : "var(--surface-base, rgba(20, 20, 23, 0.85))"}
+                        stroke={isHovered() ? "var(--text-interactive-base, #9dbefe)" : "var(--border-weaker-base, #2b2b2f)"}
+                        stroke-width={isHovered() ? "1.5" : "1"}
+                        style={{ transition: "stroke 0.2s, stroke-width 0.2s" }}
                       />
                       <rect
                         x={accentX}
@@ -534,25 +559,25 @@ export function SchematicViewer(props: { file: string }) {
                       <text
                         x="12"
                         y={node.h / 2 + 4}
-                        fill="var(--text-strong, #eee)"
-                        style={{ "font-size": "11px", "font-family": "var(--font-family-mono)" }}
+                        fill={isHovered() ? "var(--text-strong, #ffffff)" : "var(--text-weak, #d1d1d6)"}
+                        style={{ "font-size": "11px", "font-family": "var(--font-family-mono)", transition: "fill 0.2s" }}
                       >
                         {node.label.length > 20 ? node.label.slice(0, 19) + "…" : node.label}
                       </text>
                       <Show when={node.sub}>
                         <text
-                          x={node.w - 10}
+                          x={node.w - 12}
                           y={node.h / 2 + 4}
                           text-anchor="end"
-                          fill="var(--text-weak, #888)"
+                          fill="var(--text-weaker, #707076)"
                           style={{ "font-size": "10px", "font-family": "var(--font-family-mono)" }}
                         >
-                          {node.sub!.length > 16 ? node.sub!.slice(0, 15) + "…" : node.sub}
+                          {node.sub!.length > 14 ? node.sub!.slice(0, 13) + "…" : node.sub}
                         </text>
                       </Show>
                       <Show when={isPort && node.width && node.width > 1}>
                         <text
-                          x={node.w - 10}
+                          x={node.w - 12}
                           y={node.h / 2 + 4}
                           text-anchor="end"
                           fill="var(--text-interactive-base, #9dbefe)"
@@ -567,20 +592,21 @@ export function SchematicViewer(props: { file: string }) {
               </For>
             </g>
           </svg>
-
+ 
           <Show when={hover()}>
             {(h) => (
               <div
-                class="fixed z-50 pointer-events-none px-3 py-2 rounded-lg border shadow-lg text-11-regular"
+                class="fixed z-50 pointer-events-none px-3.5 py-2.5 rounded-xl border shadow-2xl text-11-regular backdrop-blur-md"
                 style={{
-                  left: `${Math.min(h().x + 14, (containerRef.current?.clientWidth ?? 0) - 220)}px`,
+                  left: `${Math.min(h().x + 14, (containerRef.current?.clientWidth ?? 0) - 240)}px`,
                   top: `${h().y + 14}px`,
-                  "background-color": "var(--surface-float-base, #161616)",
-                  "border-color": "var(--border-base, #333)",
-                  "max-width": "240px",
+                  "background-color": "rgba(22, 22, 26, 0.92)",
+                  "border-color": "var(--border-weaker-base, #2f2f33)",
+                  "max-width": "260px",
+                  "box-shadow": "0 10px 30px -10px rgba(0, 0, 0, 0.7)",
                 }}
               >
-                <div class="text-text-strong font-mono font-semibold mb-1">{h().node.label}</div>
+                <div class="text-text-strong font-mono font-semibold mb-1 text-12-medium">{h().node.label}</div>
                 <Show when={h().node.sub}>
                   <div class="text-text-interactive-base font-mono text-10-regular">type · {h().node.sub}</div>
                 </Show>
@@ -590,7 +616,7 @@ export function SchematicViewer(props: { file: string }) {
                   </div>
                 </Show>
                 <Show when={h().node.nets.length > 0}>
-                  <div class="mt-1 pt-1 border-t border-border-weaker-base text-text-weaker font-mono text-10-regular">
+                  <div class="mt-1.5 pt-1.5 border-t border-border-weaker-base text-text-weaker font-mono text-10-regular">
                     {h().node.nets.length} pin{h().node.nets.length > 1 ? "s" : ""}
                   </div>
                 </Show>
@@ -598,6 +624,7 @@ export function SchematicViewer(props: { file: string }) {
             )}
           </Show>
         </div>
+
       </Show>
     </div>
   )

@@ -143,6 +143,25 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
 
         const stage = Effect.fnUntraced(function* (files: string[]) {
           if (!files.length) return
+
+          // Remove a stale index.lock if it exists and is older than 30s.
+          // A lock held for >30s means the previous git process has crashed and
+          // left it behind — safe to remove so the next git add can proceed.
+          const lockFile = path.join(state.gitdir, "index.lock")
+          yield* Effect.tryPromise({
+            try: async () => {
+              const { stat, unlink } = await import("node:fs/promises")
+              try {
+                const st = await stat(lockFile)
+                const ageMs = Date.now() - st.mtimeMs
+                if (ageMs > 30_000) await unlink(lockFile)
+              } catch {
+                // lock doesn't exist — nothing to do
+              }
+            },
+            catch: () => undefined,
+          }).pipe(Effect.ignore)
+
           const result = yield* git(
             [...cfg, ...args(["add", "--all", "--sparse", "--pathspec-from-file=-", "--pathspec-file-nul"])],
             {
@@ -156,6 +175,7 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
             stderr: result.stderr,
           })
         })
+
 
         const exists = (file: string) => fs.exists(file).pipe(Effect.orDie)
         const read = (file: string) => fs.readFileString(file).pipe(Effect.catch(() => Effect.succeed("")))

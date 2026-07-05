@@ -838,11 +838,12 @@ def schematic_json_tool(path: str, workspace_root: str, module: str = "") -> str
             return json.dumps({"available": False, "reason": "No module declaration found in file"})
         module = m.group(1)
 
-    cache_dir = os.path.join(workspace_root, ".agentic", "schematic_cache")
+    cache_dir = os.path.join(workspace_root, ".agentic", "cache", "schematics")
     try:
         os.makedirs(cache_dir, exist_ok=True)
     except Exception:
         pass
+
     digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:16]
     cache_key = f"{module}_{digest}"
     cache_path = os.path.join(cache_dir, f"{cache_key}.json")
@@ -866,9 +867,18 @@ def schematic_json_tool(path: str, workspace_root: str, module: str = "") -> str
     try:
         for name in os.listdir(file_dir):
             if name.endswith((".v", ".sv")) and os.path.join(file_dir, name) != full:
-                verilog_files.append(os.path.join(file_dir, name))
+                other_file_path = os.path.join(file_dir, name)
+                try:
+                    with open(other_file_path, "r", encoding="utf-8", errors="replace") as of:
+                        other_content = of.read()
+                    if re.search(r"\bmodule\s+" + re.escape(module) + r"\b", other_content):
+                        continue
+                except Exception:
+                    pass
+                verilog_files.append(other_file_path)
     except Exception:
         pass
+
 
     script_parts = [f"read_verilog {' '.join('-I' + d for d in inc_dirs)} {' '.join(verilog_files)}"]
     script_parts.append(f"hierarchy -check -top {module}")

@@ -69,7 +69,15 @@ const getBase = (): Configuration => ({
       from: "resources/license.json",
       to: "license.json",
     },
+    {
+      // Bundle the Python bridge scripts so the packaged app can invoke them
+      // via WSL python3 on Windows (where EDA tools and PDKs live in WSL).
+      from: "../../../../server/",
+      to: "server/",
+      filter: ["**/*.py", "requirements*.txt"],
+    },
   ],
+
   mac: {
     category: "public.app-category.developer-tools",
     icon: `resources/icons/icon.icns`,
