@@ -36,12 +36,22 @@ function agenticHeaders() {
   return headers
 }
 
-async function callAgentic<T>(path: string, payload: Record<string, unknown>): Promise<T> {
-  const response = await fetch(`${agenticBaseUrl()}${path}`, {
-    method: "POST",
-    headers: agenticHeaders(),
-    body: JSON.stringify(payload),
-  })
+async function callAgentic<T>(path: string, payload: Record<string, unknown>, options: { timeoutMs?: number } = {}): Promise<T> {
+  const controller = options.timeoutMs ? new AbortController() : undefined
+  const timeout = options.timeoutMs
+    ? setTimeout(() => controller?.abort(), options.timeoutMs)
+    : undefined
+  let response: Response
+  try {
+    response = await fetch(`${agenticBaseUrl()}${path}`, {
+      method: "POST",
+      headers: agenticHeaders(),
+      body: JSON.stringify(payload),
+      signal: controller?.signal,
+    })
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
   const text = await response.text()
   let body: any = text
   try {
@@ -96,6 +106,23 @@ async function sessionAgent(input: PluginInput, sessionID?: string) {
     return (info as any)?.agent || (info as any)?.info?.agent
   } catch {
     return undefined
+  }
+}
+
+async function sessionInfo(input: PluginInput, sessionID?: string) {
+  if (!sessionID) return { agent: undefined as string | undefined, directory: input.worktree }
+  try {
+    const info = await input.client.session.get({ path: { id: sessionID } } as any)
+    return {
+      agent: (info as any)?.agent || (info as any)?.info?.agent,
+      directory:
+        (info as any)?.directory ||
+        (info as any)?.info?.directory ||
+        (info as any)?.data?.directory ||
+        input.worktree,
+    }
+  } catch {
+    return { agent: undefined as string | undefined, directory: input.worktree }
   }
 }
 
@@ -177,19 +204,21 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
   return {
     "experimental.chat.system.transform": async (ctxInput, ctxOutput) => {
       if (!ctxInput.sessionID) return
-      const activeAgent = await sessionAgent(input, ctxInput.sessionID)
+      const info = await sessionInfo(input, ctxInput.sessionID)
+      const activeAgent = info.agent
       if (activeAgent && activeAgent !== AGENT_NAME) return
-      const userText = await latestUserText(input, ctxInput.sessionID)
-      const worktree = await sessionDirectory(input, ctxInput.sessionID)
+      const worktree = info.directory
       const agenticMode = await agenticModeForSession(ctxInput.sessionID)
       const response = await callAgentic<any>("/opencode/session/resolve", {
         session_id: ctxInput.sessionID,
         agent: activeAgent || AGENT_NAME,
-        user_text: userText,
+        user_text: "",
         workspace_root: worktree,
         pdk_profile: process.env.AGENTIC_PDK_PROFILE || process.env.PDK || "",
         agentic_mode: agenticMode,
-      }).catch((error) => ({ success: false, error: error instanceof Error ? error.message : String(error) }))
+        fast: true,
+      }, { timeoutMs: Number(process.env.AGENTIC_FAST_CONTEXT_TIMEOUT_MS || 900) })
+        .catch((error) => ({ success: false, error: error instanceof Error ? error.message : String(error) }))
 
       if (!response?.success) {
         ctxOutput.system.push(
@@ -198,6 +227,28 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
             "The AgentIC local backend did not provide VLSI context for this turn.",
             `Reason: ${response?.error || "unknown bridge error"}`,
             "Do not claim to have queried PDKs, tools, licenses, or AgentIC checkpoints until the bridge is restored.",
+          ].join("\n"),
+        )
+        return
+      }
+
+      if (response.fast) {
+        ctxOutput.system.push(
+          [
+            "## AgentIC Desktop Runtime Contract",
+            `Session: ${response.session?.session_id}`,
+            `Design: ${response.session?.design_name}`,
+            `Design root: ${response.session?.design_root}`,
+            `Linux design root: ${response.session?.linux_design_root || "n/a"}`,
+            `AgentIC mode: ${agenticMode}`,
+            "Fast context: true. Full VLSI context is intentionally deferred to reduce first-token latency.",
+            "",
+            "Use native read/grep/glob/write for normal file UX. Use AgentIC tools before making VLSI-specific claims.",
+            "Use agentic_context for full context, agentic_design_state for durable chip facts, agentic_eda_capability(scope='agent_context') for tool/PDK evidence, agentic_query_pdk for PDK/macro facts, agentic_run_flow for checkpointed EDA execution, agentic_timing_inspect for STA, agentic_drc_inspect for DRC/LVS logs, and agentic_layout_inspect for GDS.",
+            agenticMode === "builder"
+              ? "BUILDER mode is active: after any required approval, you may write files and run EDA tools."
+              : "ADVISOR mode is active: inspect, explain, plan, and write docs/reports only.",
+            "Do not invent PDK cells, SRAM macros, tool licenses, timing corners, or signoff readiness; retrieve evidence with AgentIC tools first.",
           ].join("\n"),
         )
         return
@@ -214,18 +265,35 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
           `Workflow: ${response.workflow?.mode} (${response.workflow?.intent})`,
           `Scope: ${response.kernel_scope}`,
           "",
-          "Use the desktop runtime for session/tool UX, but use AgentIC bridge tools for VLSI-specific decisions.",
-          "Prefer first-class VLSI tools when applicable: agentic_design_state for durable chip facts, agentic_eda_capability(scope='agent_context') for compact tool/PDK evidence, agentic_eda_capability(scope='conflicts') for PATH/license/PDK ambiguity, agentic_layout_inspect for GDS, agentic_timing_inspect for STA, agentic_drc_inspect for DRC/LVS logs, and agentic_run_flow for EDA execution.",
+          "Keep execution target selection calm and explicit: native, wsl, or docker. Default to native unless the user selected WSL/Docker or capability evidence shows the needed EDA tools are only available there.",
+          "Use agentic_run_flow for EDA commands so AgentIC can execute on the selected target and capture checkpoints. Use the native bash tool for ordinary shell inspection when checkpointing is not needed.",
+          "Use the native write tool for ALL file writes — it shows a diff view.",
+          "Use the native read/grep/glob tools for file access — they have syntax highlighting.",
+          "After EDA commands, inspect generated logs/reports with agentic_drc_inspect or agentic_timing_inspect to get pass/fail, errors, warnings, and metrics.",
+          "After writing RTL files (.v/.sv), call agentic_workspace(action='lint', path=<file>) to verify quality (behavioral memory, non-synthesizable constructs, one-module-per-file).",
+          "For GDS inspection, use agentic_layout_inspect. For STA analysis, use agentic_timing_inspect. For DRC/LVS log parsing, use agentic_drc_inspect.",
+          "For PDK queries, use agentic_query_pdk. For design state, use agentic_ledger. For signoff reports, use agentic_report.",
+          "",
+          "## RTL Generation Methodology (Research-Backed)",
+          "Derived from AutoChip, RTLFixer, MAGE, HDLFORGE, AutoVeriFix+, EvolVE, AoT, VerilogCoder, PDAGENT-BENCH, AgentDSE.",
+          "",
+          "1. EDA TOOL FEEDBACK LOOP (MANDATORY): NEVER generate RTL in a single shot. 55% of LLM-generated Verilog has syntax errors. Loop: generate → compile → read errors → fix → simulate → verify → repeat. EDA tool feedback improves success by 24% over zero-shot.",
+          "2. REFERENCE MODEL FIRST: For non-trivial modules, write a Python reference model (tb/ref/<module>_ref.py) BEFORE writing Verilog. The Verilog must match the Python model cycle-for-cycle. Use it for causal debugging via cycle-accurate traces.",
+          "3. STRUCTURED PLANNING: Do not jump to Verilog. Follow: (a) Classify pattern (FSM/pipeline/datapath/arbiter). (b) Write structured IR. (c) Write pseudocode. (d) Generate Verilog from pseudocode. Reduces tokens 1.8-5.2x, improves correctness.",
+          "4. MULTIPLE CANDIDATES: For complex modules (FSMs, arbiters, pipelines), generate 2-3 candidates. Compile + simulate each. Cluster by output consistency. Select best. Not needed for trivial modules.",
+          "5. ADAPTIVE FIX ESCALATION: When a module fails: (a) Minor fix (surgical edit). (b) Moderate fix (restructure block). (c) Full rewrite (if 2+ moderate fixes fail). Do not jump to full rewrite on first error.",
+          "6. LLM ORCHESTRATES, EDA TOOLS EXECUTE: LLM proposes, EDA tools validate. Never claim a design works without EDA tool evidence. The simulator/synthesizer is the oracle.",
+          "",
           "This context was returned by the AgentIC local bridge, so the local backend server is active.",
           "Do not confuse `flow_decision.backend: none` or `profile: setup_required` with the local backend being down; it means no usable EDA/PDK flow backend is selected yet.",
           "The context packet is a compact index and summary, not a full project dump. Use workspace(read/search/list), query_pdk, and bash/checkpoint log paths to retrieve exact details before making design, PDK, macro, timing, or signoff claims.",
           "On Windows, inspect `context_packet.environment_summary.wsl.tool_inventory`, `wsl_tools`, and `wsl_capabilities` before saying EDA tools are missing; this inventory includes open-source and proprietary commands detected across WSL distros.",
           "If the user names a WSL distro, use that distro. If several distros expose relevant tools and the user did not choose one, ask which distro to use.",
-          "When builder mode is active and a WSL distro is selected, run discovery/execution through AgentIC bash with `wsl -d <distro> -- bash -lc 'cd <linux_design_root> && ...'` when `session.linux_design_root` is present.",
+          "When builder mode is active and WSL or Docker is selected, pass target='wsl' or target='docker' to agentic_run_flow instead of manually wrapping commands.",
           "The `Design root` is the authoritative project directory for this session. Write RTL under `rtl/`, testbenches under `tb/` or `verification/`, scripts under `scripts/`, and reports under `reports/` relative to that root.",
           "Do not create another top-level project/session folder inside or beside the design root unless the user explicitly asks to create a separate design.",
           agenticMode === "builder"
-            ? "You are in BUILDER mode. You are AUTHORIZED to write RTL/TB/scripts, run shell/EDA commands, and execute tools. Do NOT ask the user to switch to builder mode — you are already in it. Make a plan, wait for approval when starting implementation, then use AgentIC tools for edits and execution."
+            ? "You are in BUILDER mode. You are AUTHORIZED to write RTL/TB/scripts, run shell/EDA commands, and execute tools. Do NOT ask the user to switch to builder mode — you are already in it. Make a plan, wait for approval when starting implementation, then use agentic_run_flow for EDA execution and AgentIC inspect tools for VLSI verification."
             : "You are in ADVISOR mode. Do not write RTL/TB/scripts or run shell/EDA commands; only inspect/query and write docs/plans/diagrams/reports. If implementation is needed, tell the user to switch to builder mode.",
           "Do not invent PDK cells, SRAM macros, tool licenses, timing corners, or signoff readiness.",
           "If AgentIC reports a missing capability, stop the affected stage and explain the missing local evidence.",
@@ -280,9 +348,9 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
         },
       }),
       agentic_workspace: tool({
-        description: "Workspace operations: read files, search (grep), list files (glob), lint RTL, parse Verilog modules, parse EDA logs (synthesis/STA/DRC/LVS from any tool), inspect GDS layouts (cell hierarchy, polygon count, layers), analyze STA timing reports (critical paths, WNS/TNS, fix suggestions), and generate Yosys schematics. Use action='parse_log' for EDA log diagnosis, action='layout_inspect' for GDS inspection, action='timing_analysis' for STA timing closure, action='schematic_json' for interactive schematics, action='parse_module' for port/interface extraction, action='lint' for RTL linting.",
+        description: "VLSI-specific workspace actions: lint RTL (action='lint'), parse Verilog modules for ports/interfaces (action='parse_module'), generate Yosys schematics (action='schematic_json'). For reading/searching/listing files, use the native read/grep/glob tools instead. For EDA log parsing, use agentic_drc_inspect. For GDS inspection, use agentic_layout_inspect. For STA analysis, use agentic_timing_inspect.",
         args: {
-          action: z.enum(["read", "search", "list", "lint", "parse_module", "parse_log", "layout_inspect", "timing_analysis", "schematic_json"]),
+          action: z.enum(["lint", "parse_module", "schematic_json"]),
           path: z.string().default("."),
           pattern: z.string().default(""),
           module: z.string().default(""),
@@ -337,9 +405,14 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
         },
       }),
       agentic_run_flow: tool({
-        description: "Run a named EDA flow step through AgentIC so command history, logs, checkpoints, and VLSI verdicts are captured. Prefer this over raw shell for simulation, synthesis, STA, PnR, DRC, LVS, and extraction.",
+        description: "Run a named EDA step through AgentIC with one calm execution target: native, wsl, or docker. The backend captures command history, logs, checkpoints, and VLSI verdicts.",
         args: {
           command: z.string(),
+          target: z.enum(["native", "wsl", "docker"]).default("native"),
+          wsl_distro: z.string().optional().describe("Required only when target='wsl' and a specific distro should be used."),
+          linux_workdir: z.string().optional().describe("Optional Linux path to cd into for WSL runs."),
+          docker_image: z.string().optional().describe("Required when target='docker'."),
+          docker_args: z.string().optional().describe("Optional extra docker run flags such as --user or environment variables."),
           eda_tool: z.string().describe("EDA tool name such as iverilog, verilator, yosys, openroad, opensta, magic, klayout, netgen, calibre, genus, innovus, dc_shell, pt_shell, or xrun."),
           stage: z.string().describe("Flow stage such as simulation, lint, synthesis, sta, floorplan, placement, cts, routing, drc, lvs, pex, or signoff."),
           log_file: z.string().optional(),
@@ -347,31 +420,6 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
         },
         async execute(args, context) {
           return toolResult(input, context, "run_flow", args)
-        },
-      }),
-      agentic_write: tool({
-        description: "Create or surgically edit files inside the AgentIC-resolved VLSI design workspace.",
-        args: {
-          path: z.string(),
-          content: z.string().default(""),
-          old_string: z.string().default(""),
-          new_string: z.string().default(""),
-        },
-        async execute(args, context) {
-          return toolResult(input, context, "write", args)
-        },
-      }),
-      agentic_bash: tool({
-        description: "Run a local EDA command through AgentIC so checkpoints, logs, and VLSI failure evidence are captured.",
-        args: {
-          command: z.string(),
-          eda_tool: z.string().optional(),
-          stage: z.string().optional(),
-          log_file: z.string().optional(),
-          timeout: z.number().default(300),
-        },
-        async execute(args, context) {
-          return toolResult(input, context, "bash", args)
         },
       }),
       agentic_query_pdk: tool({

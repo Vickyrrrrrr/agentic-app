@@ -1,10 +1,22 @@
 import { createResource, createSignal, Show, onMount } from "solid-js"
 import { Icon } from "@opencode-ai/ui/icon"
 import { usePlatform } from "@/context/platform"
+import { useServer } from "@/context/server"
+import { useWslServers } from "@/wsl/context"
+import { useDialog } from "@opencode-ai/ui/context/dialog"
+import { Dialog } from "@opencode-ai/ui/v2/dialog-v2"
+import { DialogAddWslServer } from "@/wsl/dialog-add-server"
+import { useLanguage } from "@/context/language"
+import { showToast } from "@/utils/toast"
 
 export function WslBanner() {
   const platform = usePlatform()
-  const [dismissed, setDismissed] = createSignal(false)
+  const server = useServer()
+  const wslServers = useWslServers()
+  const dialog = useDialog()
+  const language = useLanguage()
+
+  const [dismissed, setDismissed] = createSignal(localStorage.getItem("wsl_banner_dismissed") === "true")
   const [installing, setInstalling] = createSignal(false)
   const [installResult, setInstallResult] = createSignal<string | null>(null)
   const [dockerAvailable, setDockerAvailable] = createSignal<boolean | null>(null)
@@ -22,9 +34,13 @@ export function WslBanner() {
     }
   })
 
+  const isWslConnection = () => server.current?.variant === "wsl"
+  const isWslAvailable = () => !!wslServers.data?.runtime?.available
+
   const show = () =>
     !dismissed() &&
     mode() === "windows-native" &&
+    !isWslConnection() &&
     platform.platform === "desktop" &&
     platform.os === "windows"
 
@@ -34,7 +50,11 @@ export function WslBanner() {
     try {
       const result = await api?.installWsl?.()
       if (result) {
-        setInstallResult(result.message)
+        if (result.message.includes("ERROR_ALREADY_EXISTS") || result.message.toLowerCase().includes("already exists")) {
+          setInstallResult("WSL is already installed! Please link your WSL distro to run AgentIC natively inside Linux.")
+        } else {
+          setInstallResult(result.message)
+        }
       }
     } catch {
       setInstallResult("Failed to start WSL installer. Open an admin terminal and run: wsl --install")
@@ -42,13 +62,36 @@ export function WslBanner() {
     setInstalling(false)
   }
 
+  const handleOpenAddWsl = () => {
+    dialog.push(() => (
+      <Dialog title={language.t("wsl.server.add")} size="large" fit class="settings-v2-wsl-dialog">
+        <DialogAddWslServer />
+      </Dialog>
+    ))
+  }
+
   const handleCheckDocker = async () => {
     try {
       const result = await api?.checkDocker?.()
-      setDockerAvailable(result?.available ?? false)
+      const available = result?.available ?? false
+      setDockerAvailable(available)
+      if (available) {
+        localStorage.setItem("wsl_banner_dismissed", "true")
+        setDismissed(true)
+        showToast({
+          variant: "success",
+          title: "Docker mode active",
+          description: "Docker Desktop detected! Tool executions will run inside Docker containers where available.",
+        })
+      }
     } catch {
       setDockerAvailable(false)
     }
+  }
+
+  const handleDismiss = () => {
+    localStorage.setItem("wsl_banner_dismissed", "true")
+    setDismissed(true)
   }
 
   return (
@@ -87,15 +130,27 @@ export function WslBanner() {
             </Show>
 
             <div class="flex items-center gap-2">
-              <button
-                class="inline-flex items-center gap-1.5 px-3 py-1.5 text-12-medium bg-surface-base hover:bg-surface-stronger text-text-strong rounded-md border border-border-weaker-base transition-colors disabled:opacity-50"
-                onClick={handleInstallWsl}
-                disabled={installing()}
+              <Show
+                when={isWslAvailable()}
+                fallback={
+                  <button
+                    class="inline-flex items-center gap-1.5 px-3 py-1.5 text-12-medium bg-surface-base hover:bg-surface-stronger text-text-strong rounded-md border border-border-weaker-base transition-colors disabled:opacity-50"
+                    onClick={handleInstallWsl}
+                    disabled={installing()}
+                  >
+                    <Show when={installing()} fallback={<span>Install WSL</span>}>
+                      <span>Installing...</span>
+                    </Show>
+                  </button>
+                }
               >
-                <Show when={installing()} fallback={<span>Install WSL</span>}>
-                  <span>Installing...</span>
-                </Show>
-              </button>
+                <button
+                  class="inline-flex items-center gap-1.5 px-3 py-1.5 text-12-medium bg-surface-base hover:bg-surface-stronger text-text-strong rounded-md border border-border-weaker-base transition-colors"
+                  onClick={handleOpenAddWsl}
+                >
+                  <span>Link WSL Distro</span>
+                </button>
+              </Show>
               <button
                 class="inline-flex items-center gap-1.5 px-3 py-1.5 text-12-medium bg-transparent hover:bg-surface-base text-text-base rounded-md border border-border-weaker-base transition-colors"
                 onClick={handleCheckDocker}
@@ -110,7 +165,7 @@ export function WslBanner() {
               </button>
               <button
                 class="inline-flex items-center px-2 py-1.5 text-12-regular text-text-weaker hover:text-text-base transition-colors"
-                onClick={() => setDismissed(true)}
+                onClick={handleDismiss}
               >
                 Dismiss
               </button>
@@ -121,3 +176,4 @@ export function WslBanner() {
     </Show>
   )
 }
+

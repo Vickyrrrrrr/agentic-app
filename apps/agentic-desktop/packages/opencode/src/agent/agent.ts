@@ -172,6 +172,7 @@ export const layer = Layer.effect(
               "Use the runtime for the coding-agent experience: sessions, files, diffs, shell, progress, and cancellation.",
               "Use AgentIC bridge tools for VLSI-specific truth: agentic_context, agentic_design_state, agentic_eda_capability, agentic_layout_inspect, agentic_timing_inspect, agentic_drc_inspect, agentic_run_flow, agentic_query_pdk, agentic_write, agentic_report, and agentic_ledger.",
               "Before making PDK, SRAM, macro, flow, timing, or signoff claims, call AgentIC capability/context tools. Use agentic_eda_capability with scope=agent_context first; use scope=conflicts when PATH, PDK, WSL, or license setup may be ambiguous; use scope=tools only when full adapter details are needed.",
+              "Keep execution target selection simple: native, wsl, or docker. Default to native unless the user selected WSL/Docker or capability evidence shows the needed EDA tools are only available there.",
               "Do not assume Sky130, OpenLane, ORFS, Cadence, Synopsys, Siemens, or any other flow. Select from detected local PDK, tools, licenses, manifests, and user intent.",
               "Honor AgentIC runtime mode when provided. Advisor mode is for inspection, explanation, planning, and docs/diagrams/reports only. Builder mode may implement after an approved plan.",
               "For a new chip build, produce a plan and wait for approval before implementation. For edits/fixes after approval, inspect the current artifact and make targeted changes.",

@@ -95,10 +95,25 @@ self.onmessage = (e: MessageEvent<{ buffer: ArrayBuffer }>) => {
     const instances: GdsWorkerResult["instances"] = []
     for (const [name, insts] of scene.instances) {
       const bins: number[][][] = Array.from({ length: binCols * binRows }, () => [])
+      const cellBbox = cellBboxMap.get(name)
       for (const t of insts) {
-        const c = Math.max(0, Math.min(binCols - 1, Math.floor((t[4] - bbox.minX) / binW)))
-        const r = Math.max(0, Math.min(binRows - 1, Math.floor((t[5] - bbox.minY) / binH)))
-        bins[r * binCols + c].push([...t] as number[])
+        const item = [...t] as number[]
+        if (!cellBbox) {
+          const c = Math.max(0, Math.min(binCols - 1, Math.floor((t[4] - bbox.minX) / binW)))
+          const r = Math.max(0, Math.min(binRows - 1, Math.floor((t[5] - bbox.minY) / binH)))
+          bins[r * binCols + c].push(item)
+          continue
+        }
+        const worldBox = transformedBbox(cellBbox, t)
+        const minCol = Math.max(0, Math.min(binCols - 1, Math.floor((worldBox.minX - bbox.minX) / binW)))
+        const maxCol = Math.max(0, Math.min(binCols - 1, Math.floor((worldBox.maxX - bbox.minX) / binW)))
+        const minRow = Math.max(0, Math.min(binRows - 1, Math.floor((worldBox.minY - bbox.minY) / binH)))
+        const maxRow = Math.max(0, Math.min(binRows - 1, Math.floor((worldBox.maxY - bbox.minY) / binH)))
+        for (let r = minRow; r <= maxRow; r++) {
+          for (let c = minCol; c <= maxCol; c++) {
+            bins[r * binCols + c].push(item)
+          }
+        }
       }
       instances.push([
         name,
@@ -117,26 +132,30 @@ self.onmessage = (e: MessageEvent<{ buffer: ArrayBuffer }>) => {
     }
 
     const cellLayerBboxes = new Map<string, Map<number, BBox2D>>()
+    const cellLayerCounts = new Map<string, Map<number, number>>()
     for (const [cellName, polys] of scene.cells) {
       const layerMap = new Map<number, BBox2D>()
+      const countMap = new Map<number, number>()
       for (const p of polys) {
         let b = layerMap.get(p.layer)
         if (!b) {
           b = makeEmptyBbox()
           layerMap.set(p.layer, b)
         }
+        countMap.set(p.layer, (countMap.get(p.layer) || 0) + 1)
         expandBboxWithPoints(b, p.points)
       }
       cellLayerBboxes.set(cellName, layerMap)
+      cellLayerCounts.set(cellName, countMap)
     }
 
     for (const [cellName, insts] of scene.instances) {
       const layerMap = cellLayerBboxes.get(cellName)
       if (!layerMap || !insts) continue
-      const polys = scene.cells.get(cellName) ?? []
+      const countMap = cellLayerCounts.get(cellName) ?? new Map<number, number>()
       
       for (const [layer, cellLayerBbox] of layerMap) {
-        const polyCountOnLayer = polys.filter((p) => p.layer === layer).length
+        const polyCountOnLayer = countMap.get(layer) || 0
         perLayerCount[layer] = (perLayerCount[layer] || 0) + polyCountOnLayer * insts.length
         
         let globalB = perLayerBbox[layer]
@@ -235,6 +254,15 @@ function expandBboxWithTransformedBbox(
     if (tx > bbox.maxX) bbox.maxX = tx
     if (ty > bbox.maxY) bbox.maxY = ty
   }
+}
+
+function transformedBbox(
+  cellBbox: { minX: number; minY: number; maxX: number; maxY: number },
+  t: number[],
+) {
+  const bbox = makeEmptyBbox()
+  expandBboxWithTransformedBbox(bbox, cellBbox, t)
+  return bbox
 }
 
 function padDegenerateBbox(bbox: { minX: number; minY: number; maxX: number; maxY: number }) {

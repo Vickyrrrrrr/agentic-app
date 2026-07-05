@@ -1,4 +1,4 @@
-import { createResource, createSignal, createEffect, For, Show, Switch, Match } from "solid-js"
+import { createResource, createSignal, For, Show, Switch, Match } from "solid-js"
 import { Icon } from "@opencode-ai/ui/icon"
 import { getFilename } from "@opencode-ai/core/util/path"
 import { useSessionLayout } from "@/pages/session/session-layout"
@@ -83,7 +83,12 @@ export function SchematicExplorer() {
         )
         if (res.success && res.result) {
           const parsed = JSON.parse(res.result)
-          return Array.isArray(parsed.errors) ? parsed.errors : []
+          const errors = Array.isArray(parsed.errors) ? parsed.errors : []
+          setLintStatuses((prev) => ({
+            ...prev,
+            [path]: { hasErrors: errors.length > 0, count: errors.length }
+          }))
+          return errors
         }
       } catch {
         return null
@@ -165,33 +170,6 @@ export function SchematicExplorer() {
   }
 
   const [lintStatuses, setLintStatuses] = createSignal<Record<string, { hasErrors: boolean; count: number }>>({})
-
-  // Background syntax scanner for file tree badges
-  createEffect(() => {
-    const list = rtl()
-    if (list.length === 0) return
-    list.forEach(async (file) => {
-      try {
-        const res = await callAgenticTool(
-          "workspace",
-          { session_id: params.id!, workspace_root: decode64(params.dir) ?? "" },
-          { action: "lint", path: file }
-        )
-        if (res.success && res.result) {
-          const parsed = JSON.parse(res.result)
-          const errors = Array.isArray(parsed.errors) ? parsed.errors : []
-          if (errors.length > 0) {
-            setLintStatuses((prev) => ({
-              ...prev,
-              [file]: { hasErrors: true, count: errors.length }
-            }))
-          }
-        }
-      } catch {
-        // Ignore background fetch errors gracefully
-      }
-    })
-  })
 
   return (
     <div class="flex flex-col w-full h-full bg-background-stronger font-sans">

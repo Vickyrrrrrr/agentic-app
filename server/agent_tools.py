@@ -5,6 +5,7 @@ import urllib.parse
 import glob as glob_mod
 import json
 import hashlib
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -1184,6 +1185,41 @@ def bash_tool(command: str, workspace_root: str, design_name: str, timeout: int 
     }, indent=2)
 
 
+def flow_command_for_target(
+    command: str,
+    workspace_root: str,
+    target: str = "native",
+    *,
+    wsl_distro: str = "",
+    docker_image: str = "",
+    docker_args: str = "",
+    linux_workdir: str = "",
+) -> tuple[bool, str, str]:
+    """Wrap an EDA command for one of AgentIC's three execution targets."""
+    target = (target or "native").strip().lower()
+    if target == "native":
+        return True, command, ""
+    if target == "wsl":
+        distro_args = f"-d {shlex.quote(wsl_distro)} " if wsl_distro else ""
+        workdir = linux_workdir.strip()
+        inner = f"cd {shlex.quote(workdir)} && {command}" if workdir else command
+        return True, f"wsl {distro_args}-- bash -lc {shlex.quote(inner)}", ""
+    if target == "docker":
+        if not docker_image.strip():
+            return False, command, "docker target requires docker_image"
+        root = os.path.abspath(os.path.expanduser(os.path.expandvars(workspace_root or ".")))
+        volume = f"{root}:/workspace"
+        extra = docker_args.strip()
+        extra_part = f"{extra} " if extra else ""
+        wrapped = (
+            f"docker run --rm {extra_part}"
+            f"-v {shlex.quote(volume)} -w /workspace "
+            f"{shlex.quote(docker_image.strip())} bash -lc {shlex.quote(command)}"
+        )
+        return True, wrapped, ""
+    return False, command, f"unknown execution target '{target}'. Use native, wsl, or docker."
+
+
 def web_search(query: str, max_results: int = 5) -> str:
     web_setting = os.environ.get("AGENTIC_ENABLE_WEB_SEARCH", "true").strip().lower()
     if web_setting in {"0", "false", "no", "off"}:
@@ -1409,6 +1445,7 @@ def _compact_eda_agent_context(env: dict, adapters: dict, conflicts: dict) -> di
             "count": len(((env.get("pdk_index") or {}).get("pdks") or [])),
             "existing_dirs_count": len(env.get("existing_pdk_dirs") or []),
         },
+        "execution_targets": _execution_targets_for_agent(env),
         "flow_decision": {
             "profile": (env.get("recommended_flow") or {}).get("profile"),
             "backend": (env.get("recommended_flow") or {}).get("backend"),
@@ -1417,6 +1454,32 @@ def _compact_eda_agent_context(env: dict, adapters: dict, conflicts: dict) -> di
         },
         "conflict_counts": conflicts.get("counts") or {},
         "next_actions": _eda_next_actions(stage_context, env, conflicts),
+    }
+
+
+def _execution_targets_for_agent(env: dict) -> dict:
+    wsl = env.get("wsl") or {}
+    docker_images = env.get("docker_images") or []
+    return {
+        "options": ["native", "wsl", "docker"],
+        "default": "native",
+        "native": {
+            "available": True,
+            "label": "Native",
+            "description": "Run commands on the current OS/PATH.",
+        },
+        "wsl": {
+            "available": bool(wsl.get("available")),
+            "label": "WSL",
+            "distros": (wsl.get("distros") or [])[:8],
+            "capabilities": env.get("wsl_capabilities") or {},
+        },
+        "docker": {
+            "available": bool((env.get("tools") or {}).get("docker")),
+            "label": "Docker",
+            "image_count": len(docker_images),
+            "images": docker_images[:12],
+        },
     }
 
 
@@ -1669,8 +1732,19 @@ def dispatch_tool(name: str, args: dict, workspace_root: str, design_name: str =
         return parse_log_tool(args.get("path", ""), workspace_root)
     elif name == "run_flow":
         timeout = args.get("timeout", 600)
-        return bash_tool(
+        ok, command, error = flow_command_for_target(
             args["command"],
+            workspace_root,
+            args.get("target", "native"),
+            wsl_distro=args.get("wsl_distro", ""),
+            docker_image=args.get("docker_image", ""),
+            docker_args=args.get("docker_args", ""),
+            linux_workdir=args.get("linux_workdir", ""),
+        )
+        if not ok:
+            return "Error: " + error
+        return bash_tool(
+            command,
             workspace_root,
             design_name,
             timeout=timeout,

@@ -1017,6 +1017,94 @@ def _read_run_events(limit: int = 200, run_id: str | None = None) -> list[dict]:
     return events[-limit:]
 
 
+def _fast_opencode_session_response(req: OpenCodeSessionRequest, mapping: dict, license_status: dict) -> dict:
+    """Minimal resolve packet for first-token latency.
+
+    The OpenCode system hook runs before the model request, so heavy environment
+    scans, role pipelines, repo walks, and schema catalogs directly delay the
+    user's first token. This packet gives the agent the session contract and
+    tells it to call AgentIC tools when it needs exact VLSI evidence.
+    """
+    user_text = req.user_text or ""
+    mode = "design_task" if _looks_like_design_request_for_name(user_text) else "chat"
+    workflow = {
+        "mode": mode,
+        "intent": "DESIGN_TASK" if mode == "design_task" else "GENERAL",
+        "requires_design_kernel": mode == "design_task",
+        "execution_authorized": mapping.get("agentic_mode") == "builder",
+        "planning_round": mode == "design_task",
+        "fast": True,
+    }
+    kernel_scope = "FAST_CONTEXT"
+    kernel_contract = {
+        "schema_version": "agentic.kernel_contract.fast.v1",
+        "scope": kernel_scope,
+        "active_roles": ["supervisor"],
+        "fast_context": True,
+        "retrieval_required_for_claims": True,
+    }
+    context_packet = {
+        "schema_version": "agentic.context_packet.fast.v1",
+        "budget": {
+            "policy": "first_token_fast_path",
+            "actual_chars": 0,
+            "truncated": True,
+        },
+        "tier0_session": {
+            "session_id": mapping.get("session_id"),
+            "design_name": mapping.get("design_name"),
+            "design_root": mapping.get("design_root"),
+            "linux_design_root": mapping.get("linux_design_root"),
+            "agentic_mode": mapping.get("agentic_mode"),
+            "active_role": "supervisor",
+        },
+        "retrieval_index": {
+            "tools": {
+                "context": "agentic_context for full AgentIC context",
+                "design_state": "agentic_design_state for durable chip facts",
+                "capability": "agentic_eda_capability(scope='agent_context') for tool/PDK evidence",
+                "files": "native read/grep/glob for exact files",
+                "pdk": "agentic_query_pdk for exact PDK/macro facts",
+                "eda": "agentic_run_flow for checkpointed EDA execution",
+            }
+        },
+        "context_policy": {
+            "principle": "Fast context intentionally omits repo maps, schema catalogs, role handoffs, and environment scans to avoid first-token latency.",
+            "omission_rule": "Before making PDK, timing, signoff, macro, or tool-availability claims, call the AgentIC tools listed in retrieval_index.",
+        },
+    }
+    context_packet["budget"]["actual_chars"] = len(json.dumps(context_packet, default=str))
+    return {
+        "success": True,
+        "fast": True,
+        "license": {
+            "active": bool(license_status.get("active")),
+            "plan": license_status.get("plan"),
+            "source": license_status.get("source"),
+        },
+        "session": mapping,
+        "workflow": workflow,
+        "kernel_scope": kernel_scope,
+        "kernel_contract": kernel_contract,
+        "schema_catalog": {},
+        "validation_schema_catalog": {},
+        "context_packet": context_packet,
+        "flow_decision": {
+            "profile": "fast_context",
+            "backend": "deferred",
+            "confidence": "deferred",
+            "rationale": ["Full EDA/PDK flow detection is deferred until the agent calls AgentIC capability tools."],
+        },
+        "role_summary": {
+            "enabled": False,
+            "roles": [],
+            "counts": {},
+            "fast": True,
+        },
+        "design_intent": None,
+    }
+
+
 @app.get("/pdks")
 async def get_pdks():
     return detect_environment()
@@ -1261,6 +1349,8 @@ async def opencode_session_mode_set(request: Request):
 async def opencode_session_resolve(req: OpenCodeSessionRequest, request: Request):
     license_status = _require_active_local_runtime(request)
     mapping = _resolve_opencode_mapping(req)
+    if req.fast:
+        return _fast_opencode_session_response(req, mapping, license_status)
     from agentic_handoffs import schema_catalog
     from agentic_kernel import build_context_contract, scope_for_turn
     from agentic_role_runner import RoleContext, persist_role_results, run_role_pipeline

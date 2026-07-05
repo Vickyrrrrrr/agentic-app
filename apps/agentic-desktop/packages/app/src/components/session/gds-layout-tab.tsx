@@ -110,6 +110,7 @@ function getVisibleInstances(
   const minRow = Math.max(0, Math.min(binRows - 1, Math.floor((viewport.minY - bbox.minY) / binH)))
   const maxRow = Math.max(0, Math.min(binRows - 1, Math.floor((viewport.maxY - bbox.minY) / binH)))
 
+  const seen = new Set<number[]>()
   const result: number[][] = []
   for (let r = minRow; r <= maxRow; r++) {
     for (let c = minCol; c <= maxCol; c++) {
@@ -117,7 +118,10 @@ function getVisibleInstances(
       const bin = bins[idx]
       if (bin) {
         for (let i = 0; i < bin.length; i++) {
-          result.push(bin[i])
+          const inst = bin[i]
+          if (seen.has(inst)) continue
+          seen.add(inst)
+          result.push(inst)
         }
       }
     }

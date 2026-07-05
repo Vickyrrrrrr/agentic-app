@@ -42,6 +42,7 @@ class OpenCodeSessionRequest(BaseModel):
     workspace_root: Optional[str] = None
     pdk_profile: Optional[str] = None
     design_name: Optional[str] = None
+    fast: bool = False
 
 
 class OpenCodeToolRequest(OpenCodeSessionRequest):

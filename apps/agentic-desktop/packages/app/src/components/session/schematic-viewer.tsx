@@ -71,7 +71,7 @@ function netOfBits(bits: Bit[]): string {
 function buildLayout(resp: SchematicResponse) {
   const mod = resp.module!
   const ymod = resp.yosys_json!.modules[mod]
-  if (!ymod) return { nodes: [] as LayoutNode[], nets: [] as { from: string; to: string }[], columns: 0 }
+  if (!ymod) return { nodes: [] as LayoutNode[], edges: [] as { from: string; to: string }[], columns: 0 }
 
   const ports = ymod.ports ?? {}
   const cells = ymod.cells ?? {}
@@ -285,6 +285,35 @@ export function SchematicViewer(props: { file: string }) {
     return new Map(l.nodes.map((n) => [n.id, n]))
   })
 
+  const visibleNodes = createMemo(() => {
+    const l = layout()
+    const el = containerRef.current
+    if (!l || !el) return l?.nodes ?? []
+    if (l.nodes.length < 800) return l.nodes
+    const cur = view()
+    const margin = 240 / cur.scale
+    const left = (-cur.tx / cur.scale) - margin
+    const top = (-cur.ty / cur.scale) - margin
+    const right = ((el.clientWidth - cur.tx) / cur.scale) + margin
+    const bottom = ((el.clientHeight - cur.ty) / cur.scale) + margin
+    return l.nodes.filter((n) =>
+      n.x + n.w >= left &&
+      n.x <= right &&
+      n.y + n.h >= top &&
+      n.y <= bottom
+    )
+  })
+
+  const visibleNodeIds = createMemo(() => new Set(visibleNodes().map((n) => n.id)))
+
+  const visibleEdges = createMemo(() => {
+    const l = layout()
+    if (!l) return []
+    if (l.nodes.length < 800) return l.edges
+    const ids = visibleNodeIds()
+    return l.edges.filter((edge) => ids.has(edge.from) && ids.has(edge.to))
+  })
+
   const bounds = createMemo(() => {
     const l = layout()
     if (!l || l.nodes.length === 0) return { w: 400, h: 300 }
@@ -447,7 +476,7 @@ export function SchematicViewer(props: { file: string }) {
             style={{ overflow: "visible" }}
           >
             <g transform={`translate(${view().tx} ${view().ty}) scale(${view().scale})`}>
-              <For each={layout()!.edges}>
+              <For each={visibleEdges()}>
                 {(edge) => {
                   const from = nodeById().get(edge.from)
                   const to = nodeById().get(edge.to)
@@ -469,7 +498,7 @@ export function SchematicViewer(props: { file: string }) {
                   )
                 }}
               </For>
-              <For each={layout()!.nodes}>
+              <For each={visibleNodes()}>
                 {(node) => {
                   const isPort = node.kind === "port"
                   const accent = node.direction === "input"

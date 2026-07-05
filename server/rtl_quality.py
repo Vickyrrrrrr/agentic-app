@@ -205,6 +205,11 @@ def _policy_issues(content: str, path: str, intent: DesignIntent | None) -> list
     issues.extend(_large_inferred_memory_issues(content, intent, path))
     issues.extend(_non_synthesizable_in_design_issues(content, path))
     issues.extend(_top_module_logic_issues(content, path))
+    issues.extend(_inferred_latch_issues(content, path))
+    issues.extend(_blocking_in_sequential_issues(content, path))
+    issues.extend(_missing_reset_issues(content, path))
+    issues.extend(_case_without_default_issues(content, path))
+    issues.extend(_uninitialized_reg_issues(content, path))
     return issues
 
 
@@ -462,3 +467,154 @@ def _range_width(value: str) -> int:
 
 def _issue(code: str, message: str, path: str, severity: Literal["error", "warning"] = "error") -> QualityIssue:
     return QualityIssue(code=code, message=message, path=path, severity=severity)
+
+
+# ---------------------------------------------------------------------------
+# Fabrication-ready quality gates
+# ---------------------------------------------------------------------------
+
+# Regex for combinational always blocks (potential latch sources)
+COMB_ALWAYS_RE = re.compile(r"(?m)^\s*always\s*@\s*\(\s*\*\s*\)|always_comb\b")
+IF_WITHOUT_ELSE_RE = re.compile(r"(?ms)(\bif\s*\([^)]+\)\s*(?:begin\b)?(?(1)(?:.*?end|.*?)|(?:[^\n]*?)))(?=\s*(?:else|end|if|case|always|assign|$))", re.IGNORECASE)
+CASE_WITHOUT_DEFAULT_RE = re.compile(r"(?ms)\bcase\s*\([^)]+\)\s*(?:.*?)(?:endcase\b)", re.IGNORECASE)
+SEQUENTIAL_ALWAYS_RE = re.compile(r"(?mis)^\s*always(?:_ff)?\s*@\s*\(\s*(?:posedge|negedge)\s+clk", re.IGNORECASE)
+BLOCKING_IN_SEQ_RE = re.compile(r"(?m)^\s*[A-Za-z_]\w*\s*(?:\[[^\]]+\])?\s*=\s*[^=]")
+CASE_DEFAULT_RE = re.compile(r"(?mi)^\s*default\s*:")
+REG_DECL_RE = re.compile(r"(?m)^\s*(?:reg|logic)\s+(?:\[[^\]]+\]\s*)?(\w+)")
+RESET_BRANCH_RE = re.compile(r"(?i)\bif\s*\(\s*!?\s*(?:rst|reset)[A-Za-z0-9_$]*\s*\)")
+
+
+def _inferred_latch_issues(content: str, path: str) -> list[QualityIssue]:
+    """Detect potential inferred latches: if without else in combinational blocks."""
+    if _is_testbench_path(path) or _is_pdk_ip_path(path):
+        return []
+    issues: list[QualityIssue] = []
+    # Find combinational always blocks
+    for match in COMB_ALWAYS_RE.finditer(content or ""):
+        # Get the block content (from always to the next always/endmodule)
+        start = match.start()
+        end_match = re.search(r"(?m)^\s*(?:always|endmodule|assign|function|task)\b", content[start + 1:])
+        block = content[start:end_match.start() + start + 1] if end_match else content[start:start + 2000]
+        # Check for if without else
+        if_lines = re.findall(r"(?m)^\s*if\s*\(", block)
+        else_lines = re.findall(r"(?m)^\s*else\b", block)
+        if len(if_lines) > len(else_lines):
+            line_num = content[:start].count("\n") + 1
+            issues.append(_issue(
+                "inferred_latch",
+                f"Combinational always block at line {line_num} has if without else — potential inferred latch. "
+                f"Every if must have an else in combinational logic to prevent latches.",
+                path,
+            ))
+            break  # one per file is enough
+    return issues
+
+
+def _blocking_in_sequential_issues(content: str, path: str) -> list[QualityIssue]:
+    """Detect blocking assignments in sequential always blocks — fabrication blocker."""
+    if _is_testbench_path(path) or _is_pdk_ip_path(path):
+        return []
+    issues: list[QualityIssue] = []
+    for match in SEQUENTIAL_ALWAYS_RE.finditer(content or ""):
+        start = match.start()
+        end_match = re.search(r"(?m)^\s*(?:always|endmodule|assign|function|task)\b", content[start + 1:])
+        block = content[start:end_match.start() + start + 1] if end_match else content[start:start + 2000]
+        # Find blocking assignments (signal = value, but not <= or == or != or <=)
+        for line_num, line in enumerate(block.splitlines(), 1):
+            stripped = re.sub(r"//.*$", "", line).strip()
+            if not stripped or stripped.startswith("//"):
+                continue
+            # Skip if it's actually non-blocking (<=) or comparison (==, !=, <=, >=)
+            if "<=" in stripped or "==" in stripped or "!=" in stripped or ">=" in stripped:
+                continue
+            # Check for blocking assignment: signal = value
+            if re.match(r"^[A-Za-z_]\w*\s*(?:\[[^\]]+\])?\s*=\s*[^=]", stripped):
+                abs_line = content[:start].count("\n") + line_num
+                issues.append(_issue(
+                    "blocking_in_sequential",
+                    f"Blocking assignment (`=`) at line {abs_line} in a sequential always block. "
+                    f"Use non-blocking (`<=`) in sequential logic to prevent race conditions.",
+                    path,
+                ))
+                break  # one per block
+    return issues[:5]  # cap at 5
+
+
+def _missing_reset_issues(content: str, path: str) -> list[QualityIssue]:
+    """Detect sequential always blocks without reset — every register must be resettable."""
+    if _is_testbench_path(path) or _is_pdk_ip_path(path):
+        return []
+    issues: list[QualityIssue] = []
+    has_reset = bool(RESET_RE.search(content or ""))
+    for match in SEQUENTIAL_ALWAYS_RE.finditer(content or ""):
+        start = match.start()
+        end_match = re.search(r"(?m)^\s*(?:always|endmodule|assign|function|task)\b", content[start + 1:])
+        block = content[start:end_match.start() + start + 1] if end_match else content[start:start + 2000]
+        # Check if the block has a reset branch
+        if not RESET_BRANCH_RE.search(block) and has_reset:
+            line_num = content[:start].count("\n") + 1
+            issues.append(_issue(
+                "missing_reset_in_sequential",
+                f"Sequential always block at line {line_num} has no reset branch. "
+                f"Every register must be reset: add `if (!rst_n)` branch.",
+                path,
+                "warning",
+            ))
+            break
+    return issues
+
+
+def _case_without_default_issues(content: str, path: str) -> list[QualityIssue]:
+    """Detect case statements without default — inferred latch risk."""
+    if _is_testbench_path(path) or _is_pdk_ip_path(path):
+        return []
+    issues: list[QualityIssue] = []
+    for match in CASE_WITHOUT_DEFAULT_RE.finditer(content or ""):
+        block = match.group(0)
+        if not CASE_DEFAULT_RE.search(block):
+            line_num = content[:match.start()].count("\n") + 1
+            issues.append(_issue(
+                "case_without_default",
+                f"case statement at line {line_num} has no default branch. "
+                f"Every case must have a default to prevent inferred latches.",
+                path,
+                "warning",
+            ))
+            break
+    return issues
+
+
+def _uninitialized_reg_issues(content: str, path: str) -> list[QualityIssue]:
+    """Detect reg declarations in sequential blocks that are never assigned in reset."""
+    if _is_testbench_path(path) or _is_pdk_ip_path(path):
+        return []
+    issues: list[QualityIssue] = []
+    # Find all reg/logic declared at module level
+    regs = set()
+    for match in REG_DECL_RE.finditer(content or ""):
+        name = match.group(1)
+        if name and not name.startswith("clk") and not name.startswith("rst"):
+            regs.add(name)
+    # Find regs assigned in reset branches
+    for match in SEQUENTIAL_ALWAYS_RE.finditer(content or ""):
+        start = match.start()
+        end_match = re.search(r"(?m)^\s*(?:always|endmodule|assign|function|task)\b", content[start + 1:])
+        block = content[start:end_match.start() + start + 1] if end_match else content[start:start + 2000]
+        # Find reset branch
+        reset_match = RESET_BRANCH_RE.search(block)
+        if reset_match:
+            reset_block = block[reset_match.start():]
+            # Remove regs that ARE assigned in reset
+            for reg in list(regs):
+                if re.search(rf"\b{re.escape(reg)}\s*(?:\[[^\]]+\])?\s*<=", reset_block):
+                    regs.discard(reg)
+    # Remaining regs are potentially uninitialized in reset
+    if regs:
+        issues.append(_issue(
+            "uninitialized_register",
+            f"Registers may be uninitialized in reset: {', '.join(sorted(list(regs)[:5]))}. "
+            f"Every register must have a reset value.",
+            path,
+            "warning",
+        ))
+    return issues
