@@ -17,7 +17,7 @@ let backendProcess: ChildProcess | null = null
 let started = false
 
 export type BackendMode = "wsl" | "windows-native" | "linux" | "dev" | "unknown"
-let backendMode: BackendMode = "unknown"
+let backendMode: BackendMode = process.platform === "win32" ? "windows-native" : "linux"
 
 export function getBackendMode(): BackendMode {
   return backendMode
@@ -28,71 +28,12 @@ export function getAgenticBackendUrl() {
 }
 
 export async function startAgenticBackend() {
-  if (started || process.env.AGENTIC_MANAGED_BACKEND === "0") return
-  started = true
-
-  process.env.AGENTIC_LOCAL_URL ??= DEFAULT_AGENTIC_URL
-  process.env.AGENTIC_MODE ??= "advisor"
-  process.env.OPENCODE_DEFAULT_AGENT ??= "agentic-vlsi"
-
-  const baseUrl = process.env.AGENTIC_LOCAL_URL
-  if (!baseUrl || !isManagedLoopback(baseUrl)) {
-    writeLog("agentic-backend", "using externally configured AgentIC backend", { url: baseUrl })
-    return
-  }
-
-  const hasBundledBinary = app.isPackaged && existsSync(packagedBackendExecutablePath())
-
-  // In dev mode (no bundled binary), attach to an existing dev backend if one is running.
-  // In packaged mode (has bundled binary), NEVER attach — always start our own on a
-  // dynamic port so there's no conflict with any dev backend on 7860.
-  if (!hasBundledBinary && await isBridgeHealthy(baseUrl)) {
-    writeLog("agentic-backend", "attached to existing local AgentIC bridge", { url: baseUrl })
-    return
-  }
-
-  // If the preferred port (7860) is occupied by any process, find a free port.
-  if (hasBundledBinary && (await isHealthy(baseUrl) || await isBridgeHealthy(baseUrl))) {
-    const managedUrl = await nextManagedBackendUrl(baseUrl)
-    process.env.AGENTIC_LOCAL_URL = managedUrl
-    writeLog("agentic-backend", "preferred port occupied, allocated dynamic port", {
-      preferred: baseUrl,
-      managed: managedUrl,
-    })
-  } else if (await isHealthy(baseUrl)) {
-    const managedUrl = await nextManagedBackendUrl(baseUrl)
-    process.env.AGENTIC_LOCAL_URL = managedUrl
-    writeLog(
-      "agentic-backend",
-      "existing local backend is missing the AgentIC runtime bridge; starting isolated AgentIC bridge",
-      { existing: baseUrl, managed: managedUrl },
-      "warn",
-    )
-  }
-
-  const env = backendEnvironment()
-  const command = resolveBackendCommand(env)
-  if (!command) {
-    writeLog("agentic-backend", "AgentIC backend runtime is unavailable", {}, "warn")
-    return
-  }
-  writeLog("agentic-backend", "starting AgentIC backend runtime", {
-    command: command.executable,
-    args: command.args,
-    cwd: command.cwd,
-  })
-
-  backendProcess = spawn(command.executable, command.args, {
-    cwd: command.cwd,
-    env,
-    stdio: "pipe",
-    shell: command.shell,
-    windowsHide: true,
-  })
-
-  attachProcessLogging(backendProcess)
-  void waitForBackendReady(process.env.AGENTIC_LOCAL_URL || baseUrl)
+  // Python backend server is consolidated into the Hono Sidecar.
+  // Bypassing spawning of the separate Python server process.
+  writeLog("agentic-backend", "Python backend consolidated; spawning bypassed.")
+  return
 }
+
 
 export function stopAgenticBackend() {
   if (!backendProcess) return

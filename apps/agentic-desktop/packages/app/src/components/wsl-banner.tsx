@@ -34,7 +34,7 @@ export function WslBanner() {
     }
   })
 
-  const isWslConnection = () => server.current?.variant === "wsl"
+  const isWslConnection = () => server.current?.type === "sidecar" && server.current.variant === "wsl"
   const isWslAvailable = () => !!wslServers.data?.runtime?.available
 
   const show = () =>

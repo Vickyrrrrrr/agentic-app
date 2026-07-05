@@ -383,9 +383,15 @@ def _cached_entitlement_for_temporary_failure(reason: str | None = None) -> dict
     return cached
 
 
-def _authorization_headers(request: Request) -> dict[str, str]:
+def _authorization_headers(request_or_headers) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
-    auth = request.headers.get("authorization")
+    if isinstance(request_or_headers, dict):
+        auth = request_or_headers.get("authorization") or request_or_headers.get("Authorization")
+        email = request_or_headers.get("x-agentic-user-email") or request_or_headers.get("X-AgentIC-User-Email")
+    else:
+        auth = request_or_headers.headers.get("authorization")
+        email = request_or_headers.headers.get("x-agentic-user-email")
+
     persisted_session = None
     if not auth:
         persisted_session = _read_or_refresh_auth_session()
@@ -394,7 +400,6 @@ def _authorization_headers(request: Request) -> dict[str, str]:
             auth = f"Bearer {token}"
     if auth:
         headers["Authorization"] = auth
-    email = request.headers.get("x-agentic-user-email")
     if not email and persisted_session:
         user = persisted_session.get("user") if isinstance(persisted_session.get("user"), dict) else {}
         email = user.get("email") if isinstance(user, dict) else None

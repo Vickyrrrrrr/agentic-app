@@ -344,6 +344,7 @@ const main = Effect.gen(function* () {
   const url = `http://${hostname}:${port}`
   const password = randomUUID()
 
+  process.env.AGENTIC_LOCAL_URL = url
   process.env.AGENTIC_OPENCODE_URL ??= url
   process.env.AGENTIC_OPENCODE_USERNAME ??= "opencode"
   process.env.AGENTIC_OPENCODE_PASSWORD ??= password
@@ -420,7 +421,7 @@ const main = Effect.gen(function* () {
     server = listener
     yield* Deferred.succeed(serverReady, {
       url,
-      agenticUrl: getAgenticBackendUrl(),
+      agenticUrl: url,
       username: "opencode",
       password,
     })

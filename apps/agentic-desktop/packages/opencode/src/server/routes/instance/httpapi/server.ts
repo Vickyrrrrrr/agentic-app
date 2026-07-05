@@ -196,6 +196,8 @@ type RouteRequirements =
   | HttpRouter.Request<"Requires", unknown>
   | HttpRouter.Request<"GlobalRequires", never>
 
+import { opencodeBridgeRoute } from "./opencode-bridge"
+
 export function createRoutes(
   corsOptions?: CorsOptions,
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
@@ -206,6 +208,7 @@ export function createRoutes(
     instanceRoutes,
     serverRoutes,
     docRoute,
+    opencodeBridgeRoute,
     uiRoute,
   ).pipe(
     Layer.provide([
