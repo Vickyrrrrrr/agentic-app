@@ -17,7 +17,10 @@ export function SchematicExplorer() {
     async (sessionId) => {
       setContextError(null)
       try {
-        const ctx = await callAgenticResolve({ session_id: sessionId })
+        const ctx = await callAgenticResolve({
+          session_id: sessionId,
+          workspace_root: decode64(params.dir) ?? "",
+        })
         return ctx as Record<string, unknown>
       } catch (e) {
         setContextError(e instanceof Error ? e.message : String(e))
