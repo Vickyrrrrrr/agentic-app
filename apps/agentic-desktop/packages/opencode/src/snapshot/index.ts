@@ -144,35 +144,37 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
         const stage = Effect.fnUntraced(function* (files: string[]) {
           if (!files.length) return
 
-          // Remove a stale index.lock if it exists and is older than 30s.
-          // A lock held for >30s means the previous git process has crashed and
-          // left it behind — safe to remove so the next git add can proceed.
+          // Purge a stale index.lock (>30 s old) left by a prior crashed git process.
+          // The semaphore above ensures we are the only fiber here; any lock we see
+          // was not created by us and is therefore safe to remove.
           const lockFile = path.join(state.gitdir, "index.lock")
-          yield* Effect.tryPromise({
+          const purgeStaleLock = Effect.tryPromise({
             try: async () => {
               const { stat, unlink } = await import("node:fs/promises")
               try {
                 const st = await stat(lockFile)
-                const ageMs = Date.now() - st.mtimeMs
-                if (ageMs > 30_000) await unlink(lockFile)
-              } catch {
-                // lock doesn't exist — nothing to do
-              }
+                if (Date.now() - st.mtimeMs > 30_000) await unlink(lockFile)
+              } catch { /* lock absent — nothing to do */ }
             },
             catch: () => undefined,
           }).pipe(Effect.ignore)
 
-          const result = yield* git(
+          const gitAdd = git(
             [...cfg, ...args(["add", "--all", "--sparse", "--pathspec-from-file=-", "--pathspec-file-nul"])],
-            {
-              cwd: state.directory,
-              stdin: feed(files),
-            },
+            { cwd: state.directory, stdin: feed(files) },
           )
+
+          const result = yield* gitAdd
           if (result.code === 0) return
+
+          // First attempt failed. Purge any stale lock and retry once.
+          yield* purgeStaleLock
+          const retry = yield* gitAdd
+          if (retry.code === 0) return
+
           yield* Effect.logWarning("failed to add snapshot files", {
-            exitCode: result.code,
-            stderr: result.stderr,
+            exitCode: retry.code,
+            stderr: retry.stderr,
           })
         })
 
@@ -197,11 +199,27 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
           return file
         })
 
+        // Default ignore patterns for EDA build artifacts and binary outputs
+        const DEFAULT_EDA_IGNORES = [
+          "**/obj_dir/**",
+          "**/*.o",
+          "**/*.a",
+          "**/*.d",
+          "**/*.out",
+          "**/*.log",
+          "**/*.tmp",
+          "**/*.vcd",
+          "**/*.fst",
+          "**/node_modules/**",
+          "**/.git/**",
+        ]
+
         const sync = Effect.fnUntraced(function* (list: string[] = []) {
           const file = yield* excludes()
           const target = path.join(state.gitdir, "info", "exclude")
           const text = [
             file ? (yield* read(file)).trimEnd() : "",
+            ...DEFAULT_EDA_IGNORES,
             ...list.map((item) => `/${item.replaceAll("\\", "/")}`),
           ]
             .filter(Boolean)
@@ -209,6 +227,7 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
           yield* fs.ensureDir(path.join(state.gitdir, "info")).pipe(Effect.orDie)
           yield* fs.writeFileString(target, text ? `${text}\n` : "").pipe(Effect.orDie)
         })
+
 
         const add = Effect.fnUntraced(function* () {
           yield* sync()
