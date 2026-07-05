@@ -5,23 +5,43 @@ import { fileURLToPath } from "node:url"
 import { Effect } from "effect"
 import { HttpRouter, HttpServerResponse } from "effect/unstable/http"
 
-function findServerDirectory(): string | undefined {
+type BridgeRunner =
+  | { mode: "binary"; binaryPath: string }
+  | { mode: "python"; scriptPath: string; serverDir: string }
+
+function resolveBridgeRunner(): BridgeRunner | undefined {
+  const executableName = process.platform === "win32" ? "agentic-backend.exe" : "agentic-backend"
+
+  // 1. Packaged app: look for the compiled binary in process.resourcesPath/backend/<platform>-<arch>/
+  const rp = (process as any).resourcesPath as string | undefined
+  if (rp) {
+    const platformKey = `${process.platform}-${process.arch}`
+    const packedBin = join(rp, "backend", platformKey, executableName)
+    if (existsSync(packedBin)) return { mode: "binary", binaryPath: packedBin }
+    // Also try the flat backend directory (some builds skip the platform subfolder)
+    const flatBin = join(rp, "backend", executableName)
+    if (existsSync(flatBin)) return { mode: "binary", binaryPath: flatBin }
+  }
+
+  // 2. Dev mode: walk up from cwd / __dirname looking for the repo's server/ folder
   const roots = [
     process.cwd(),
     dirname(fileURLToPath(import.meta.url)),
     resolve(dirname(fileURLToPath(import.meta.url)), "../../../../../.."),
   ]
-
   for (const root of roots) {
     let current = resolve(root)
     for (let depth = 0; depth < 8; depth += 1) {
       const candidate = join(current, "server")
-      if (existsSync(join(candidate, "opencode_bridge.py"))) return candidate
+      if (existsSync(join(candidate, "opencode_bridge.py"))) {
+        return { mode: "python", scriptPath: join(candidate, "opencode_bridge.py"), serverDir: candidate }
+      }
       const parent = dirname(current)
       if (parent === current) break
       current = parent
     }
   }
+  return undefined
 }
 
 function wslPathToLinux(pathStr: string): string {
@@ -67,33 +87,41 @@ function resolveLocalPath(directory: string, relativePath: string): string {
 function runPythonBridgePromise(payload: any): Promise<any> {
   return new Promise((resolvePromise, rejectPromise) => {
     const workspaceRoot = payload.workspace_root || ""
-    const serverDir = findServerDirectory()
+    const runner = resolveBridgeRunner()
 
-    if (!serverDir) {
-      rejectPromise(new Error("Could not locate the AgentIC server directory containing opencode_bridge.py"))
+    if (!runner) {
+      rejectPromise(new Error("Could not locate the AgentIC backend. Expected either agentic-backend binary or opencode_bridge.py."))
       return
     }
 
-    let command = "python3"
-    let args = [join(serverDir, "opencode_bridge.py")]
-    let spawnCwd = serverDir
+    let command: string
+    let args: string[]
+    let spawnCwd: string
 
-    const isWslWorkspace =
-      process.platform === "win32" &&
-      (workspaceRoot.startsWith("//wsl.localhost/") ||
-        workspaceRoot.startsWith("//wsl$/") ||
-        workspaceRoot.startsWith("\\\\wsl.localhost\\") ||
-        workspaceRoot.startsWith("\\\\wsl$\\"))
-
-    if (isWslWorkspace) {
-      const distro = getWslDistro(workspaceRoot) || "Ubuntu"
-      const linuxServerDir = wslPathToLinux(serverDir)
-      command = "C:\\Windows\\System32\\wsl.exe"
-      args = ["-d", distro, "--", "python3", `${linuxServerDir}/opencode_bridge.py`]
-      spawnCwd = serverDir
+    if (runner.mode === "binary") {
+      // Packaged app: run the compiled PyInstaller binary with --bridge flag
+      command = runner.binaryPath
+      args = ["--bridge"]
+      spawnCwd = dirname(runner.binaryPath)
     } else {
-      if (process.platform === "win32") {
-        command = "python"
+      // Dev mode: run python3 opencode_bridge.py
+      const isWslWorkspace =
+        process.platform === "win32" &&
+        (workspaceRoot.startsWith("//wsl.localhost/") ||
+          workspaceRoot.startsWith("//wsl$/") ||
+          workspaceRoot.startsWith("\\\\wsl.localhost\\") ||
+          workspaceRoot.startsWith("\\\\wsl$\\"))
+
+      if (isWslWorkspace) {
+        const distro = getWslDistro(workspaceRoot) || "Ubuntu"
+        const linuxScriptPath = wslPathToLinux(runner.scriptPath)
+        command = "C:\\Windows\\System32\\wsl.exe"
+        args = ["-d", distro, "--", "python3", linuxScriptPath]
+        spawnCwd = runner.serverDir
+      } else {
+        command = process.platform === "win32" ? "python" : "python3"
+        args = [runner.scriptPath]
+        spawnCwd = runner.serverDir
       }
     }
 

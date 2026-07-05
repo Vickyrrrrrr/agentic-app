@@ -2414,7 +2414,14 @@ async def get_agents():
     return []
 
 if __name__ == "__main__":
-    import uvicorn
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-    port = int(os.environ.get("AGENTIC_PORT") or os.environ.get("PORT") or "7860")
-    uvicorn.run(app, host="0.0.0.0", port=port, access_log=True)
+    import sys as _sys
+    if len(_sys.argv) > 1 and _sys.argv[1] == "--bridge":
+        # Bridge mode: the Hono sidecar invokes the compiled binary with --bridge.
+        # Read JSON from stdin, dispatch to the opencode_bridge logic, write JSON to stdout.
+        from opencode_bridge import main as _bridge_main
+        _bridge_main()
+    else:
+        import uvicorn
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+        port = int(os.environ.get("AGENTIC_PORT") or os.environ.get("PORT") or "7860")
+        uvicorn.run(app, host="0.0.0.0", port=port, access_log=True)

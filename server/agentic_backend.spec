@@ -21,6 +21,13 @@ a = Analysis(
         "httptools.parser.parser",
         "websockets.legacy.server",
         "websockets.legacy.client",
+        # Bridge mode: ensure opencode_bridge and its agent modules are included
+        "opencode_bridge",
+        "signoff_reports",
+        "sta_reports",
+        "report_parsers",
+        "agent_tools",
+        "session_workflow",
     ],
     hookspath=[],
     hooksconfig={},
