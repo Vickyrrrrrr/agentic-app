@@ -212,6 +212,7 @@ export default function FileTree(props: {
   _chain?: readonly string[]
 }) {
   const file = useFile()
+  const sessionLayout = useSessionLayout()
   const level = props.level ?? 0
   const draggable = () => props.draggable ?? true
 
@@ -561,10 +562,9 @@ export default function FileTree(props: {
                       <ContextMenu.Content>
                         <Show when={node.path.endsWith(".v") || node.path.endsWith(".sv")}>
                           <ContextMenu.Item onSelect={() => {
-                            const { tabs } = useSessionLayout()
                             const tab = schematicTab(node.path)
-                            tabs().open(tab)
-                            tabs().setActive(tab)
+                            sessionLayout?.tabs().open(tab)
+                            sessionLayout?.tabs().setActive(tab)
                           }}>
                             <ContextMenu.ItemLabel>Open Schematic Viewer</ContextMenu.ItemLabel>
                           </ContextMenu.Item>
