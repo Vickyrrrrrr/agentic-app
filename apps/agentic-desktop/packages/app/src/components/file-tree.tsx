@@ -3,6 +3,9 @@ import { encodeFilePath } from "@/context/file/path"
 import { Collapsible } from "@opencode-ai/ui/collapsible"
 import { FileIcon } from "@opencode-ai/ui/file-icon"
 import { Icon } from "@opencode-ai/ui/icon"
+import { ContextMenu } from "@opencode-ai/ui/context-menu"
+import { schematicTab } from "@/components/session/schematic-viewer"
+import { useSessionLayout } from "@/pages/session/session-layout"
 import {
   createEffect,
   createMemo,
@@ -451,51 +454,132 @@ export default function FileTree(props: {
                 </Collapsible>
               </Match>
               <Match when={node.type === "file"}>
-                <FileTreeNode
-                  node={node}
-                  level={level}
-                  active={props.active}
-                  nodeClass={props.nodeClass}
-                  draggable={draggable()}
-                  kinds={kinds()}
-                  marks={marks()}
-                  as="button"
-                  type="button"
-                  onClick={() => props.onFileClick?.(node)}
+                <Show
+                  when={
+                    node.path.endsWith(".v") ||
+                    node.path.endsWith(".sv") ||
+                    node.path.endsWith(".vcd") ||
+                    node.path.endsWith(".fst")
+                  }
+                  fallback={
+                    <FileTreeNode
+                      node={node}
+                      level={level}
+                      active={props.active}
+                      nodeClass={props.nodeClass}
+                      draggable={draggable()}
+                      kinds={kinds()}
+                      marks={marks()}
+                      as="button"
+                      type="button"
+                      onClick={() => props.onFileClick?.(node)}
+                    >
+                      <div class="w-4 shrink-0" />
+                      <Switch>
+                        <Match when={node.ignored}>
+                          <FileIcon
+                            node={node}
+                            class="size-4 filetree-icon filetree-icon--mono"
+                            style="color: var(--icon-weak-base)"
+                            mono
+                          />
+                        </Match>
+                        <Match when={active()}>
+                          <FileIcon
+                            node={node}
+                            class="size-4 filetree-icon filetree-icon--mono"
+                            style={kindTextColor(kind()!)}
+                            mono
+                          />
+                        </Match>
+                        <Match when={!node.ignored}>
+                          <span class="filetree-iconpair size-4">
+                            <FileIcon
+                              node={node}
+                              class="size-4 filetree-icon filetree-icon--color opacity-0 group-hover/filetree:opacity-100"
+                            />
+                            <FileIcon
+                              node={node}
+                              class="size-4 filetree-icon filetree-icon--mono group-hover/filetree:opacity-0"
+                              mono
+                            />
+                          </span>
+                        </Match>
+                      </Switch>
+                    </FileTreeNode>
+                  }
                 >
-                  <div class="w-4 shrink-0" />
-                  <Switch>
-                    <Match when={node.ignored}>
-                      <FileIcon
+                  <ContextMenu>
+                    <ContextMenu.Trigger>
+                      <FileTreeNode
                         node={node}
-                        class="size-4 filetree-icon filetree-icon--mono"
-                        style="color: var(--icon-weak-base)"
-                        mono
-                      />
-                    </Match>
-                    <Match when={active()}>
-                      <FileIcon
-                        node={node}
-                        class="size-4 filetree-icon filetree-icon--mono"
-                        style={kindTextColor(kind()!)}
-                        mono
-                      />
-                    </Match>
-                    <Match when={!node.ignored}>
-                      <span class="filetree-iconpair size-4">
-                        <FileIcon
-                          node={node}
-                          class="size-4 filetree-icon filetree-icon--color opacity-0 group-hover/filetree:opacity-100"
-                        />
-                        <FileIcon
-                          node={node}
-                          class="size-4 filetree-icon filetree-icon--mono group-hover/filetree:opacity-0"
-                          mono
-                        />
-                      </span>
-                    </Match>
-                  </Switch>
-                </FileTreeNode>
+                        level={level}
+                        active={props.active}
+                        nodeClass={props.nodeClass}
+                        draggable={draggable()}
+                        kinds={kinds()}
+                        marks={marks()}
+                        as="button"
+                        type="button"
+                        onClick={() => props.onFileClick?.(node)}
+                      >
+                        <div class="w-4 shrink-0" />
+                        <Switch>
+                          <Match when={node.ignored}>
+                            <FileIcon
+                              node={node}
+                              class="size-4 filetree-icon filetree-icon--mono"
+                              style="color: var(--icon-weak-base)"
+                              mono
+                            />
+                          </Match>
+                          <Match when={active()}>
+                            <FileIcon
+                              node={node}
+                              class="size-4 filetree-icon filetree-icon--mono"
+                              style={kindTextColor(kind()!)}
+                              mono
+                            />
+                          </Match>
+                          <Match when={!node.ignored}>
+                            <span class="filetree-iconpair size-4">
+                              <FileIcon
+                                node={node}
+                                class="size-4 filetree-icon filetree-icon--color opacity-0 group-hover/filetree:opacity-100"
+                              />
+                              <FileIcon
+                                node={node}
+                                class="size-4 filetree-icon filetree-icon--mono group-hover/filetree:opacity-0"
+                                mono
+                              />
+                            </span>
+                          </Match>
+                        </Switch>
+                      </FileTreeNode>
+                    </ContextMenu.Trigger>
+                    <ContextMenu.Portal>
+                      <ContextMenu.Content>
+                        <Show when={node.path.endsWith(".v") || node.path.endsWith(".sv")}>
+                          <ContextMenu.Item onSelect={() => {
+                            const { tabs } = useSessionLayout()
+                            const tab = schematicTab(node.path)
+                            tabs().open(tab)
+                            tabs().setActive(tab)
+                          }}>
+                            <ContextMenu.ItemLabel>Open Schematic Viewer</ContextMenu.ItemLabel>
+                          </ContextMenu.Item>
+                        </Show>
+                        <Show when={node.path.endsWith(".vcd") || node.path.endsWith(".fst")}>
+                          <ContextMenu.Item onSelect={() => {
+                            props.onFileClick?.(node)
+                          }}>
+                            <ContextMenu.ItemLabel>Open Waveform Viewer</ContextMenu.ItemLabel>
+                          </ContextMenu.Item>
+                        </Show>
+                      </ContextMenu.Content>
+                    </ContextMenu.Portal>
+                  </ContextMenu>
+                </Show>
               </Match>
             </Switch>
           )

@@ -515,28 +515,6 @@ export function SessionSidePanel(props: {
                       >
                         <Icon name="shield" size="small" />
                       </button>
-                      <button
-                        onClick={() => setFileTreeTabValue("schematic")}
-                        title="RTL Schematic"
-                        class="w-9 h-9 flex items-center justify-center rounded-md transition-colors"
-                        classList={{
-                          "bg-surface-base text-text-strong": fileTreeTab() === "schematic",
-                          "text-text-weaker hover:text-text-base hover:bg-surface-base": fileTreeTab() !== "schematic",
-                        }}
-                      >
-                        <Icon name="code-lines" size="small" />
-                      </button>
-                      <button
-                        onClick={() => setFileTreeTabValue("waves")}
-                        title="Waves"
-                        class="w-9 h-9 flex items-center justify-center rounded-md transition-colors"
-                        classList={{
-                          "bg-surface-base text-text-strong": fileTreeTab() === "waves",
-                          "text-text-weaker hover:text-text-base hover:bg-surface-base": fileTreeTab() !== "waves",
-                        }}
-                      >
-                        <Icon name="sliders" size="small" />
-                      </button>
                     </div>
                     <div class="flex-1 min-w-0 overflow-y-auto overflow-x-hidden bg-background-stronger">
                       <Switch>
@@ -587,16 +565,6 @@ export function SessionSidePanel(props: {
                         <Match when={fileTreeTab() === "signoff"}>
                           <div class="h-full contain-strict">
                             <DRCLVSDashboard />
-                          </div>
-                        </Match>
-                        <Match when={fileTreeTab() === "schematic"}>
-                          <div class="h-full contain-strict overflow-y-auto">
-                            <SchematicExplorer />
-                          </div>
-                        </Match>
-                        <Match when={fileTreeTab() === "waves"}>
-                          <div class="h-full contain-strict">
-                            <WaveformPanel openTab={openTab} file={file} />
                           </div>
                         </Match>
                       </Switch>
