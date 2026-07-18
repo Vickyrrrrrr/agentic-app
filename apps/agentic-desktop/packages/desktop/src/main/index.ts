@@ -13,7 +13,7 @@ import { Deferred, Effect, Fiber } from "effect"
 import contextMenu from "electron-context-menu"
 
 import type { ServerReadyData } from "../preload/types"
-import { getAgenticBackendUrl, startAgenticBackend, stopAgenticBackend } from "./agentic-backend"
+import { configureAgenticBackendUrl, getAgenticBackendUrl, startAgenticBackend, stopAgenticBackend } from "./agentic-backend"
 import { checkAppExists, resolveAppPath } from "./apps"
 import { CHANNEL } from "./constants"
 import { registerIpcHandlers, sendDeepLinks, sendMenuCommand } from "./ipc"
@@ -344,8 +344,8 @@ const main = Effect.gen(function* () {
   const url = `http://${hostname}:${port}`
   const password = randomUUID()
 
-  process.env.AGENTIC_LOCAL_URL = url
-  process.env.AGENTIC_OPENCODE_URL ??= url
+  const agenticUrl = yield* Effect.promise(() => configureAgenticBackendUrl(url))
+  process.env.AGENTIC_OPENCODE_URL = url
   process.env.AGENTIC_OPENCODE_USERNAME ??= "opencode"
   process.env.AGENTIC_OPENCODE_PASSWORD ??= password
 
@@ -421,7 +421,7 @@ const main = Effect.gen(function* () {
     server = listener
     yield* Deferred.succeed(serverReady, {
       url,
-      agenticUrl: url,
+      agenticUrl,
       username: "opencode",
       password,
     })

@@ -21,6 +21,10 @@ def build_sta_report(design_root: str, design_name: str = "scratch") -> dict[str
     if file_report:
         return file_report
 
+    metrics_report = _from_metrics_json(root)
+    if metrics_report:
+        return metrics_report
+
     return {
         "schema_version": STA_REPORT_VERSION,
         "design_name": design_name or root.name,
@@ -36,6 +40,9 @@ def build_sta_report(design_root: str, design_name: str = "scratch") -> dict[str
 
 def _from_checkpoints(root: Path, design_name: str) -> dict[str, Any] | None:
     checkpoint_file = root / ".agentic" / f"{design_name or 'scratch'}_checkpoints.json"
+    if not checkpoint_file.is_file():
+        # Fallback to scratch_checkpoints.json
+        checkpoint_file = root / ".agentic" / "scratch_checkpoints.json"
     if not checkpoint_file.is_file():
         return None
     try:
@@ -67,7 +74,6 @@ def _from_checkpoints(root: Path, design_name: str) -> dict[str, Any] | None:
         )
     return None
 
-
 def _from_report_files(root: Path) -> dict[str, Any] | None:
     candidates = _candidate_sta_files(root)
     for path in candidates:
@@ -92,48 +98,36 @@ def _from_report_files(root: Path) -> dict[str, Any] | None:
             },
         )
     return None
-
-
 def _candidate_sta_files(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
-    patterns = (
-        "sta/**/*.rpt",
-        "sta/**/*.log",
-        "reports/**/*sta*.rpt",
-        "reports/**/*sta*.log",
-        "reports/**/*timing*.rpt",
-        "reports/**/*timing*.log",
-        "reports/**/*slack*.rpt",
-        "openroad/**/*sta*.rpt",
-        "openroad/**/*timing*.rpt",
-        "runs/**/*sta*.rpt",
-        "runs/**/*timing*.rpt",
-        # Deep recursive patterns for nested layouts / reports
-        "**/reports/**/*sta*.rpt",
-        "**/reports/**/*sta*.log",
-        "**/reports/**/*timing*.rpt",
-        "**/reports/**/*timing*.log",
-        "**/reports/**/*slack*.rpt",
-        "**/reports/**/*.summary.rpt",
-        "**/runs/**/reports/**/*sta*.rpt",
-        "**/runs/**/reports/signoff/**/*.rpt",
-        "**/signoff/**/*sta*.rpt",
-        "**/openlane*/**/*sta*.rpt",
-        "**/openlane*/**/reports/signoff/**/*.rpt",
-    )
+    patterns = [
+        "**/*sta*.rpt",
+        "**/*sta*.log",
+        "**/*timing*.rpt",
+        "**/*timing*.log",
+        "**/*slack*.rpt",
+        "**/*.summary.rpt",
+        "**/*primetime*.rpt",
+        "**/*tempus*.rpt",
+        "**/*opensta*.rpt",
+    ]
     seen: set[Path] = set()
     files: list[Path] = []
+
+    exclude_dirs = {".git", ".agentic", "node_modules", "out", "venv", ".venv"}
+
     for pattern in patterns:
         for path in root.glob(pattern):
             if not path.is_file() or path in seen:
                 continue
+            if any(part in exclude_dirs for part in path.parts):
+                continue
             seen.add(path)
             files.append(path)
+
     files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
     return files[:40]
-
-
 def _parsed_from_checkpoint_metrics(item: dict[str, Any]) -> dict[str, Any]:
     metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
     parsed_metrics: dict[str, Any] = {}
@@ -223,3 +217,59 @@ def _number(value: Any) -> float | int | None:
 def _is_negative(value: Any) -> bool:
     number = _number(value)
     return number is not None and number < 0
+
+
+def _from_metrics_json(root: Path) -> dict[str, Any] | None:
+    candidates = []
+    for pattern in ("**/metrics.json", "**/resolved.json", "metrics.json"):
+        candidates.extend(root.glob(pattern))
+
+    candidates = [p for p in candidates if p.is_file()]
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    for path in candidates:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                continue
+
+            setup_ws = _number(data.get("timing__setup__ws"))
+            hold_ws = _number(data.get("timing__hold__ws"))
+            setup_wns = _number(data.get("timing__setup__wns"))
+            hold_wns = _number(data.get("timing__hold__wns"))
+
+            slack_values = [v for v in (setup_ws, hold_ws, setup_wns, hold_wns) if v is not None]
+            wns_val = min(float(value) for value in slack_values) if slack_values else None
+
+            if wns_val is not None:
+                setup_tns = _number(data.get("timing__setup__tns")) or 0.0
+                hold_tns = _number(data.get("timing__hold__tns")) or 0.0
+                tns_val = float(setup_tns) + float(hold_tns)
+                return {
+                    "schema_version": STA_REPORT_VERSION,
+                    "design_name": root.name,
+                    "status": "clean" if wns_val >= 0 else "violating",
+                    "source": {
+                        "type": "file",
+                        "path": str(path.relative_to(root)).replace("\\", "/"),
+                        "size_bytes": path.stat().st_size,
+                        "mtime": path.stat().st_mtime,
+                    },
+                    "wns": wns_val,
+                    "tns": tns_val,
+                    "paths": [],
+                    "parsed_report": {
+                        "kind": "sta",
+                        "metrics": {
+                            "wns_ns": wns_val,
+                            "tns_ns": tns_val,
+                            "setup_slack_ns": float(setup_ws if setup_ws is not None else setup_wns or 0.0),
+                            "hold_slack_ns": float(hold_ws if hold_ws is not None else hold_wns or 0.0)
+                        }
+                    },
+                    "message": f"Timing signoff loaded from {path.name}.",
+                }
+        except Exception:
+            continue
+    return None

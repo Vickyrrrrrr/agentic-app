@@ -22,6 +22,7 @@ import { createSessionTabs } from "@/pages/session/helpers"
 import { SessionWaveformTab } from "@/components/session"
 import { LogDiagnosisTab } from "@/components/session/log-diagnosis-tab"
 import { GdsLayoutTab } from "@/components/session/gds-layout-tab"
+import { HdlEditorTab } from "@/components/session/hdl-editor-tab"
 import { Markdown } from "@opencode-ai/ui/markdown"
 
 function FileCommentMenu(props: {
@@ -55,6 +56,10 @@ function FileCommentMenu(props: {
       </DropdownMenu>
     </div>
   )
+}
+
+function isHdlSource(path: string | undefined) {
+  return !!path && [".v", ".sv", ".vh", ".svh"].some((extension) => path.toLowerCase().endsWith(extension))
 }
 
 type ScrollPos = { x: number; y: number }
@@ -456,6 +461,9 @@ export function FileTabContent(props: { tab: string }) {
             </Match>
             <Match when={state()?.loaded && (path()?.endsWith(".gds") || path()?.endsWith(".gds.gz") || path()?.endsWith(".oas"))}>
               <GdsLayoutTab path={path()!} />
+            </Match>
+            <Match when={state()?.loaded && isHdlSource(path())}>
+              <HdlEditorTab path={path()!} source={contents()} />
             </Match>
             <Match when={state()?.loaded && (path()?.endsWith(".md") || path()?.endsWith(".markdown"))}>
             <div class="px-6 py-4 select-text">

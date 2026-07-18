@@ -1899,7 +1899,7 @@ ToolRegistry.register({
               <span data-slot="basic-tool-tool-title">
                 <TextShimmer text={i18n.t("ui.tool.shell")} active={pending()} />
               </span>
-              <Show when={!pending() && submessage()}>
+              <Show when={submessage()}>
                 <ShellSubmessage text={submessage()} animate={sawPending} />
               </Show>
             </div>

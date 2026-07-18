@@ -82,7 +82,17 @@ function parseVCD(content: string): VCDData {
       continue
     }
 
-    if (line.startsWith("r") || line.startsWith("R")) { i++; continue }
+    if (line.startsWith("r") || line.startsWith("R")) {
+      // real-type value: "r<float> <id>" — capture as string for step rendering
+      const spaceIdx = line.indexOf(" ")
+      if (spaceIdx > 0) {
+        const value = line.slice(1, spaceIdx)
+        const id = line.slice(spaceIdx + 1).trim()
+        changes.get(id)?.push({ time: currentTime, value })
+      }
+      i++
+      continue
+    }
 
     if (line.length >= 2) {
       const value = line[0]
@@ -269,6 +279,7 @@ function WaveformCanvas(props: { data: VCDData; filterText: string; openTab: (pa
   const [offsetX, setOffsetX] = createSignal(0)
   const [hoveredRow, setHoveredRow] = createSignal<number | null>(null)
   const [canvasWidth, setCanvasWidth] = createSignal(800)
+  const [cursorTime, setCursorTime] = createSignal<number | null>(null)  // click cursor position in VCD time units
 
   const { params } = useSessionLayout()
 
@@ -331,6 +342,7 @@ function WaveformCanvas(props: { data: VCDData; filterText: string; openTab: (pa
     const range = timeRange()
     const step = Math.max(Math.floor(range / 20), 1)
     const sx = nameWidth + pad.left
+    const tsLabel = props.data.timescale || ""
 
     ctx.save()
     // Clip grid lines to the wave area
@@ -348,9 +360,30 @@ function WaveformCanvas(props: { data: VCDData; filterText: string; openTab: (pa
         ctx.fillStyle = "rgba(255,255,255,0.2)"
         ctx.font = '9px "JetBrainsMono Nerd Font Mono", monospace'
         ctx.textBaseline = "middle"
-        ctx.fillText(`${t}`, x + 2, h - 10)
+        ctx.fillText(`${t} ${tsLabel}`, x + 2, h - 10)
       }
     }
+
+    // Draw cursor line
+    const ct = cursorTime()
+    if (ct !== null) {
+      const cx = sx + ct * currentZoom + currentOffset
+      if (cx >= sx && cx <= w) {
+        ctx.strokeStyle = "rgba(255,80,80,0.85)"
+        ctx.lineWidth = 1.5
+        ctx.setLineDash([4, 3])
+        ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, h); ctx.stroke()
+        ctx.setLineDash([])
+        // Time label at top of cursor
+        ctx.fillStyle = "rgba(255,80,80,0.95)"
+        ctx.font = 'bold 9px "JetBrainsMono Nerd Font Mono", monospace'
+        ctx.textBaseline = "top"
+        ctx.textAlign = "left"
+        ctx.fillText(`▶ ${ct} ${tsLabel}`, cx + 3, 2)
+        ctx.textAlign = "left"
+      }
+    }
+
     ctx.restore()
 
     const currentChanges = changes()
@@ -387,25 +420,37 @@ function WaveformCanvas(props: { data: VCDData; filterText: string; openTab: (pa
           for (let idx = 0; idx < ch.length; idx++) {
             const c = ch[idx]
             const x = sx + c.time * currentZoom + currentOffset
-            const hi = c.value === "1" || c.value === "h"
-            const curY = hi ? hy : ly
+            // VLSI standard: 1=green HIGH, 0=grey LOW, x=orange UNKNOWN, z=purple HI-Z
+            const vLow = c.value.toLowerCase()
+            const isX = vLow === "x"
+            const isZ = vLow === "z"
+            const hi = c.value === "1" || vLow === "h"
+            const curY = (isX || isZ) ? cy : (hi ? hy : ly)
+
+            const sigColor = isX ? "rgba(255,160,50,0.9)"      // X=orange (unknown)
+                           : isZ ? "rgba(180,100,255,0.9)"     // Z=purple (hi-z)
+                           : hi  ? "rgba(67,181,129,0.8)"      // 1=green
+                           :       "rgba(255,255,255,0.35)"    // 0=grey
 
             if (idx > 0) {
               const px = sx + ch[idx - 1].time * currentZoom + currentOffset
-              const wasHi = ch[idx - 1].value === "1" || ch[idx - 1].value === "h"
-              const prevY = wasHi ? hy : ly
-              ctx.strokeStyle = wasHi ? "rgba(67,181,129,0.8)" : "rgba(255,255,255,0.4)"
+              const prevVLow = ch[idx - 1].value.toLowerCase()
+              const wasX = prevVLow === "x"
+              const wasZ = prevVLow === "z"
+              const wasHi = ch[idx - 1].value === "1" || prevVLow === "h"
+              const prevY = (wasX || wasZ) ? cy : (wasHi ? hy : ly)
+              const prevColor = wasX ? "rgba(255,160,50,0.9)" : wasZ ? "rgba(180,100,255,0.9)" : wasHi ? "rgba(67,181,129,0.8)" : "rgba(255,255,255,0.35)"
+              ctx.strokeStyle = prevColor
               ctx.lineWidth = 1.5
               ctx.beginPath(); ctx.moveTo(px, prevY); ctx.lineTo(x, prevY); ctx.stroke()
-              if (wasHi !== hi) {
-                ctx.strokeStyle = "rgba(255,255,255,0.5)"
-                ctx.lineWidth = 1
-                ctx.beginPath(); ctx.moveTo(x, prevY); ctx.lineTo(x, curY); ctx.stroke()
-              }
+              // Draw vertical transition edge
+              ctx.strokeStyle = "rgba(255,255,255,0.4)"
+              ctx.lineWidth = 1
+              ctx.beginPath(); ctx.moveTo(x, prevY); ctx.lineTo(x, curY); ctx.stroke()
             }
 
             const nx = idx < ch.length - 1 ? sx + ch[idx + 1].time * currentZoom + currentOffset : exWave
-            ctx.strokeStyle = hi ? "rgba(67,181,129,0.8)" : "rgba(255,255,255,0.4)"
+            ctx.strokeStyle = sigColor
             ctx.lineWidth = 1.5
             ctx.beginPath(); ctx.moveTo(x, curY); ctx.lineTo(nx, curY); ctx.stroke()
           }
@@ -417,20 +462,31 @@ function WaveformCanvas(props: { data: VCDData; filterText: string; openTab: (pa
             const nx = idx < ch.length - 1 ? sx + ch[idx + 1].time * currentZoom + currentOffset : exWave
             const mx = (x + nx) / 2
 
-            // Draw bus outline
-            ctx.strokeStyle = "rgba(100,200,255,0.8)"
+            // VLSI bus colors: X=orange (any bit unknown), Z=purple (hi-z), else teal
+            const valLow = c.value.toLowerCase()
+            const busHasX = valLow.includes("x")
+            const busHasZ = !busHasX && valLow.includes("z")
+            const busColor = busHasX ? "rgba(255,160,50,0.85)"
+                           : busHasZ ? "rgba(180,100,255,0.85)"
+                           :           "rgba(100,200,255,0.8)"
+
+            // Draw bus outline (hexagonal ends)
+            const diagW = Math.min(6, (nx - x) / 4)
+            ctx.strokeStyle = busColor
             ctx.lineWidth = 1
             ctx.beginPath()
-            ctx.moveTo(x, hy)
-            ctx.lineTo(nx, hy)
-            ctx.lineTo(nx, ly)
-            ctx.lineTo(x, ly)
+            ctx.moveTo(x + diagW, hy)
+            ctx.lineTo(nx - diagW, hy)
+            ctx.lineTo(nx, cy)
+            ctx.lineTo(nx - diagW, ly)
+            ctx.lineTo(x + diagW, ly)
+            ctx.lineTo(x, cy)
             ctx.closePath()
             ctx.stroke()
 
             // Draw bus value text
             if (nx - x > 20) {
-              ctx.fillStyle = "rgba(255,255,255,0.8)"
+              ctx.fillStyle = busHasX ? "rgba(255,200,100,0.9)" : busHasZ ? "rgba(200,150,255,0.9)" : "rgba(255,255,255,0.85)"
               ctx.font = '9px "JetBrainsMono Nerd Font Mono", monospace'
               ctx.textBaseline = "middle"
               ctx.textAlign = "center"
@@ -463,15 +519,17 @@ function WaveformCanvas(props: { data: VCDData; filterText: string; openTab: (pa
     untrack(() => redraw())
   })
 
-  // Effect to redraw on zoom, offset, or hover changes
+  // Effect to redraw on zoom, offset, hover, or cursor changes
   createEffect(() => {
     zoom()
     offsetX()
     hoveredRow()
     canvasWidth()
     canvasHeight()
+    cursorTime()
     redraw()
   })
+
 
   // Handle Resize
   const updateSize = () => {
@@ -508,6 +566,7 @@ function WaveformCanvas(props: { data: VCDData; filterText: string; openTab: (pa
   let isDragging = false
   let startX = 0
   let startOffset = 0
+  let dragMovedPx = 0  // track drag distance to distinguish click from pan
 
   const handleMouseDown = (e: MouseEvent) => {
     const rect = canvasRef.getBoundingClientRect()
@@ -515,6 +574,7 @@ function WaveformCanvas(props: { data: VCDData; filterText: string; openTab: (pa
     if (x < nameWidth + pad.left) return
 
     isDragging = true
+    dragMovedPx = 0
     startX = e.clientX
     startOffset = offsetX()
   }
@@ -534,12 +594,23 @@ function WaveformCanvas(props: { data: VCDData; filterText: string; openTab: (pa
 
     if (isDragging) {
       const dx = e.clientX - startX
+      dragMovedPx = Math.abs(dx)
       const nextOffset = startOffset + dx
       setOffsetX(clampOffset(zoom(), nextOffset, canvasWidth()))
     }
   }
 
-  const handleMouseUp = () => {
+  const handleMouseUp = (e: MouseEvent) => {
+    if (isDragging && dragMovedPx < 4) {
+      // Treat as click: place cursor at this time
+      const rect = canvasRef.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const sx = nameWidth + pad.left
+      if (x >= sx) {
+        const timeVal = Math.round((x - sx - offsetX()) / zoom())
+        setCursorTime(Math.max(0, Math.min(timeVal, timeRange())))
+      }
+    }
     isDragging = false
   }
 
@@ -637,7 +708,7 @@ function WaveformCanvas(props: { data: VCDData; filterText: string; openTab: (pa
         class="absolute top-0 right-4 bg-background-base/80 backdrop-blur px-2 py-1 text-10-regular text-text-weaker rounded-md border border-border-weaker-base pointer-events-none z-10"
         style="margin-top: 6px;"
       >
-        Drag to Pan &middot; Ctrl+Scroll to Zoom &middot; Double-Click to Cross-Probe RTL
+        Click to Place Cursor &middot; Drag to Pan &middot; Ctrl+Scroll to Zoom &middot; Dbl-Click to Cross-Probe RTL
       </div>
       <canvas
         ref={canvasRef!}

@@ -1152,17 +1152,85 @@ export function MessageTimeline(props: {
           const m = messageByID().get(userMessageRow().userMessageID)
           if (m?.role === "user") return m
         })
+
+        // Sleek compact collapsible card for reports/metadata pasted into chat
+        const CollapsibleReportCard = (props: { title: string; icon: any; content: string }) => {
+          const [expanded, setExpanded] = createSignal(false)
+          return (
+            <div class="my-2 rounded-lg border border-border-weaker-base bg-surface-base/40 overflow-hidden select-none">
+              <div
+                class="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-surface-stronger transition-colors"
+                onClick={() => setExpanded(!expanded())}
+              >
+                <div class="flex items-center gap-2 text-11-medium text-text-strong font-mono">
+                  <Icon name={props.icon} class="text-icon-base shrink-0 w-3.5 h-3.5" />
+                  <span>{props.title}</span>
+                </div>
+                <div class="text-10-medium text-text-weaker flex items-center gap-1.5 font-mono uppercase tracking-wider">
+                  <span>{expanded() ? "Hide Details" : "Show Details"}</span>
+                  <Icon
+                    name="chevron-down"
+                    class={`w-3.5 h-3.5 transition-transform duration-200 ${expanded() ? "rotate-180" : ""}`}
+                  />
+                </div>
+              </div>
+              <Show when={expanded()}>
+                <div class="p-3 text-10-regular font-mono bg-background-stronger/60 border-t border-border-weaker-base max-h-96 overflow-y-auto overflow-x-auto text-text-base whitespace-pre-wrap select-text">
+                  {props.content}
+                </div>
+              </Show>
+            </div>
+          )
+        }
+
+        const partsAndCards = createMemo(() => {
+          const originalParts = getMsgParts(userMessageRow().userMessageID)
+          const renderParts: PartType[] = []
+          const reportCards: JSX.Element[] = []
+
+          for (const part of originalParts) {
+            if (part.type === "text") {
+              const text = part.text
+              const hasGdsSummary = text.includes("[GDS Layout Summary]")
+              const hasGdsObject = text.includes("[Selected Layout Object]")
+              const hasDrcReport = text.includes("[DRC Violation Report]")
+              const hasLogSummary = text.includes("[Log Diagnosis Summary]") || text.includes("[Log Summary]")
+
+              if (hasGdsSummary || hasGdsObject || hasDrcReport || hasLogSummary) {
+                let title = "Attached Report"
+                let icon = "file"
+                if (hasGdsSummary) { title = "GDS Layout Summary"; icon = "file-tree" }
+                else if (hasGdsObject) { title = "Selected Layout Object"; icon = "info" }
+                else if (hasDrcReport) { title = "DRC Violation Report"; icon = "warning" }
+                else if (hasLogSummary) { title = "Log Diagnosis Summary"; icon = "console" }
+
+                reportCards.push(
+                  <CollapsibleReportCard title={title} icon={icon} content={text} />
+                )
+                continue
+              }
+            }
+            renderParts.push(part)
+          }
+          return { renderParts, reportCards }
+        })
+
         return (
           <TimelineRowFrame row={userMessageRow}>
             <Show when={message()}>
               {(message) => (
                 <div data-slot="session-turn-message-container" class="w-full px-4 md:px-5">
                   <div data-slot="session-turn-message-content" aria-live="off">
-                    <Message
-                      message={message()}
-                      parts={getMsgParts(userMessageRow().userMessageID)}
-                      actions={props.actions}
-                    />
+                    <For each={partsAndCards().reportCards}>
+                      {(card) => card}
+                    </For>
+                    <Show when={partsAndCards().renderParts.length > 0}>
+                      <Message
+                        message={message()}
+                        parts={partsAndCards().renderParts}
+                        actions={props.actions}
+                      />
+                    </Show>
                   </div>
                 </div>
               )}

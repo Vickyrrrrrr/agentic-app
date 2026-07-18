@@ -10,6 +10,7 @@ const execFileAsync = promisify(execFile)
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)))
 const signScript = path.join(rootDir, "script", "sign-windows.ps1")
+const slangRuntimeDir = path.join(desktopDir, "resources", "tools", "slang")
 
 async function signWindows(configuration: { path: string }) {
   if (process.platform !== "win32") return
@@ -36,6 +37,13 @@ async function verifyAgenticBackendRuntime(context: BeforePackContext) {
         `Run "bun run build:agentic-backend" on ${platform} before packaging.`,
         "The backend runtime is OS-specific and cannot be reused from another platform.",
       ].join("\n"),
+    )
+  }
+  const slangExecutable = platform === "win32" ? "slang-server.exe" : "slang-server"
+  const slangPath = path.join(slangRuntimeDir, `${platform}-${arch}`, slangExecutable)
+  if (channel !== "dev" && !existsSync(slangPath)) {
+    throw new Error(
+      `Missing bundled Slang runtime: ${slangPath}. Build the exact platform/arch binary before beta/production packaging.`,
     )
   }
 }
@@ -65,6 +73,15 @@ const getBase = (): Configuration => ({
       to: "backend/",
       filter: ["**/*"],
     },
+    ...(existsSync(slangRuntimeDir)
+      ? [{
+          // Platform-specific Slang binaries remain outside asar so the Hono
+          // sidecar can execute them directly.
+          from: "resources/tools/slang/",
+          to: "tools/slang/",
+          filter: ["**/*"],
+        }]
+      : []),
     {
       from: "resources/license.json",
       to: "license.json",

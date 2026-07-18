@@ -80,17 +80,66 @@ function isPointInPolygon(px: number, py: number, pts: number[]) {
   return inside
 }
 
-function screenBbox(bbox: BBox, v: { offsetX: number; offsetY: number; scale: number }, cx: number, cy: number, w: number, h: number) {
-  const x0 = (bbox.minX - cx) * v.scale + w / 2
-  const x1 = (bbox.maxX - cx) * v.scale + w / 2
-  const y0 = -(bbox.maxY - cy) * v.scale + h / 2
-  const y1 = -(bbox.minY - cy) * v.scale + h / 2
+function worldToScreenX(x: number, v: { offsetX: number; scale: number }) {
+  return x * v.scale + v.offsetX
+}
+
+function worldToScreenY(y: number, v: { offsetY: number; scale: number }) {
+  return v.offsetY - y * v.scale
+}
+
+function screenToWorld(px: number, py: number, v: { offsetX: number; offsetY: number; scale: number }) {
+  return {
+    x: (px - v.offsetX) / v.scale,
+    y: -(py - v.offsetY) / v.scale,
+  }
+}
+
+function viewportFromView(v: { offsetX: number; offsetY: number; scale: number }, width: number, height: number): BBox {
+  const x0 = (0 - v.offsetX) / v.scale
+  const x1 = (width - v.offsetX) / v.scale
+  const y0 = -(0 - v.offsetY) / v.scale
+  const y1 = -(height - v.offsetY) / v.scale
+  return {
+    minX: Math.min(x0, x1),
+    minY: Math.min(y0, y1),
+    maxX: Math.max(x0, x1),
+    maxY: Math.max(y0, y1),
+  }
+}
+
+function screenBbox(bbox: BBox, v: { offsetX: number; offsetY: number; scale: number }) {
+  const x0 = worldToScreenX(bbox.minX, v)
+  const x1 = worldToScreenX(bbox.maxX, v)
+  const y0 = worldToScreenY(bbox.maxY, v)
+  const y1 = worldToScreenY(bbox.minY, v)
   return {
     x: Math.min(x0, x1),
     y: Math.min(y0, y1),
     width: Math.abs(x1 - x0),
     height: Math.abs(y1 - y0),
   }
+}
+
+function mergeBbox(into: BBox, other: BBox) {
+  if (!isValidBbox(other)) return
+  if (other.minX < into.minX) into.minX = other.minX
+  if (other.minY < into.minY) into.minY = other.minY
+  if (other.maxX > into.maxX) into.maxX = other.maxX
+  if (other.maxY > into.maxY) into.maxY = other.maxY
+}
+
+function pointsBbox(points: number[]): BBox {
+  const bbox = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+  for (let i = 0; i + 1 < points.length; i += 2) {
+    const x = points[i]
+    const y = points[i + 1]
+    if (x < bbox.minX) bbox.minX = x
+    if (y < bbox.minY) bbox.minY = y
+    if (x > bbox.maxX) bbox.maxX = x
+    if (y > bbox.maxY) bbox.maxY = y
+  }
+  return isValidBbox(bbox) ? bbox : { minX: 0, minY: 0, maxX: 0, maxY: 0 }
 }
 
 type BinnedInstances = { binCols: number; binRows: number; bins: number[][][] }
@@ -220,6 +269,35 @@ export function GdsLayoutTab(props: { path: string }) {
   const cellsByName = createMemo(() => new Map(data()?.cells ?? []))
   const instancesByName = createMemo(() => new Map(data()?.instances ?? []))
   const cellBboxesByName = createMemo(() => new Map(data()?.cellBboxes ?? []))
+  const cellLayerBboxesByName = createMemo(() => {
+    const result = new Map<string, Map<number, BBox>>()
+    for (const [cellName, polys] of cellsByName()) {
+      const layerMap = new Map<number, BBox>()
+      for (const poly of polys) {
+        const polyBbox = poly.bbox ?? pointsBbox(poly.points)
+        let layerBbox = layerMap.get(poly.layer)
+        if (!layerBbox) {
+          layerBbox = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+          layerMap.set(poly.layer, layerBbox)
+        }
+        mergeBbox(layerBbox, polyBbox)
+      }
+      result.set(cellName, layerMap)
+    }
+    return result
+  })
+  const visiblePolyCountsByCell = createMemo(() => {
+    const result = new Map<string, number>()
+    const vis = visibleLayers()
+    for (const [cellName, polys] of cellsByName()) {
+      let count = 0
+      for (const poly of polys) {
+        if (vis.has(poly.layer)) count++
+      }
+      result.set(cellName, count)
+    }
+    return result
+  })
 
   createEffect(() => {
     props.path
@@ -295,93 +373,94 @@ export function GdsLayoutTab(props: { path: string }) {
     ctx.fillStyle = "#0d0d0d"
     ctx.fillRect(0, 0, cssW, cssH)
 
-    // Center-relative offsets for GPU double-precision projection
+    // Center-relative values are used only for the grid labels/math; all geometry
+    // projection goes through worldToScreen/screenToWorld helpers.
     const scale = v.scale
     const cx_world = (cssW / 2 - v.offsetX) / scale
     const cy_world = -(cssH / 2 - v.offsetY) / scale
 
-    // World coordinates of viewport (Y flipped: worldTop = +offsetY/scale, worldBottom = (offsetY - height)/scale)
-    const worldLeft = -v.offsetX / v.scale
-    const worldRight = (cssW - v.offsetX) / v.scale
-    const worldTop = v.offsetY / v.scale
-    const worldBottom = (v.offsetY - cssH) / v.scale
-    const worldWidth = worldRight - worldLeft
+    const viewport = viewportFromView(v, cssW, cssH)
+    const worldWidth = viewport.maxX - viewport.minX
 
     // Grid
     drawGrid(ctx, v, cssW, cssH, cx_world, cy_world)
 
-    const viewport: BBox = {
-      minX: Math.min(worldLeft, worldRight),
-      minY: Math.min(worldBottom, worldTop),
-      maxX: Math.max(worldLeft, worldRight),
-      maxY: Math.max(worldBottom, worldTop),
-    }
     const cellMap = cellsByName()
     const instanceMap = instancesByName()
     const cellBboxMap = cellBboxesByName()
+    const cellLayerBboxMap = cellLayerBboxesByName()
+    const visiblePolyCounts = visiblePolyCountsByCell()
+
+    const isInteracting = interacting()
+    const maxPolys = isInteracting ? 20000 : 300000
+    const maxLODInsts = isInteracting ? 50000 : 500000
+
+    const visibleCellInstances = new Map<string, number[][]>()
+    let visiblePolyEstimate = 0
+    for (const [cellName, binst] of instanceMap) {
+      const insts = getVisibleInstances(binst as any, d.bbox, viewport)
+      if (insts.length === 0) continue
+      visibleCellInstances.set(cellName, insts)
+      visiblePolyEstimate += (visiblePolyCounts.get(cellName) ?? 0) * insts.length
+    }
 
     // LOD: when zoomed out, draw instance footprints rather than millions of tiny polygons.
     const dieW = d.bbox.maxX - d.bbox.minX
     const dieH = d.bbox.maxY - d.bbox.minY
-    const zoomedOut = worldWidth > dieW / 4 || (worldTop - worldBottom) > dieH / 4
-    const useLOD = zoomedOut && polyCount() > 5000
-
-    const isInteracting = interacting()
-    const maxPolys = isInteracting ? 20000 : 200000
-    const maxLODInsts = isInteracting ? 50000 : 500000
+    const zoomedOut = worldWidth > dieW / 4 || (viewport.maxY - viewport.minY) > dieH / 4
+    const useLOD = polyCount() > 5000 && (zoomedOut || visiblePolyEstimate > maxPolys)
 
     let drawn = 0
     const BATCH_FLUSH = 5000
 
     if (useLOD) {
       const b = d.bbox
-      const dieScreen = screenBbox(b, v, cx_world, cy_world, cssW, cssH)
+      const dieScreen = screenBbox(b, v)
       ctx.strokeStyle = "rgba(120, 168, 224, 0.72)"
       ctx.lineWidth = 1.5
       ctx.strokeRect(dieScreen.x, dieScreen.y, dieScreen.width, dieScreen.height)
 
-      // Sub-pixel grid culling to prevent redundant drawing calls on the same screen pixels
-      const cols = Math.ceil(cssW / 2)
-      const rows = Math.ceil(cssH / 2)
-      const subpixelGrid = new Uint8Array(cols * rows)
-
-      for (const [cellName, binst] of instanceMap) {
-        const polys = cellMap.get(cellName)
-        const localBbox = cellBboxMap.get(cellName)
-        if (!polys || !localBbox) continue
-        const insts = getVisibleInstances(binst as any, d.bbox, viewport)
-        if (insts.length === 0) continue
-        const visiblePoly = polys.find((poly) => vis.has(poly.layer))
-        if (!visiblePoly) continue
-
-        const color = layerColor(visiblePoly.layer)
+      const sortedLayers = [...vis].sort((a, b) => a - b)
+      for (const layer of sortedLayers) {
+        const color = layerColor(layer)
         ctx.fillStyle = color
         ctx.strokeStyle = color
-        ctx.globalAlpha = layerOpacity(visiblePoly.layer)
+        ctx.globalAlpha = Math.min(layerOpacity(layer), 0.62)
 
-        for (const t of insts) {
-          const worldBox = transformBbox(localBbox, t)
-          if (!bboxIntersects(worldBox, viewport)) continue
-          const s = screenBbox(worldBox, v, cx_world, cy_world, cssW, cssH)
-          if (s.width < 2 && s.height < 2) {
-            // Check grid culling
-            const gx = Math.floor(s.x / 2)
-            const gy = Math.floor(s.y / 2)
-            if (gx >= 0 && gx < cols && gy >= 0 && gy < rows) {
-              const idx = gy * cols + gx
-              if (subpixelGrid[idx] === 1) continue // Skip duplicate sub-pixel draw
-              subpixelGrid[idx] = 1
+        // Sub-pixel culling is per layer, preserving density without repeatedly
+        // painting the same device pixel during whole-die views.
+        const cellPx = 2
+        const cols = Math.ceil(cssW / cellPx)
+        const rows = Math.ceil(cssH / cellPx)
+        const subpixelGrid = new Uint8Array(cols * rows)
+
+        for (const [cellName, insts] of visibleCellInstances) {
+          const layerBbox = cellLayerBboxMap.get(cellName)?.get(layer)
+          if (!layerBbox) continue
+          for (const t of insts) {
+            const worldBox = transformBbox(layerBbox, t)
+            if (!bboxIntersects(worldBox, viewport)) continue
+            const s = screenBbox(worldBox, v)
+            if (s.width < cellPx && s.height < cellPx) {
+              const gx = Math.floor(s.x / cellPx)
+              const gy = Math.floor(s.y / cellPx)
+              if (gx >= 0 && gx < cols && gy >= 0 && gy < rows) {
+                const idx = gy * cols + gx
+                if (subpixelGrid[idx] === 1) continue
+                subpixelGrid[idx] = 1
+              }
+              ctx.fillRect(Math.floor(s.x), Math.floor(s.y), 1, 1)
+            } else if (s.width < 8 || s.height < 8) {
+              ctx.fillRect(s.x, s.y, Math.max(1, s.width), Math.max(1, s.height))
+            } else {
+              ctx.globalAlpha = Math.min(layerOpacity(layer), 0.20)
+              ctx.fillRect(s.x, s.y, s.width, s.height)
+              ctx.globalAlpha = Math.min(layerOpacity(layer), 0.62)
+              ctx.strokeRect(s.x, s.y, s.width, s.height)
             }
-            ctx.fillRect(s.x, s.y, 1.5, 1.5)
-          } else if (s.width < 8 || s.height < 8) {
-            ctx.fillRect(s.x, s.y, Math.max(1, s.width), Math.max(1, s.height))
-          } else {
-            ctx.globalAlpha = Math.min(layerOpacity(visiblePoly.layer), 0.22)
-            ctx.fillRect(s.x, s.y, s.width, s.height)
-            ctx.globalAlpha = layerOpacity(visiblePoly.layer)
-            ctx.strokeRect(s.x, s.y, s.width, s.height)
+            drawn++
+            if (drawn >= maxLODInsts) break
           }
-          drawn++
           if (drawn >= maxLODInsts) break
         }
         if (drawn >= maxLODInsts) break
@@ -392,15 +471,6 @@ export function GdsLayoutTab(props: { path: string }) {
       ctx.font = "12px monospace"
       if (d.topCell) ctx.fillText(d.topCell, dieScreen.x + 8, dieScreen.y + 16)
     } else {
-      // Pre-query visible cell instances once per frame
-      const visibleCellInstances = new Map<string, number[][]>()
-      for (const [cellName, binst] of instanceMap) {
-        const insts = getVisibleInstances(binst as any, d.bbox, viewport)
-        if (insts.length > 0) {
-          visibleCellInstances.set(cellName, insts)
-        }
-      }
-
       const sortedLayers = [...vis].sort((a, b) => a - b)
       for (const layer of sortedLayers) {
         const color = layerColor(layer)
@@ -413,25 +483,31 @@ export function GdsLayoutTab(props: { path: string }) {
 
         for (const [cellName, insts] of visibleCellInstances) {
           const polys = cellMap.get(cellName)
-          if (!polys) continue
+          const localBbox = cellBboxMap.get(cellName)
+          if (!polys || !localBbox) continue
           
-          for (const poly of polys) {
-            if (poly.layer !== layer) continue
-            
-            for (const t of insts) {
+          for (const t of insts) {
+            const cellWorldBox = transformBbox(localBbox, t)
+            if (!bboxIntersects(cellWorldBox, viewport)) continue
+
+            for (const poly of polys) {
+              if (poly.layer !== layer) continue
               if (drawn >= maxPolys) break
+
+              const polyWorldBox = transformBbox(poly.bbox ?? pointsBbox(poly.points), t)
+              if (!bboxIntersects(polyWorldBox, viewport)) continue
               const pts = poly.points
               if (pts.length < 4) continue
 
               const [a, b, c, d, tx, ty] = t
               ctx.moveTo(
-                (a * pts[0] + b * pts[1] + tx - cx_world) * scale + cssW / 2,
-                -((c * pts[0] + d * pts[1] + ty - cy_world) * scale) + cssH / 2
+                worldToScreenX(a * pts[0] + b * pts[1] + tx, v),
+                worldToScreenY(c * pts[0] + d * pts[1] + ty, v),
               )
               for (let i = 2; i < pts.length; i += 2) {
                 ctx.lineTo(
-                  (a * pts[i] + b * pts[i + 1] + tx - cx_world) * scale + cssW / 2,
-                  -((c * pts[i] + d * pts[i + 1] + ty - cy_world) * scale) + cssH / 2
+                  worldToScreenX(a * pts[i] + b * pts[i + 1] + tx, v),
+                  worldToScreenY(c * pts[i] + d * pts[i + 1] + ty, v),
                 )
               }
               ctx.closePath()
@@ -463,13 +539,13 @@ export function GdsLayoutTab(props: { path: string }) {
       ctx.beginPath()
       const pts = sel.points
       ctx.moveTo(
-        (pts[0] - cx_world) * scale + cssW / 2,
-        -((pts[1] - cy_world) * scale) + cssH / 2
+        worldToScreenX(pts[0], v),
+        worldToScreenY(pts[1], v),
       )
       for (let i = 2; i < pts.length; i += 2) {
         ctx.lineTo(
-          (pts[i] - cx_world) * scale + cssW / 2,
-          -((pts[i + 1] - cy_world) * scale) + cssH / 2
+          worldToScreenX(pts[i], v),
+          worldToScreenY(pts[i + 1], v),
         )
       }
       ctx.closePath()
@@ -480,23 +556,17 @@ export function GdsLayoutTab(props: { path: string }) {
 
     // Draw DRC violations overlay
     const userUnit = d.userUnit ?? 1
+    const dbUnitsPerMicron = 1 / (userUnit * 1_000_000)
     if (showDRC() && signoffData()?.drc?.diagnostics) {
       for (const diag of signoffData().drc.diagnostics) {
         if (!diag.bbox) continue
         const [x0, y0, x1, y1] = diag.bbox
-        const dbX0 = x0 / userUnit
-        const dbY0 = y0 / userUnit
-        const dbX1 = x1 / userUnit
-        const dbY1 = y1 / userUnit
+        const dbX0 = x0 * dbUnitsPerMicron
+        const dbY0 = y0 * dbUnitsPerMicron
+        const dbX1 = x1 * dbUnitsPerMicron
+        const dbY1 = y1 * dbUnitsPerMicron
         
-        const s = screenBbox(
-          { minX: dbX0, minY: dbY0, maxX: dbX1, maxY: dbY1 },
-          v,
-          cx_world,
-          cy_world,
-          cssW,
-          cssH
-        )
+        const s = screenBbox({ minX: dbX0, minY: dbY0, maxX: dbX1, maxY: dbY1 }, v)
         
         // Draw red dashed bounding box
         ctx.strokeStyle = "#ff453a"
@@ -525,18 +595,11 @@ export function GdsLayoutTab(props: { path: string }) {
     const selDrc = selectedDRC()
     if (selDrc && selDrc.bbox) {
       const [x0, y0, x1, y1] = selDrc.bbox
-      const dbX0 = x0 / userUnit
-      const dbY0 = y0 / userUnit
-      const dbX1 = x1 / userUnit
-      const dbY1 = y1 / userUnit
-      const s = screenBbox(
-        { minX: dbX0, minY: dbY0, maxX: dbX1, maxY: dbY1 },
-        v,
-        cx_world,
-        cy_world,
-        cssW,
-        cssH
-      )
+      const dbX0 = x0 * dbUnitsPerMicron
+      const dbY0 = y0 * dbUnitsPerMicron
+      const dbX1 = x1 * dbUnitsPerMicron
+      const dbY1 = y1 * dbUnitsPerMicron
+      const s = screenBbox({ minX: dbX0, minY: dbY0, maxX: dbX1, maxY: dbY1 }, v)
       
       // Draw outer target rings
       ctx.strokeStyle = "#ff9500" // Orange selection
@@ -626,9 +689,7 @@ export function GdsLayoutTab(props: { path: string }) {
       const rect = canvas.getBoundingClientRect()
       const px = e.clientX - rect.left
       const py = e.clientY - rect.top
-      // World coords (Y flipped): worldX = (sx - offsetX) / scale, worldY = -(sy - offsetY) / scale
-      const wx = (px - cur.offsetX) / cur.scale
-      const wy = -(py - cur.offsetY) / cur.scale
+      const { x: wx, y: wy } = screenToWorld(px, py, cur)
       setView({
         scale: next,
         offsetX: px - wx * next,
@@ -649,8 +710,7 @@ export function GdsLayoutTab(props: { path: string }) {
       const px = e.clientX - rect.left
       const py = e.clientY - rect.top
       const cur = view()
-      const wx = (px - cur.offsetX) / cur.scale
-      const wy = -(py - cur.offsetY) / cur.scale
+      const { x: wx, y: wy } = screenToWorld(px, py, cur)
       setHoverCoords({ x: wx, y: wy })
 
       if (!dragging) return
@@ -679,8 +739,7 @@ export function GdsLayoutTab(props: { path: string }) {
       const px = e.clientX - rect.left
       const py = e.clientY - rect.top
       const cur = view()
-      const wx = (px - cur.offsetX) / cur.scale
-      const wy = -(py - cur.offsetY) / cur.scale
+      const { x: wx, y: wy } = screenToWorld(px, py, cur)
       
       const cellMap = cellsByName()
       const instanceMap = instancesByName()
@@ -692,13 +751,14 @@ export function GdsLayoutTab(props: { path: string }) {
       // Check if user clicked close to a DRC violation marker
       const userUnit = d.userUnit ?? 1
       if (showDRC() && signoffData()?.drc?.diagnostics) {
+        const dbUnitsPerMicron = 1 / (userUnit * 1_000_000)
         for (const diag of signoffData().drc.diagnostics) {
           if (!diag.bbox) continue
           const [x0, y0, x1, y1] = diag.bbox
-          const dbX0 = x0 / userUnit
-          const dbY0 = y0 / userUnit
-          const dbX1 = x1 / userUnit
-          const dbY1 = y1 / userUnit
+          const dbX0 = x0 * dbUnitsPerMicron
+          const dbY0 = y0 * dbUnitsPerMicron
+          const dbX1 = x1 * dbUnitsPerMicron
+          const dbY1 = y1 * dbUnitsPerMicron
           
           const px0 = Math.min(dbX0, dbX1)
           const py0 = Math.min(dbY0, dbY1)
@@ -725,16 +785,7 @@ export function GdsLayoutTab(props: { path: string }) {
       }
       setSelectedDRC(null)
 
-      const worldLeft = -cur.offsetX / cur.scale
-      const worldRight = (canvas.clientWidth - cur.offsetX) / cur.scale
-      const worldTop = cur.offsetY / cur.scale
-      const worldBottom = (cur.offsetY - canvas.clientHeight) / cur.scale
-      const viewport: BBox = {
-        minX: Math.min(worldLeft, worldRight),
-        minY: Math.min(worldBottom, worldTop),
-        maxX: Math.max(worldLeft, worldRight),
-        maxY: Math.max(worldBottom, worldTop),
-      }
+      const viewport = viewportFromView(cur, canvas.clientWidth, canvas.clientHeight)
 
       for (const [cellName, binst] of instanceMap) {
         const polys = cellMap.get(cellName)
@@ -787,10 +838,14 @@ export function GdsLayoutTab(props: { path: string }) {
     const d = data()
     if (!d) return
     const summary = [
-      `GDS layout: ${props.path}`,
-      `${cellCount()} cells, ${polyCount().toLocaleString()} polygons`,
-      `Top cell: ${d.topCell}`,
+      `[GDS Layout Summary]`,
+      `File: ${props.path}`,
+      `Cells: ${cellCount()}`,
+      `Polygons: ${polyCount().toLocaleString()}`,
+      `Top Cell: ${d.topCell}`,
       `Layers: ${layers().join(", ")}`,
+      `Note to Agent: You can inspect this layout's detailed cell hierarchy, layer polygon counts, and cell coordinates in micrometers (µm) by calling the tool:`,
+      `workspace(action="layout_inspect", path="${props.path}")`
     ].join("\n")
     try {
       await navigator.clipboard.writeText(summary)
@@ -920,7 +975,16 @@ export function GdsLayoutTab(props: { path: string }) {
                 onClick={() => {
                   const sel = selectedObject()
                   if (!sel) return
-                  const msg = `Selected layout object:\nCell: ${sel.cellName}\nLayer: L${sel.layer}\nVertices: ${sel.pointsCount}\nCoordinates: ${JSON.stringify(sel.points)}`
+                  const msg = [
+                    `[Selected Layout Object]`,
+                    `File: ${props.path}`,
+                    `Cell: ${sel.cellName}`,
+                    `Layer: L${sel.layer}`,
+                    `Vertices: ${sel.pointsCount}`,
+                    `Coordinates: ${JSON.stringify(sel.points)}`,
+                    `Note to Agent: You can fetch the complete layout hierarchy, layer list, and cell bounding boxes in micrometers (µm) with:`,
+                    `workspace(action="layout_inspect", path="${props.path}")`
+                  ].join("\n")
                   navigator.clipboard.writeText(msg)
                   showToast({ title: "Copied to clipboard", description: "Paste in chat to send layout object details to agent." })
                 }}
@@ -951,7 +1015,15 @@ export function GdsLayoutTab(props: { path: string }) {
                 onClick={() => {
                   const sel = selectedDRC()
                   if (!sel) return
-                  const msg = `DRC Violation:\nRule: ${sel.rule}\nCoordinates: ${JSON.stringify(sel.bbox)}\nDescription: ${sel.message}`
+                  const msg = [
+                    `[DRC Violation Report]`,
+                    `File: ${props.path}`,
+                    `Rule Checked: ${sel.rule}`,
+                    `Description: ${sel.message}`,
+                    `Coordinates (BBox um): ${JSON.stringify(sel.bbox)}`,
+                    `Note to Agent: You can verify this DRC violation and run a full layout signoff check with:`,
+                    `workspace(action="layout_inspect", path="${props.path}")`
+                  ].join("\n")
                   navigator.clipboard.writeText(msg)
                   showToast({ title: "Copied to clipboard", description: "Paste in chat to ask the agent to fix this DRC violation." })
                 }}

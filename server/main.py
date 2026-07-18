@@ -1357,6 +1357,7 @@ async def opencode_session_resolve(req: OpenCodeSessionRequest, request: Request
     if req.fast:
         return _fast_opencode_session_response(req, mapping, license_status)
     from agentic_handoffs import schema_catalog
+    from app_capabilities import build_app_capability_contract
     from agentic_kernel import build_context_contract, scope_for_turn
     from agentic_role_runner import RoleContext, persist_role_results, run_role_pipeline
     from agentic_validators import validation_schema_catalog
@@ -1383,6 +1384,7 @@ async def opencode_session_resolve(req: OpenCodeSessionRequest, request: Request
     state_store.upsert_design_fact("session_workflow", workflow_decision.mode, workflow_decision.to_record(), source="session_workflow_router")
     state_store.set_flow_decision(flow_decision)
     kernel_contract = build_context_contract(req.user_text or "", kernel_scope).to_dict()
+    kernel_contract["app_capabilities"] = build_app_capability_contract(mapping["design_root"], env)
     state_store.set_context_contract(kernel_contract)
     role_results = []
     role_counts = {}

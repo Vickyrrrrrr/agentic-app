@@ -117,6 +117,7 @@ const api: ElectronAPI = {
   exportDebugLogs: () => ipcRenderer.invoke("export-debug-logs"),
   recordFatalRendererError: (error) => ipcRenderer.invoke("record-fatal-renderer-error", error),
   getBackendMode: () => ipcRenderer.invoke("get-backend-mode"),
+  getBackendStatus: () => ipcRenderer.invoke("get-backend-status"),
   installWsl: () => ipcRenderer.invoke("install-wsl"),
   checkDocker: () => ipcRenderer.invoke("check-docker"),
 }

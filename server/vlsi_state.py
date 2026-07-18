@@ -92,6 +92,7 @@ class DesignStateStore:
             "updated_at": state["updated_at"],
             "intent": state.get("intent", {}),
             "design_intent": state.get("design_intent"),
+            "design_contract": state.get("design_contract"),
             "module_ownership": state.get("module_ownership") or {},
             "implementation_policy": state.get("implementation_policy") or {},
             "mental_model": _compact_mental_model(state.get("mental_model") or {}),
@@ -168,6 +169,17 @@ class DesignStateStore:
             "project_root": intent.get("project_root") if isinstance(intent, dict) else None,
             "module_count": len(ownership),
             "revision": intent.get("revision") if isinstance(intent, dict) else None,
+        })
+        return self.save(state)
+
+    def set_design_contract(self, contract: dict[str, Any]) -> dict[str, Any]:
+        state = self.load()
+        state["design_contract"] = contract
+        self._append_event(state, "contract", "design_contract_updated", {
+            "top_module": contract.get("top_module"),
+            "top_file": contract.get("top_file"),
+            "status": (contract.get("status") or {}).get("contract"),
+            "issue_count": len(contract.get("validation_issues") or []),
         })
         return self.save(state)
 
@@ -345,6 +357,7 @@ class DesignStateStore:
             "updated_at": _now(),
             "intent": data.get("intent") or {},
             "design_intent": data.get("design_intent"),
+            "design_contract": data.get("design_contract"),
             "module_ownership": data.get("module_ownership") or {},
             "implementation_policy": data.get("implementation_policy") or {},
             "mental_model": data.get("mental_model") or {

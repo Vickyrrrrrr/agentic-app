@@ -20,6 +20,7 @@ logger = logging.getLogger("agentic.chat_agent")
 
 from agent_tools import dispatch_tool
 from agentic_handoffs import schema_catalog
+from app_capabilities import build_app_capability_contract
 from agentic_kernel import build_context_contract, scope_for_turn, validate_tool_call
 from agentic_role_runner import RoleContext, persist_role_results, run_role_pipeline
 from agentic_validators import validation_schema_catalog
@@ -31,8 +32,8 @@ from vlsi_capability_graph import assess_design_readiness
 
 TOOL_DEFS = [
     {"type": "function", "function": {
-        "name": "workspace", "description": "Workspace operations: read files, search (grep), list files (glob), lint RTL, parse Verilog modules, parse EDA logs (synthesis/STA/DRC/LVS from any tool — OSS or proprietary), inspect GDS layouts (cell hierarchy, polygon count, layers), analyze STA timing reports (critical paths, WNS/TNS, fix suggestions), and generate Yosys schematics. Use action='parse_log' for EDA log diagnosis, action='layout_inspect' for GDS inspection, action='timing_analysis' for STA timing closure, action='schematic_json' for interactive schematics, action='parse_module' for port/interface extraction, action='lint' for RTL linting.",
-        "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["read", "search", "list", "lint", "parse_module", "parse_log", "layout_inspect", "timing_analysis", "schematic_json"]}, "path": {"type": "string", "default": "."}, "pattern": {"type": "string", "default": ""}, "module": {"type": "string", "default": ""}}, "required": ["action"]}}},
+        "name": "workspace", "description": "Workspace operations: read files, search (grep), list files (glob), diagnose RTL lint failures into compact categorized repair packets, lint RTL, parse Verilog modules, parse EDA logs (synthesis/STA/DRC/LVS from any tool — OSS or proprietary), inspect GDS layouts (cell hierarchy, polygon count, layers), analyze STA timing reports (critical paths, WNS/TNS, fix suggestions), and generate Yosys schematics. Use action='rtl_repair_diagnose' before RTL repair, action='parse_log' for EDA log diagnosis, action='layout_inspect' for GDS inspection, action='timing_analysis' for STA timing closure, action='schematic_json' for interactive schematics, action='parse_module' for port/interface extraction, action='lint' for raw RTL linting.",
+        "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["read", "search", "list", "lint", "rtl_repair_diagnose", "parse_module", "parse_log", "layout_inspect", "timing_analysis", "schematic_json"]}, "path": {"type": "string", "default": "."}, "pattern": {"type": "string", "default": ""}, "module": {"type": "string", "default": ""}}, "required": ["action"]}}},
     {"type": "function", "function": {
         "name": "write", "description": "Create new files or surgically edit existing files.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string", "default": ""}, "old_string": {"type": "string", "default": ""}, "new_string": {"type": "string", "default": ""}}, "required": ["path"]}}},
@@ -43,13 +44,19 @@ TOOL_DEFS = [
         "name": "report", "description": "Generate a structured signoff summary of all passed and failed checkpoints for the current active design.",
         "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
+        "name": "design_contract", "description": "Infer, validate, or read the active chip design contract: top module, top file, clock/reset ports, hierarchy, SDC status, policy checks, evidence status, and next actions. Use validate before top-level edits, flow setup, signoff claims, or after RTL/SDC changes; use get only for the compact stored summary.",
+        "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["infer", "validate", "get"], "default": "get"}}, "required": ["action"]}}},
+    {"type": "function", "function": {
+        "name": "app_capability", "description": "Refresh AgentIC's live capability contract for the current workspace: available editor surfaces, artifacts, semantic-sidecar availability, and flow/tool readiness. Call this after an EDA run or before claiming an AgentIC view/action is available.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
         "name": "web_search", "description": "Search public web resources for datasheets, PDK docs, tool guides, and application notes without sending private project details.",
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer", "default": 5}}, "required": ["query"]}}},
     {"type": "function", "function": {
-        "name": "query_pdk", "description": "Query the local PDK/capability graph for libraries, cells, routing layers, memory macros, readiness gates, tool adapters, and flow evidence.",
+        "name": "query_pdk", "description": "Query the local PDK/capability graph for exact libraries, cells, routing layers, memory macros, readiness gates, tool adapters, and flow evidence. Use before naming stdcells/macros/layers/corners/decks, and use find_memory before any SRAM/ROM decision.",
         "parameters": {"type": "object", "properties": {"query_type": {"type": "string", "enum": ["list_libraries", "find_cell", "get_layers", "capability_summary", "find_memory", "readiness", "manifest_status", "tool_adapters"]}, "cell_type": {"type": "string", "description": "For find_cell: a cell or macro category. For find_memory: the user's requested memory capacity, width, depth, and port style in their own words."}}, "required": ["query_type"]}}},
     {"type": "function", "function": {
-        "name": "ledger", "description": "Read or update AgentIC's structured VLSI mental model, typed handoffs, and evidence graph. Use this for durable design facts instead of burying state in prose.",
+        "name": "ledger", "description": "Read or update AgentIC's structured VLSI mental model, typed handoffs, and evidence graph. Use this for durable design facts and evidence refs instead of burying state in prose.",
         "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["get_state", "record_fact", "record_handoff", "record_evidence"]}, "namespace": {"type": "string"}, "key": {"type": "string"}, "value": {}, "source": {"type": "string"}, "source_role": {"type": "string"}, "target_role": {"type": "string"}, "payload": {"type": "object"}, "kind": {"type": "string"}, "ref": {"type": "string"}, "links": {"type": "array", "items": {"type": "object"}}, "max_events": {"type": "integer", "default": 12}}, "required": ["action"]}}},
     {"type": "function", "function": {
         "name": "git_clone", "description": "Clone a GitHub repository into the workspace. Use this when the user provides a repo URL or says 'use my repo'.",
@@ -69,14 +76,28 @@ SYSTEM_PROMPT = """You are an autonomous VLSI design engineer agent inside Agent
 │  still satisfies the user's stated intent.                   │
 └──────────────────────────────────────────────────────────────┘
 
-LOCAL TOOLING — workspace, execution, PDK, ledger, repo clone, and guarded public research:
-You have eight tools: workspace, write, bash, report, web_search, query_pdk, ledger, git_clone.
+LOCAL TOOLING — workspace, execution, PDK, contract, ledger, repo clone, and guarded public research:
+You have ten tools: workspace, write, bash, report, design_contract, app_capability, web_search, query_pdk, ledger, git_clone.
 Use them as needed to design, build, and debug chips inside the local workspace.
 - Run local EDA commands, edit workspace files, and search project sources.
 - Use ledger to persist structured design facts, role handoffs, and evidence nodes.
+- AGENTIC EVIDENCE LOOP: Before serious RTL/top/flow/signoff work, follow: (1) design_contract(validate), (2) query_pdk(readiness) or query_pdk(find_memory) when PDK/IP is relevant, (3) run the smallest needed EDA step with bash using eda_tool/stage/log_file, (4) inspect/parse the generated reports or checkpoint verdict, (5) answer only from evidence. If evidence is missing, stop and state the missing gate plus the next command/tool needed.
+- DESIGN CONTRACT RULE: Use design_contract(validate) before top-level edits, flow setup, integration, or signoff claims. Use design_contract(get) only when you need the stored compact summary.
+- LIVE CAPABILITY RULE: Call app_capability after an EDA run creates artifacts, or before promising an AgentIC surface/action. Use only capabilities reported as ready or available; report the precise missing runtime or artifact otherwise.
 - SURGICAL EDITING RULE: Use `write` with `old_string` and `new_string` for surgical modifications. Only provide `content` to overwrite or create new files.
-- NAMING CONVENTIONS RULE: When creating files, folders, or naming design structures, always use short, technical, and to-the-point lowercase kebab-case or snake_case names (e.g., `aes-core`, `sta-run-report`, `sram-wrapper`). Do NOT use conversational phrases, questions, typos, or sentences. Keep names under 24 characters. Organize files logically: RTL files under `rtl/`, testbenches under `tb/`, logs/reports under `logs/` or `reports/`, and documentation under `docs/`.
-- SESSION ROOT RULE: The resolved AgentIC design root is the authoritative project directory for this session. Keep generated RTL, testbenches, scripts, constraints, logs, reports, and waveforms inside that design root using conventional subfolders (`rtl/`, `tb/` or `verification/`, `scripts/`, `constraints/`, `reports/`, `simulation/`). Do not create a new sibling or nested project/session folder unless the user explicitly asks for a separate design.
+- NAMING CONVENTIONS RULE: When creating files, folders, or naming design structures, always use short, technical, and to-the-point lowercase kebab-case or snake_case names (e.g., `aes-core`, `sta-run-report`, `sram-wrapper`). Do NOT use conversational phrases, questions, typos, or sentences. Keep names under 24 characters.
+- SESSION ROOT & TAPEOUT STRUCTURE RULE: The resolved AgentIC design root is the authoritative project directory for this session. Every chip design session must follow a standardized, clean, and organized directory tree supporting both OSS and proprietary tool paths:
+  1. `rtl/`: Synthesizable RTL design sources (subdivided into `top/`, `cpu/`, `peripherals/`, `ip/`).
+  2. `tb/`: Verification & simulation testbenches (subdivided into `unit/`, `top/`).
+  3. `constraints/sdc/`: Timing, power, and physical SDC constraints.
+  4. `scripts/`: Flow execution and automation scripts (must maintain compile order file `filelist.f`).
+  5. `sim/`, `synth/`, `pnr/`, `sta/`: Simulation, synthesis, PnR, and STA intermediates and log/report files.
+  6. `signoff/`: Physical Verification signoff logs and reports (subdivided into `drc/`, `lvs/`, `antenna/`).
+  7. `tapeout_package/`: Final self-contained tapeout deliverables (subdivided into `def/`, `gds/`, `klayout_gds/`, `lef/`, `lib/`, `mag/`, `mag_gds/`, `pnl/`, `sdc/`, `sdf/`, `spef/`, `spice/`, `vh/`).
+  * **Automated Flow Policy:** If you use an automated design flow (e.g., OpenLane) that creates its own execution run folders, leave the tool's internal execution folders COMPLETELY unmodified. Do not manually edit files inside the tool's run directory.
+  * **Deliverables Extraction:** Once the automated flow completes, extract the final tapeout deliverables (GDS, DEF, LEF, timing, spef, netlists, etc.) from the tool's run directory and copy/organize them into the standard `tapeout_package/` sub-directories at the root.
+  * **Dynamic Folder Creation:** Do NOT pre-generate empty folder/directory trees with no files under them. Let the tools and your copy steps create directories dynamically as files are written.
+  * **Package Verification:** After copying the deliverables to the `tapeout_package/` directory, the agent must run final physical verification (DRC, LVS, STA) and signoff checks **directly on the files inside the `tapeout_package/` directory** (rather than the intermediate run folders) to guarantee that the final export package is fully self-contained, valid, and fabrication-ready.
 - AUTO-CHECKPOINT RULE: Your `bash` tool is completely unrestricted. You can run ANY open-source or proprietary tool. When you run an EDA tool, you MUST pass the `eda_tool` parameter. The backend will automatically parse the tool's log output and return a structured JSON verdict `{pass: bool, errors: [...]}` along with a truncated snippet of the log. You MUST base your next actions on this verdict. If `pass` is false, you must fix the errors.
 - If the tool writes its log to a file (like Genus, Innovus, or Calibre), you MUST pass the `log_file` parameter to `bash` so the checkpoint engine can read it.
 - SDC/CONSTRAINT RULE: Passing STA is meaningless without correct SDC files. You must explicitly generate and validate constraints.
@@ -90,7 +111,7 @@ Use them as needed to design, build, and debug chips inside the local workspace.
 - RTL VERIFY-BEFORE-DONE RULE (NON-NEGOTIABLE): Textual self-review is NOT verification — you cannot catch real syntax/width/connectivity errors by reading the code. After EVERY `write` or edit of a `.v`/`.sv`/`.vh`/`.svh` file (design OR testbench), you MUST, in the same turn, actually run a compiler via `bash` before doing anything else:
   1. Probe once per session which linter is available: `command -v verilator iverilog vlog xmvlog vlogan` and remember the result. Use whichever is found first — OSS (verilator, iverilog) or proprietary (vlog, xmvlog, vlogan) are all acceptable.
   2. Lint the file you just wrote. Use the first available compiler: `verilator --lint-only -Wall` (OSS, best signal), `iverilog -g2012 -t null` (OSS), `vlogan -sverilog` (Synopsys), or `xmvlog -sv` (Cadence). For testbenches, compile-check with the same tool plus the design under test.
-  3. Read the compiler output. Fix EVERY error AND warning (unused signals, width mismatches, inferred latches, sensitivity-list issues) with another `write` before proceeding. Re-lint after the fix. Do not stop on "it should be fine."
+  3. Read the compiler output. Prefer `workspace(action="rtl_repair_diagnose", path=<rtl_file>)` for a compact categorized repair packet before editing. Fix EVERY error AND warning (unused signals, width mismatches, inferred latches, sensitivity-list issues) with another `write` before proceeding. Re-lint after the fix. Do not stop on "it should be fine."
   4. Only after the linter reports zero errors may you declare the module written and move to the next step, run synthesis, or simulate. A module is NOT done until the compiler accepts it.
   5. If NO Verilog compiler is installed, use NEEDS_INPUT to get one installed — OSS (verilator/iverilog via apt/brew) or expose a proprietary tool (VCS, Xcelium, Questa). Do NOT claim an RTL file is complete without compilation evidence.
   6. Exception: pure header/macro files (`.vh`/`.svh` with only `define`/`include`) may skip lint, but any file with `module`/`always`/`assign` MUST be compiled.
@@ -1649,6 +1670,10 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str, des
         "RUNTIME CONTRACT:\n"
         "- The compact context packet is an index and summary, not a full project dump. If a detail is not present, retrieve it before deciding.\n"
         "- Treat AgentIC's flow_decision as the authoritative starting point for methodology selection.\n"
+        "- Treat app_capabilities in the kernel context contract as the authoritative list of AgentIC surfaces available in this workspace. Never claim an unavailable surface exists or route work to it.\n"
+        "- Prefer a ready AgentIC capability over ad-hoc shell work when it yields the same evidence; use shell only for the smallest validated tool step that is not represented by an AgentIC capability.\n"
+        "- Before serious RTL/top/flow/signoff work, run the evidence loop: design_contract(validate) -> query exact PDK/readiness facts when relevant -> execute the smallest needed EDA step -> parse/checkpoint the result -> answer from evidence.\n"
+        "- Use design_contract(validate) before top-level edits, integration, flow setup, or signoff/tapeout claims; use design_contract(get) only for the stored compact summary.\n"
         "- Do not assume open-source flows are preferred. Use detected licensed proprietary stacks first when they satisfy the user's PDK and deliverables.\n"
         "- If proprietary tools are detected but licensing or PDK scripts are missing, ask the user to configure them; then offer open-source fallback installation only with approval.\n"
         "- Use environment_summary only as a readiness summary; query exact PDK, standard-cell, corner, routing-layer, deck, memory, pad, and tool facts with query_pdk before relying on them.\n"
@@ -1662,6 +1687,7 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str, des
         "- Use workspace(read/search/list), query_pdk, and bash to retrieve exact context on demand. Do not ask for or paste entire repositories, PDKs, or logs into the conversation.\n"
         "- Full logs stay on disk. Use checkpoint verdicts, log paths, and short failing excerpts unless a specific log section is needed.\n"
         "- For existing large files, use surgical write edits with old_string/new_string; large whole-file rewrites may be rejected by the harness.\n"
+        "- If evidence is missing, stop at that gate and state exactly which tool/command/report is needed next; do not convert assumptions into chip facts.\n"
         "- Every final answer must be backed by checkpoint/report/design-state evidence generated through AgentIC tools.\n"
     )
 
@@ -1675,6 +1701,7 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str, des
         repairs_artifact=False,
     )
     kernel_contract = build_context_contract(user_text, kernel_scope).to_dict()
+    kernel_contract["app_capabilities"] = build_app_capability_contract(workspace_root, env)
     try:
         state_store.set_context_contract(kernel_contract)
         state_store.record_handoff("principal", "context_librarian", {
@@ -1741,7 +1768,7 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str, des
             f"{json.dumps(schema_catalog(), indent=2)[:8000]}\n\n"
             "## AgentIC strict validation schema catalog\n"
             f"{json.dumps(validation_schema_catalog(), indent=2)[:12000]}\n\n"
-            "You must obey this permission scope. If a needed action is outside scope, output NEEDS_INPUT with the missing approval/configuration."
+            "You must obey this permission scope and the live app_capabilities contract. If a needed capability is unavailable or an action is outside scope, output NEEDS_INPUT with the exact missing artifact, sidecar, tool, license, or approval."
         ),
     })
 

@@ -1,5 +1,5 @@
 import * as http from "node:http"
-import { mkdirSync } from "node:fs"
+import { existsSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import * as tls from "node:tls"
 
@@ -94,6 +94,21 @@ function prepareSidecarEnv(password: string, userDataPath: string) {
     XDG_CACHE_HOME: runtime.cache,
     XDG_STATE_HOME: runtime.state,
   })
+  configureBundledSlang()
+}
+
+function configureBundledSlang() {
+  // Keep the compiler service in the trusted Hono sidecar. The LSP runtime
+  // consumes this explicit absolute path before considering the user's PATH.
+  if (process.env.AGENTIC_SLANG_SERVER && existsSync(process.env.AGENTIC_SLANG_SERVER)) return
+  const platformKey = `${process.platform}-${process.arch}`
+  const executable = process.platform === "win32" ? "slang-server.exe" : "slang-server"
+  const candidates = [
+    join(process.resourcesPath, "tools", "slang", platformKey, executable),
+    join(process.cwd(), "resources", "tools", "slang", platformKey, executable),
+  ]
+  const binary = candidates.find(existsSync)
+  if (binary) process.env.AGENTIC_SLANG_SERVER = binary
 }
 
 function ensureRuntimeDirs(userDataPath: string) {

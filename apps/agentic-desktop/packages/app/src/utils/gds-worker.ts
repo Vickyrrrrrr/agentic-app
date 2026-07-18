@@ -7,7 +7,7 @@
 import { parseGds, buildInstancedScene, type GdsFile, type InstancedScene } from "./gds-parser"
 
 export type GdsWorkerResult = {
-  cells: [string, { layer: number; points: number[] }[]][]
+  cells: [string, { layer: number; points: number[]; bbox: { minX: number; minY: number; maxX: number; maxY: number } }[]][]
   instances: [string, { binCols: number; binRows: number; bins: number[][][] }][]
   cellBboxes: [string, { minX: number; minY: number; maxX: number; maxY: number }][]
   userUnit: number
@@ -47,7 +47,7 @@ self.onmessage = (e: MessageEvent<{ buffer: ArrayBuffer }>) => {
     for (const [name, polys] of scene.cells) {
       cells.push([
         name,
-        polys.map((p) => ({ layer: p.layer, points: p.points })),
+        polys.map((p) => ({ layer: p.layer, points: p.points, bbox: bboxFromPoints(p.points) })),
       ])
     }
 
@@ -222,6 +222,12 @@ function expandBboxWithPoints(bbox: { minX: number; minY: number; maxX: number; 
     if (x > bbox.maxX) bbox.maxX = x
     if (y > bbox.maxY) bbox.maxY = y
   }
+}
+
+function bboxFromPoints(points: number[]) {
+  const bbox = makeEmptyBbox()
+  expandBboxWithPoints(bbox, points)
+  return isValidBbox(bbox) ? bbox : { minX: 0, minY: 0, maxX: 0, maxY: 0 }
 }
 
 function expandBboxWithBbox(

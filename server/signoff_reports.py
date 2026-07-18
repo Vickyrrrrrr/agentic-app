@@ -33,6 +33,9 @@ def _evidence_for_kind(root: Path, design_name: str, kind: str) -> dict[str, Any
     file_report = _from_report_files(root, kind)
     if file_report:
         return file_report
+    metrics_report = _from_metrics_json(root, kind)
+    if metrics_report:
+        return metrics_report
     return {
         "kind": kind,
         "status": "missing",
@@ -46,6 +49,9 @@ def _evidence_for_kind(root: Path, design_name: str, kind: str) -> dict[str, Any
 
 def _from_checkpoints(root: Path, design_name: str, kind: str) -> dict[str, Any] | None:
     checkpoint_file = root / ".agentic" / f"{design_name or 'scratch'}_checkpoints.json"
+    if not checkpoint_file.is_file():
+        # Fallback to scratch_checkpoints.json if the session used the default scratch profile name
+        checkpoint_file = root / ".agentic" / "scratch_checkpoints.json"
     if not checkpoint_file.is_file():
         return None
     try:
@@ -79,7 +85,6 @@ def _from_checkpoints(root: Path, design_name: str, kind: str) -> dict[str, Any]
             return _response_from_parsed(fallback, source={"type": "checkpoint", "stage": item.get("stage"), "tool": item.get("tool")})
     return None
 
-
 def _from_report_files(root: Path, kind: str) -> dict[str, Any] | None:
     for path in _candidate_files(root, kind):
         try:
@@ -101,66 +106,56 @@ def _from_report_files(root: Path, kind: str) -> dict[str, Any] | None:
             },
         )
     return None
-
-
 def _candidate_files(root: Path, kind: str) -> list[Path]:
     if not root.is_dir():
         return []
+
+    # We want to find any report file anywhere in the workspace/session subfolders
+    # that is related to DRC or LVS, supporting both OSS and proprietary tools.
+    patterns = []
     if kind == "drc":
-        patterns = (
-            "signoff/**/*drc*.rpt",
-            "signoff/**/*drc*.log",
-            "reports/**/*drc*.rpt",
-            "reports/**/*drc*.log",
-            "reports/**/*magic*.drc",
-            "openroad/**/*drc*.rpt",
-            "runs/**/*drc*.rpt",
-            "runs/**/*drc*.log",
-            "runs/**/drt.drc",
-            "runs/**/*antenna*.rpt",
-            # Deep recursive patterns for nested layouts / reports
-            "**/reports/**/*drc*",
-            "**/reports/**/*klayout*.rpt",
-            "**/reports/**/*magic*.drc",
-            "**/reports/**/*xor*.rpt",
-            "**/reports/**/*xor*.xml",
-            "**/runs/**/reports/**/*drc*",
-            "**/runs/**/reports/**/*antenna*",
-            "**/runs/**/drt.drc",
-            "**/runs/**/results/signoff/**/*drc*",
-            "**/signoff/**/*drc*",
-            "**/openlane*/**/*drc*",
-        )
+        patterns = [
+            "**/*drc*.rpt",
+            "**/*drc*.log",
+            "**/*drc*.txt",
+            "**/*drc*",
+            "**/drt.drc",
+            "**/*antenna*.rpt",
+            "**/*antenna*.log",
+            "**/*magic*.drc",
+            "**/*klayout*.rpt",
+            "**/*calibre*.rpt",
+            "**/*calibre*.log",
+        ]
     else:
-        patterns = (
-            "signoff/**/*lvs*.rpt",
-            "signoff/**/*lvs*.log",
-            "reports/**/*lvs*.rpt",
-            "reports/**/*lvs*.log",
-            "reports/**/*netgen*.log",
-            "runs/**/*lvs*.rpt",
-            "runs/**/*lvs*.log",
-            "runs/**/*xor*.rpt",
-            # Deep recursive patterns for nested layouts / reports
-            "**/reports/**/*lvs*",
-            "**/reports/**/*netgen*.log",
-            "**/runs/**/reports/**/*lvs*",
-            "**/runs/**/reports/**/*xor*",
-            "**/runs/**/results/signoff/**/*lvs*",
-            "**/signoff/**/*lvs*",
-            "**/openlane*/**/*lvs*",
-        )
+        patterns = [
+            "**/*lvs*.rpt",
+            "**/*lvs*.log",
+            "**/*lvs*.txt",
+            "**/*lvs*",
+            "**/*netgen*.log",
+            "**/*calibre*.rpt",
+            "**/*calibre*.log",
+        ]
+
     seen: set[Path] = set()
     files: list[Path] = []
+
+    # Exclude directories like .git, .agentic, and node_modules to avoid scanning unrelated files
+    exclude_dirs = {".git", ".agentic", "node_modules", "out", "venv", ".venv"}
+
     for pattern in patterns:
         for path in root.glob(pattern):
             if not path.is_file() or path in seen:
                 continue
+            # Check if path contains any excluded directory
+            if any(part in exclude_dirs for part in path.parts):
+                continue
             seen.add(path)
             files.append(path)
+
     files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
     return files[:40]
-
 
 def _response_from_parsed(parsed: dict[str, Any], *, source: dict[str, Any]) -> dict[str, Any]:
     kind = str(parsed.get("kind") or "unknown")
@@ -270,4 +265,75 @@ def _number(value: Any) -> float | int | None:
         except ValueError:
             return None
         return int(parsed) if parsed.is_integer() else parsed
+    return None
+
+
+def _from_metrics_json(root: Path, kind: str) -> dict[str, Any] | None:
+    candidates = []
+    for pattern in ("**/metrics.json", "**/resolved.json", "metrics.json"):
+        candidates.extend(root.glob(pattern))
+
+    candidates = [p for p in candidates if p.is_file()]
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    for path in candidates:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                continue
+
+            if kind == "drc":
+                drc_err = data.get("magic__drc_error__count")
+                if drc_err is None:
+                    drc_err = data.get("klayout__drc_error__count")
+                if drc_err is None:
+                    drc_err = data.get("route__drc_errors")
+                if drc_err is None:
+                    drc_err = data.get("design__violations")
+
+                if drc_err is not None:
+                    violations = int(drc_err)
+                    return {
+                        "kind": "drc",
+                        "status": "clean" if violations == 0 else "violating",
+                        "source": {
+                            "type": "file",
+                            "path": str(path.relative_to(root)).replace("\\", "/"),
+                            "size_bytes": path.stat().st_size,
+                            "mtime": path.stat().st_mtime,
+                        },
+                        "metrics": {"violation_count": violations},
+                        "summary": {"diagnostic_count": 0, "error_count": violations, "warning_count": 0},
+                        "diagnostics": [],
+                        "message": f"DRC signoff loaded from {path.name}.",
+                    }
+
+            elif kind == "lvs":
+                lvs_error_keys = (
+                    "design__lvs_error__count",
+                    "design__lvs_device_difference__count",
+                    "design__lvs_net_difference__count",
+                    "design__lvs_property_difference__count",
+                )
+                lvs_values = [_number(data.get(key)) for key in lvs_error_keys if data.get(key) is not None]
+
+                if lvs_values:
+                    errors = int(sum(float(value) for value in lvs_values if value is not None))
+                    return {
+                        "kind": "lvs",
+                        "status": "clean" if errors == 0 else "violating",
+                        "source": {
+                            "type": "file",
+                            "path": str(path.relative_to(root)).replace("\\", "/"),
+                            "size_bytes": path.stat().st_size,
+                            "mtime": path.stat().st_mtime,
+                        },
+                        "metrics": {"error_count": errors},
+                        "summary": {"diagnostic_count": 0, "error_count": errors, "warning_count": 0},
+                        "diagnostics": [],
+                        "message": f"LVS signoff loaded from {path.name}.",
+                    }
+        except Exception:
+            continue
     return None

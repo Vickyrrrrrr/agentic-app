@@ -76,6 +76,24 @@ declare global {
       setTitlebar?: (theme: { mode: "light" | "dark" }) => Promise<void>
       exportDebugLogs?: () => Promise<string>
       getBackendMode?: () => Promise<string>
+      getBackendStatus?: () => Promise<{
+        mode: string
+        started: boolean
+        ready: boolean
+        degraded: boolean
+        message: string
+        url: string
+        wsl?: {
+          available: boolean
+          distro?: string
+          python: boolean
+          bootstrapped: boolean
+          pdkRoot?: string
+          tools: Record<string, string | null>
+          missingTools: string[]
+          reason?: string
+        }
+      }>
       installWsl?: () => Promise<{ success: boolean; message: string }>
       checkDocker?: () => Promise<{ available: boolean; version: string | null }>
     }

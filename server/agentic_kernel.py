@@ -178,7 +178,7 @@ def scope_for_turn(
         return PermissionScope(
             name="planning",
             reason="Design work is not approved yet; discovery and PDK queries only.",
-            allowed_tools=("workspace", "bash", "query_pdk", "ledger"),
+            allowed_tools=("workspace", "bash", "query_pdk", "ledger", "app_capability"),
             allow_bash=True,
             allowed_bash="read_only_discovery",
         )
@@ -186,7 +186,7 @@ def scope_for_turn(
         return PermissionScope(
             name="execution",
             reason="User approved the plan or requested a scoped follow-up edit after approval.",
-            allowed_tools=("workspace", "write", "bash", "report", "web_search", "query_pdk", "ledger"),
+            allowed_tools=("workspace", "write", "bash", "report", "web_search", "query_pdk", "ledger", "app_capability"),
             write_roots=(
                 "docs/", "rtl/", "tb/", "dv/", "constraints/", "synth/", "sim/", "hardening/",
                 "pnr/", "sta/", "signoff/", "scripts/", "logs/", "reports/",

@@ -24,20 +24,42 @@ type YosysCell = {
 type YosysModule = {
   ports: Record<string, YosysPort>
   cells: Record<string, YosysCell>
+  netnames?: Record<string, { bits: Bit[]; hide_name?: number | string }>
 }
 type YosysJson = { modules: Record<string, YosysModule> }
 
 type SchematicResponse = {
   available: boolean
+  large_design?: boolean
   reason?: string
   log?: string
   module?: string
   yosys_json?: YosysJson
   ports?: number
   cells?: number
+  cache_ref?: string
+  netlist_summary?: {
+    named_net_count?: number
+    health?: {
+      bit_count?: number
+      undriven_count?: number
+      unloaded_count?: number
+      multidriven_count?: number
+      high_fanout_count?: number
+      constant_bit_uses?: Record<string, number>
+      high_fanout_preview?: { bit: string; fanout: number; driver: string }[]
+      undriven_preview?: { bit: string; load_count: number; loads: string[] }[]
+      multidriven_preview?: { bit: string; driver_count: number; drivers: string[] }[]
+    }
+    complexity?: {
+      recommended_mode?: string
+      full_json_cell_limit?: number
+      full_json_net_limit?: number
+    }
+  }
 }
 
-type NodeKind = "port" | "cell"
+type NodeKind = "port" | "cell" | "const"
 type LayoutNode = {
   id: string
   kind: NodeKind
@@ -53,6 +75,18 @@ type LayoutNode = {
   h: number
   nets: { name: string; bits: Bit[]; dir: string }[]
 }
+type Endpoint = { node: string; pin: string; dir: string }
+type LayoutEdge = {
+  id: string
+  from: string
+  to: string
+  fromPin: string
+  toPin: string
+  bits: Bit[]
+  netNames: string[]
+  width: number
+  lane: number
+}
 
 const CELL_W = 160
 const CELL_H = 36
@@ -64,44 +98,98 @@ function bitKey(b: Bit): string {
   return String(b)
 }
 
-function netOfBits(bits: Bit[]): string {
-  return bits.map(bitKey).join(",")
+function isConstBit(bit: Bit): boolean {
+  return typeof bit === "string" && /^[01xz]$/i.test(bit)
+}
+
+function bitsPreview(bits: Bit[]): string {
+  if (bits.length === 0) return "-"
+  if (bits.length <= 4) return bits.map(bitKey).join(",")
+  return `${bits.length}b · ${bitKey(bits[0])}…${bitKey(bits[bits.length - 1])}`
+}
+
+function bitLabel(bit: Bit, bitNames: Map<string, string[]>): string {
+  if (isConstBit(bit)) return `1'b${String(bit).toLowerCase()}`
+  const names = bitNames.get(bitKey(bit)) ?? []
+  return names[0] ?? `#${bitKey(bit)}`
+}
+
+function busLabel(name: string, bits: Bit[], bitNames: Map<string, string[]>): string {
+  if (bits.length === 0) return name
+  if (bits.length === 1) return bitLabel(bits[0], bitNames)
+  return `${name}[${bits.length - 1}:0]`
+}
+
+function buildBitNameIndex(ymod: YosysModule) {
+  const bitNames = new Map<string, string[]>()
+  const note = (bit: Bit, name: string) => {
+    if (isConstBit(bit)) return
+    const key = bitKey(bit)
+    const names = bitNames.get(key) ?? []
+    if (!names.includes(name)) names.push(name)
+    bitNames.set(key, names)
+  }
+
+  for (const [portName, port] of Object.entries(ymod.ports ?? {})) {
+    const bits = port.bits ?? []
+    if (bits.length === 1) note(bits[0], portName)
+    else bits.forEach((bit, idx) => note(bit, `${portName}[${idx}]`))
+  }
+
+  for (const [netName, net] of Object.entries(ymod.netnames ?? {})) {
+    if (String(net.hide_name ?? "0") === "1") continue
+    const bits = net.bits ?? []
+    if (bits.length === 1) note(bits[0], netName)
+    else bits.forEach((bit, idx) => note(bit, `${netName}[${idx}]`))
+  }
+
+  return bitNames
 }
 
 function buildLayout(resp: SchematicResponse) {
   const mod = resp.module!
   const ymod = resp.yosys_json!.modules[mod]
-  if (!ymod) return { nodes: [] as LayoutNode[], edges: [] as { from: string; to: string }[], columns: 0 }
+  if (!ymod) return { nodes: [] as LayoutNode[], edges: [] as LayoutEdge[], columns: 0, stats: { bitNets: 0, edges: 0 } }
 
   const ports = ymod.ports ?? {}
   const cells = ymod.cells ?? {}
+  const bitNames = buildBitNameIndex(ymod)
 
   const inputPorts = Object.entries(ports).filter(([, p]) => p.direction === "input")
   const outputPorts = Object.entries(ports).filter(([, p]) => p.direction !== "input")
 
-  // net id -> driver node id
-  const driverByNet = new Map<string, string>()
-  const loadsByNet = new Map<string, string[]>()
+  const driverByBit = new Map<string, Endpoint>()
+  const loadsByBit = new Map<string, Endpoint[]>()
+  const constNodes = new Set<string>()
 
-  const noteDriver = (net: string, nodeId: string) => {
-    if (!driverByNet.has(net)) driverByNet.set(net, nodeId)
+  const noteDriver = (bit: Bit, endpoint: Endpoint) => {
+    if (isConstBit(bit)) {
+      constNodes.add(String(bit).toLowerCase())
+      driverByBit.set(bitKey(bit), { node: `const:${String(bit).toLowerCase()}`, pin: String(bit).toLowerCase(), dir: "output" })
+      return
+    }
+    const key = bitKey(bit)
+    if (!driverByBit.has(key)) driverByBit.set(key, endpoint)
   }
-  const noteLoad = (net: string, nodeId: string) => {
-    const arr = loadsByNet.get(net) ?? []
-    arr.push(nodeId)
-    loadsByNet.set(net, arr)
+  const noteLoad = (bit: Bit, endpoint: Endpoint) => {
+    const key = bitKey(bit)
+    const arr = loadsByBit.get(key) ?? []
+    arr.push(endpoint)
+    loadsByBit.set(key, arr)
   }
 
   // input ports drive their nets
   for (const [name, p] of inputPorts) {
-    const net = netOfBits(p.bits)
-    noteDriver(net, `port:${name}`)
-    noteLoad(net, `port:${name}`)
+    for (const bit of p.bits ?? []) {
+      noteDriver(bit, { node: `port:${name}`, pin: name, dir: "output" })
+    }
   }
   // output ports consume their nets
   for (const [name, p] of outputPorts) {
-    const net = netOfBits(p.bits)
-    noteLoad(net, `port:${name}`)
+    for (const bit of p.bits ?? []) {
+      noteLoad(bit, { node: `port:${name}`, pin: name, dir: "input" })
+      if (p.direction === "inout") noteDriver(bit, { node: `port:${name}`, pin: name, dir: "inout" })
+    }
   }
 
   // cells: figure out input/output ports of the cell
@@ -111,14 +199,17 @@ function buildLayout(resp: SchematicResponse) {
     const outs: string[] = []
     const dirs = cell.port_directions ?? {}
     for (const [pn, bits] of Object.entries(cell.connections ?? {})) {
-      const net = netOfBits(bits)
       const dir = dirs[pn] ?? "input"
-      if (dir === "input") {
-        ins.push(net)
-        noteLoad(net, `cell:${inst}`)
-      } else {
-        outs.push(net)
-        noteDriver(net, `cell:${inst}`)
+      for (const bit of bits ?? []) {
+        const key = bitKey(bit)
+        if (dir === "input" || dir === "inout") {
+          ins.push(key)
+          noteLoad(bit, { node: `cell:${inst}`, pin: pn, dir })
+        }
+        if (dir === "output" || dir === "inout") {
+          outs.push(key)
+          noteDriver(bit, { node: `cell:${inst}`, pin: pn, dir })
+        }
       }
     }
     cellNets[inst] = { in: ins, out: outs }
@@ -135,10 +226,10 @@ function buildLayout(resp: SchematicResponse) {
     visiting.add(inst)
     let max = 0
     const ins = cellNets[inst]?.in ?? []
-    for (const net of ins) {
-      const drv = driverByNet.get(net)
-      if (drv && drv.startsWith("cell:")) {
-        const d = computeDepth(drv.slice(5)) + 1
+    for (const bit of ins) {
+      const drv = driverByBit.get(bit)
+      if (drv?.node.startsWith("cell:")) {
+        const d = computeDepth(drv.node.slice(5)) + 1
         if (d > max) max = d
       }
     }
@@ -172,7 +263,23 @@ function buildLayout(resp: SchematicResponse) {
       y: 0,
       w: PORT_W,
       h: CELL_H,
-      nets: [{ name, bits: p.bits, dir: p.direction }],
+      nets: [{ name: busLabel(name, p.bits ?? [], bitNames), bits: p.bits, dir: p.direction }],
+    })
+  }
+  for (const value of [...constNodes].sort()) {
+    place({
+      id: `const:${value}`,
+      kind: "const",
+      label: `1'b${value}`,
+      direction: "const",
+      width: 1,
+      column: 0,
+      row: 0,
+      x: 0,
+      y: 0,
+      w: PORT_W,
+      h: CELL_H,
+      nets: [{ name: `1'b${value}`, bits: [value], dir: "output" }],
     })
   }
   for (const [inst, cell] of Object.entries(cells)) {
@@ -209,7 +316,7 @@ function buildLayout(resp: SchematicResponse) {
       y: 0,
       w: PORT_W,
       h: CELL_H,
-      nets: [{ name, bits: p.bits, dir: p.direction }],
+      nets: [{ name: busLabel(name, p.bits ?? [], bitNames), bits: p.bits, dir: p.direction }],
     })
   }
 
@@ -235,16 +342,50 @@ function buildLayout(resp: SchematicResponse) {
     }
   }
 
-  // build edges (driver -> load) for visible wires
-  const edges: { from: string; to: string }[] = []
-  for (const [net, drv] of driverByNet) {
-    const loads = loadsByNet.get(net) ?? []
+  // Build grouped bit-accurate edges. Each edge represents one real
+  // driver/load pin relation and carries the exact Yosys bits it contains.
+  const edgeGroups = new Map<string, LayoutEdge>()
+  for (const [bit, drv] of driverByBit) {
+    const loads = loadsByBit.get(bit) ?? []
     for (const load of loads) {
-      if (drv && drv !== load) edges.push({ from: drv, to: load })
+      if (!drv || drv.node === load.node) continue
+      const groupKey = `${drv.node}|${load.node}|${drv.pin}|${load.pin}`
+      let edge = edgeGroups.get(groupKey)
+      if (!edge) {
+        edge = {
+          id: groupKey,
+          from: drv.node,
+          to: load.node,
+          fromPin: drv.pin,
+          toPin: load.pin,
+          bits: [],
+          netNames: [],
+          width: 0,
+          lane: 0,
+        }
+        edgeGroups.set(groupKey, edge)
+      }
+      edge.bits.push(bit)
+      const name = bitLabel(bit, bitNames)
+      if (!edge.netNames.includes(name)) edge.netNames.push(name)
     }
   }
+  const pairLane = new Map<string, number>()
+  const edges = [...edgeGroups.values()].map((edge) => {
+    edge.width = edge.bits.length
+    const pairKey = `${edge.from}|${edge.to}`
+    const lane = pairLane.get(pairKey) ?? 0
+    pairLane.set(pairKey, lane + 1)
+    edge.lane = lane
+    return edge
+  })
 
-  return { nodes, edges, columns: colX[columns - 1] + colWidths[columns - 1] + 40 }
+  return {
+    nodes,
+    edges,
+    columns: colX[columns - 1] + colWidths[columns - 1] + 40,
+    stats: { bitNets: driverByBit.size, edges: edges.length },
+  }
 }
 
 export function SchematicViewer(props: { file: string }) {
@@ -278,6 +419,8 @@ export function SchematicViewer(props: { file: string }) {
     if (!r || !r.available || !r.yosys_json || !r.module) return null
     return buildLayout(r)
   })
+
+  const health = createMemo(() => resp()?.netlist_summary?.health)
 
   const nodeById = createMemo(() => {
     const l = layout()
@@ -425,12 +568,88 @@ export function SchematicViewer(props: { file: string }) {
         </div>
       </Show>
 
+      <Show when={!resp.loading && resp()?.available && resp()?.large_design}>
+        <div class="flex-1 overflow-y-auto p-4">
+          <div class="max-w-3xl mx-auto border border-border-weaker-base rounded-lg bg-background-strong p-4">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <div class="text-13-medium text-text-strong font-mono">{resp()!.module}</div>
+                <div class="text-11-regular text-text-weaker mt-1">
+                  {resp()!.cells?.toLocaleString()} cells · {resp()!.ports} ports · {resp()!.netlist_summary?.named_net_count?.toLocaleString()} named nets
+                </div>
+              </div>
+              <div class="px-2 py-1 rounded border border-border-weaker-base text-10-medium text-text-weaker font-mono">
+                Complex chip mode
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mt-4">
+              <For each={[
+                ["Bits", health()?.bit_count ?? 0],
+                ["Undriven", health()?.undriven_count ?? 0],
+                ["Multi-driven", health()?.multidriven_count ?? 0],
+                ["High fanout", health()?.high_fanout_count ?? 0],
+              ]}>
+                {(item) => (
+                  <div class="border border-border-weaker-base rounded-md px-3 py-2 bg-background-stronger">
+                    <div class="text-10-regular text-text-weaker uppercase tracking-wider">{item[0]}</div>
+                    <div class="text-16-medium text-text-strong font-mono">{Number(item[1]).toLocaleString()}</div>
+                  </div>
+                )}
+              </For>
+            </div>
+
+            <Show when={health()?.high_fanout_preview?.length}>
+              <div class="mt-4">
+                <div class="text-11-medium text-text-strong mb-2">High Fanout Preview</div>
+                <div class="space-y-1">
+                  <For each={health()!.high_fanout_preview!.slice(0, 8)}>
+                    {(item) => (
+                      <div class="flex items-center justify-between gap-3 text-11-regular font-mono border border-border-weaker-base rounded px-2 py-1">
+                        <span class="truncate text-text-base">bit {item.bit}</span>
+                        <span class="text-text-weaker shrink-0">fanout {item.fanout} · {item.driver}</span>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </div>
+            </Show>
+
+            <Show when={health()?.undriven_preview?.length || health()?.multidriven_preview?.length}>
+              <div class="mt-4">
+                <div class="text-11-medium text-text-strong mb-2">Connectivity Issues</div>
+                <div class="space-y-1">
+                  <For each={(health()?.undriven_preview ?? []).slice(0, 5)}>
+                    {(item) => (
+                      <div class="text-11-regular font-mono border border-red-500/30 rounded px-2 py-1 text-red-300 bg-red-500/5">
+                        undriven bit {item.bit} · {item.load_count} load(s)
+                      </div>
+                    )}
+                  </For>
+                  <For each={(health()?.multidriven_preview ?? []).slice(0, 5)}>
+                    {(item) => (
+                      <div class="text-11-regular font-mono border border-yellow-500/30 rounded px-2 py-1 text-yellow-200 bg-yellow-500/5">
+                        multi-driven bit {item.bit} · {item.driver_count} driver(s)
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </div>
+            </Show>
+
+            <div class="mt-4 text-11-regular text-text-weaker leading-relaxed">
+              Full schematic JSON is kept locally at <span class="font-mono text-text-base">{resp()!.cache_ref}</span>. AgentIC returned this compact health/index view to avoid freezing the browser or wasting model context on a large chip.
+            </div>
+          </div>
+        </div>
+      </Show>
+
       <Show when={layout()}>
         <div class="flex items-center justify-between px-4 py-2 border-b border-border-weaker-base shrink-0">
           <div class="flex items-baseline gap-2.5 min-w-0">
             <span class="text-13-medium text-text-strong font-mono truncate">{resp()!.module}</span>
             <span class="text-11-regular text-text-weaker shrink-0">
-              {resp()!.cells} cells · {resp()!.ports} ports
+              {resp()!.cells} cells · {resp()!.ports} ports · {layout()!.stats.bitNets} nets · {layout()!.stats.edges} edges
             </span>
           </div>
           <div class="flex items-center gap-1 text-text-weaker">
@@ -488,11 +707,18 @@ export function SchematicViewer(props: { file: string }) {
                   const from = nodeById().get(edge.from)
                   const to = nodeById().get(edge.to)
                   if (!from || !to) return null
-                  const x1 = from.x + from.w
+                  const forward = from.x <= to.x
+                  const x1 = forward ? from.x + from.w : from.x
                   const y1 = from.y + from.h / 2
-                  const x2 = to.x
+                  const x2 = forward ? to.x : to.x + to.w
                   const y2 = to.y + to.h / 2
                   const mx = (x1 + x2) / 2
+                  const laneOffset = (edge.lane % 7 - 3) * 4
+                  const displayName = edge.netNames.length === 1
+                    ? edge.netNames[0]
+                    : edge.width > 1
+                      ? `${edge.netNames[0]} +${edge.width - 1}`
+                      : edge.netNames[0]
                   
                   const isHovered = () => {
                     const h = hover()
@@ -501,25 +727,44 @@ export function SchematicViewer(props: { file: string }) {
                   }
 
                   return (
+                    <g>
                     <path
-                      d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`}
+                      d={`M ${x1} ${y1 + laneOffset} C ${mx} ${y1 + laneOffset}, ${mx} ${y2 + laneOffset}, ${x2} ${y2 + laneOffset}`}
                       fill="none"
                       stroke={isHovered() ? "var(--text-interactive-base, #9dbefe)" : "var(--border-base, #3e3e42)"}
-                      stroke-width={isHovered() ? "1.8" : "1"}
+                      stroke-width={isHovered() ? Math.min(4, 1.8 + edge.width * 0.2) : Math.min(3, 1 + Math.log2(edge.width))}
                       stroke-opacity={hover() ? (isHovered() ? "1" : "0.15") : "0.5"}
                       style={{ transition: "stroke 0.2s, stroke-width 0.2s, stroke-opacity 0.2s" }}
                       vector-effect="non-scaling-stroke"
                     />
+                    <Show when={edge.width > 1 && (isHovered() || view().scale > 0.85)}>
+                      <text
+                        x={mx}
+                        y={(y1 + y2) / 2 + laneOffset - 3}
+                        text-anchor="middle"
+                        fill="var(--text-weaker, #707076)"
+                        style={{ "font-size": "9px", "font-family": "var(--font-family-mono)", "paint-order": "stroke", stroke: "var(--background-stronger, #111)", "stroke-width": "3px" }}
+                      >
+                        {edge.width}b
+                      </text>
+                    </Show>
+                    <title>
+                      {`${edge.fromPin} -> ${edge.toPin} · ${edge.width} bit${edge.width > 1 ? "s" : ""} · ${displayName}`}
+                    </title>
+                    </g>
                   )
                 }}
               </For>
               <For each={visibleNodes()}>
                 {(node) => {
                   const isPort = node.kind === "port"
+                  const isConst = node.kind === "const"
                   const isHovered = () => hover()?.node.id === node.id
                   const isAnyHovered = () => hover() !== null
                   
-                  const accent = node.direction === "input"
+                  const accent = isConst
+                    ? "var(--text-weaker, #707076)"
+                    : node.direction === "input"
                     ? "var(--surface-success-strong, #12c905)"
                     : node.direction === "output"
                       ? "var(--border-interactive-active, #034cff)"
@@ -544,7 +789,7 @@ export function SchematicViewer(props: { file: string }) {
                         width={node.w}
                         height={node.h}
                         rx="8"
-                        fill={isPort ? "var(--surface-weak, rgba(25, 25, 28, 0.75))" : "var(--surface-base, rgba(20, 20, 23, 0.85))"}
+                        fill={isPort || isConst ? "var(--surface-weak, rgba(25, 25, 28, 0.75))" : "var(--surface-base, rgba(20, 20, 23, 0.85))"}
                         stroke={isHovered() ? "var(--text-interactive-base, #9dbefe)" : "var(--border-weaker-base, #2b2b2f)"}
                         stroke-width={isHovered() ? "1.5" : "1"}
                         style={{ transition: "stroke 0.2s, stroke-width 0.2s" }}
@@ -617,7 +862,20 @@ export function SchematicViewer(props: { file: string }) {
                 </Show>
                 <Show when={h().node.nets.length > 0}>
                   <div class="mt-1.5 pt-1.5 border-t border-border-weaker-base text-text-weaker font-mono text-10-regular">
-                    {h().node.nets.length} pin{h().node.nets.length > 1 ? "s" : ""}
+                    <div class="mb-1">
+                      {h().node.nets.length} pin{h().node.nets.length > 1 ? "s" : ""}
+                    </div>
+                    <For each={h().node.nets.slice(0, 8)}>
+                      {(pin) => (
+                        <div class="flex items-center justify-between gap-3">
+                          <span class="truncate text-text-base">{pin.name}</span>
+                          <span class="shrink-0 text-text-weaker">{pin.dir} · {bitsPreview(pin.bits)}</span>
+                        </div>
+                      )}
+                    </For>
+                    <Show when={h().node.nets.length > 8}>
+                      <div class="text-text-weaker">+{h().node.nets.length - 8} more</div>
+                    </Show>
                   </div>
                 </Show>
               </div>

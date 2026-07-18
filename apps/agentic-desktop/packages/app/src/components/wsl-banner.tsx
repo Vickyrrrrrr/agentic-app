@@ -1,4 +1,4 @@
-import { createResource, createSignal, Show, onMount } from "solid-js"
+import { createMemo, createResource, createSignal, Show } from "solid-js"
 import { Icon } from "@opencode-ai/ui/icon"
 import { usePlatform } from "@/context/platform"
 import { useServer } from "@/context/server"
@@ -24,11 +24,11 @@ export function WslBanner() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const api = window.api as any | undefined
 
-  const [mode] = createResource(async () => {
+  const [status] = createResource(async () => {
     if (platform.platform !== "desktop") return "unknown"
     if (platform.os !== "windows") return "unknown"
     try {
-      return await api?.getBackendMode?.()
+      return await api?.getBackendStatus?.()
     } catch {
       return "unknown"
     }
@@ -36,10 +36,25 @@ export function WslBanner() {
 
   const isWslConnection = () => server.current?.type === "sidecar" && server.current.variant === "wsl"
   const isWslAvailable = () => !!wslServers.data?.runtime?.available
+  const backendMode = () => (typeof status() === "string" ? status() : status()?.mode)
+  const backendMessage = () =>
+    typeof status() === "string" || !status()
+      ? "Install WSL with Python, EDA tools, and a configured PDK to run complete local flows."
+      : status().message
+  const missingItems = createMemo(() => {
+    if (typeof status() === "string") return []
+    return status()?.wsl?.missingTools ?? []
+  })
+  const title = () => {
+    if (backendMode() === "wsl" && missingItems().length > 0) return "WSL connected — EDA setup incomplete"
+    if (backendMode() === "wsl") return "WSL backend ready"
+    if (isWslAvailable()) return "Use WSL for full EDA flows"
+    return "Install WSL for full EDA flows"
+  }
 
   const show = () =>
     !dismissed() &&
-    mode() === "windows-native" &&
+    (backendMode() === "windows-native" || backendMode() === "unknown" || missingItems().length > 0) &&
     !isWslConnection() &&
     platform.platform === "desktop" &&
     platform.os === "windows"
@@ -102,12 +117,19 @@ export function WslBanner() {
 
           <div class="flex-1 min-w-0">
             <div class="text-13-medium text-text-strong mb-1">
-              WSL not detected — EDA tools unavailable
+              {title()}
             </div>
             <div class="text-12-regular text-text-base leading-relaxed mb-2.5">
-              AgentIC needs a Linux environment to run EDA tools (Yosys, OpenROAD, Magic, KLayout).
-              Without WSL, you can chat and write code but cannot synthesize, simulate, or do physical design.
+              {backendMessage()} AgentIC can still open in Windows native mode, but complete synthesis,
+              simulation, and physical-design flows need WSL tools such as Yosys, Icarus/Verilator,
+              OpenROAD/OpenLane, and PDK_ROOT configured inside the distro.
             </div>
+
+            <Show when={missingItems().length > 0}>
+              <div class="text-11-regular text-text-strong bg-surface-base rounded-md px-3 py-2 mb-2.5">
+                Missing in WSL: {missingItems().join(", ")}
+              </div>
+            </Show>
 
             <Show when={installResult()}>
               <div class="text-11-regular text-text-strong bg-surface-base rounded-md px-3 py-2 mb-2.5 font-mono">
@@ -176,4 +198,3 @@ export function WslBanner() {
     </Show>
   )
 }
-

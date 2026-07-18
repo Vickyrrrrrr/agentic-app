@@ -566,14 +566,14 @@ export default function FileTree(props: {
                             sessionLayout?.tabs().open(tab)
                             sessionLayout?.tabs().setActive(tab)
                           }}>
-                            <ContextMenu.ItemLabel>Open Schematic Viewer</ContextMenu.ItemLabel>
+                            <ContextMenu.ItemLabel>Open in Tab</ContextMenu.ItemLabel>
                           </ContextMenu.Item>
                         </Show>
                         <Show when={node.path.endsWith(".vcd") || node.path.endsWith(".fst")}>
                           <ContextMenu.Item onSelect={() => {
                             props.onFileClick?.(node)
                           }}>
-                            <ContextMenu.ItemLabel>Open Waveform Viewer</ContextMenu.ItemLabel>
+                            <ContextMenu.ItemLabel>Open in Tab</ContextMenu.ItemLabel>
                           </ContextMenu.Item>
                         </Show>
                       </ContextMenu.Content>

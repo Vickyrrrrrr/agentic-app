@@ -9,9 +9,12 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 from html.parser import HTMLParser
+from typing import Any
 
-from local_tools import run_bash, run_bash_stream
+from local_tools import detect_environment, run_bash, run_bash_stream
+from app_capabilities import build_app_capability_contract
 from artifact_kernel import evaluate_artifact_write
 from design_intent import evaluate_write_against_intent, intent_from_state_or_manifest
 from pdk_index import build_pdk_index, select_pdk
@@ -247,6 +250,8 @@ def workspace_tool(action: str, workspace_root: str, path: str = ".", pattern: s
         return glob_tool(pattern, workspace_root)
     elif action == "lint":
         return lint_file_tool(path, workspace_root)
+    elif action == "rtl_repair_diagnose":
+        return rtl_repair_diagnose_tool(path, workspace_root)
     elif action == "parse_module":
         return parse_module_tool(path, workspace_root, module)
     elif action == "parse_log":
@@ -258,7 +263,7 @@ def workspace_tool(action: str, workspace_root: str, path: str = ".", pattern: s
     elif action == "schematic_json":
         return schematic_json_tool(path, workspace_root, module)
     else:
-        return f"Error: unknown action '{action}' for workspace tool. Use read, search, list, lint, parse_module, parse_log, layout_inspect, timing_analysis, or schematic_json."
+        return f"Error: unknown action '{action}' for workspace tool. Use read, search, list, lint, rtl_repair_diagnose, parse_module, parse_log, layout_inspect, timing_analysis, or schematic_json."
 
 
 def parse_module_tool(path: str, workspace_root: str) -> str:
@@ -474,6 +479,10 @@ def _compact_log_summary(path: str, tool: str, stage: str, parsed: dict) -> str:
         msg = d.get("message", "")[:100]
         parts.append(f"  - [{d.get('severity', '?')}] {msg}")
 
+    # Add tool instruction nudge to prevent LLM guesswork/hallucinations
+    parts.append("\nNote to Agent: You can parse the complete detailed log file, timing metrics, and full warnings/errors diagnostics list by running the tool:")
+    parts.append(f'workspace(action="parse_log", path="{path}")')
+
     return "\n".join(parts)
 
 
@@ -639,13 +648,15 @@ def layout_inspect_tool(path: str, workspace_root: str) -> str:
 
 def _parse_gds_summary(data: bytes) -> dict:
     # Parse GDS binary and return a structured summary for the agent.
+    import math
     import struct
 
-    view = memoryview(data)
     cells = {}
     top_cell = None
     total_polys = 0
     offset = 0
+    user_unit_in_db_units = 0.001
+    database_unit_m = 1e-9
 
     current_cell = None
     current_layer = 0
@@ -655,12 +666,70 @@ def _parse_gds_summary(data: bytes) -> dict:
     sname = ""
     mag = 1.0
     angle = 0.0
-    strans = 0
+    reflected = False
     cols = 0
     rows = 0
     srefs = []
     arefs = []
     layers_seen = set()
+
+    def empty_bbox():
+        return {"minX": None, "minY": None, "maxX": None, "maxY": None}
+
+    def expand_bbox(bb, x, y):
+        bb["minX"] = x if bb["minX"] is None else min(bb["minX"], x)
+        bb["minY"] = y if bb["minY"] is None else min(bb["minY"], y)
+        bb["maxX"] = x if bb["maxX"] is None else max(bb["maxX"], x)
+        bb["maxY"] = y if bb["maxY"] is None else max(bb["maxY"], y)
+
+    def merge_bbox(dst, src):
+        if not src or any(src.get(k) is None for k in ("minX", "minY", "maxX", "maxY")):
+            return
+        expand_bbox(dst, src["minX"], src["minY"])
+        expand_bbox(dst, src["maxX"], src["maxY"])
+
+    def bbox_to_um(bb):
+        if not bb or any(bb.get(k) is None for k in ("minX", "minY", "maxX", "maxY")):
+            return None
+        um_per_unit_local = database_unit_m * 1e6
+        return {
+            "minX_um": round(bb["minX"] * um_per_unit_local, 4),
+            "minY_um": round(bb["minY"] * um_per_unit_local, 4),
+            "maxX_um": round(bb["maxX"] * um_per_unit_local, 4),
+            "maxY_um": round(bb["maxY"] * um_per_unit_local, 4),
+        }
+
+    def transform_point(x, y, *, origin=(0, 0), mag_value=1.0, angle_value=0.0, reflected_value=False):
+        if reflected_value:
+            y = -y
+        theta = math.radians(angle_value or 0.0)
+        sx = x * (mag_value or 1.0)
+        sy = y * (mag_value or 1.0)
+        tx = sx * math.cos(theta) - sy * math.sin(theta)
+        ty = sx * math.sin(theta) + sy * math.cos(theta)
+        return origin[0] + tx, origin[1] + ty
+
+    def transform_bbox(bb, *, origin=(0, 0), mag_value=1.0, angle_value=0.0, reflected_value=False):
+        if not bb or any(bb.get(k) is None for k in ("minX", "minY", "maxX", "maxY")):
+            return None
+        points = (
+            (bb["minX"], bb["minY"]),
+            (bb["minX"], bb["maxY"]),
+            (bb["maxX"], bb["minY"]),
+            (bb["maxX"], bb["maxY"]),
+        )
+        out = empty_bbox()
+        for x, y in points:
+            tx, ty = transform_point(
+                x,
+                y,
+                origin=origin,
+                mag_value=mag_value,
+                angle_value=angle_value,
+                reflected_value=reflected_value,
+            )
+            expand_bbox(out, tx, ty)
+        return out
 
     def read_real8(offset):
         # GDS 8-byte real: excess-64 base-16
@@ -692,9 +761,26 @@ def _parse_gds_summary(data: bytes) -> dict:
 
         if rec_type == 0x03:  # UNITS
             if dl >= 16:
-                pass  # units not needed for summary
+                # GDS UNITS: first real is user-unit size in database units;
+                # second real is one database unit in meters. XY coordinates
+                # are stored in database units, so bbox conversion uses the
+                # second value.
+                try:
+                    user_unit_in_db_units = read_real8(ds)
+                    database_unit_m = read_real8(ds + 8)
+                except Exception:
+                    pass
         elif rec_type == 0x05:  # BGNSTR
-            current_cell = {"name": "", "polygons": 0, "srefs": 0, "arefs": 0, "layers": set()}
+            current_cell = {
+                "name": "",
+                "polygons": 0,
+                "srefs": 0,
+                "arefs": 0,
+                "layers": set(),
+                "layer_counts": {},
+                "bbox": empty_bbox(),
+                "refs": [],
+            }
             srefs = []
             arefs = []
         elif rec_type == 0x06:  # STRNAME
@@ -707,12 +793,12 @@ def _parse_gds_summary(data: bytes) -> dict:
             if current_cell:
                 current_cell["srefs"] = len(srefs)
                 current_cell["arefs"] = len(arefs)
+                current_cell["sref_names"] = [ref["name"] for ref in srefs + arefs]
+                current_cell["refs"] = list(srefs + arefs)
                 cells[current_cell["name"]] = current_cell
-                for sr in srefs:
-                    pass  # track references
-                for ar in arefs:
-                    pass
             current_cell = None
+            srefs = []
+            arefs = []
         elif rec_type == 0x08:  # BOUNDARY
             element_type = "boundary"
             current_xy = []
@@ -724,70 +810,203 @@ def _parse_gds_summary(data: bytes) -> dict:
             sname = ""
             mag = 1.0
             angle = 0.0
+            reflected = False
         elif rec_type == 0x0b:  # AREF
             element_type = "aref"
             sname = ""
             cols = 0
             rows = 0
+            mag = 1.0
+            angle = 0.0
+            reflected = False
         elif rec_type == 0x0d:  # LAYER
-            if data_type == 1 and ds + 2 <= len(data):
+            if data_type == 2 and ds + 2 <= len(data):
                 current_layer = struct.unpack_from(">h", data, ds)[0]
-            elif data_type == 2 and ds + 4 <= len(data):
+            elif data_type == 3 and ds + 4 <= len(data):
                 current_layer = struct.unpack_from(">i", data, ds)[0]
             layers_seen.add(current_layer)
         elif rec_type == 0x0e:  # DATATYPE
-            if data_type == 1 and ds + 2 <= len(data):
+            if data_type == 2 and ds + 2 <= len(data):
                 current_datatype = struct.unpack_from(">h", data, ds)[0]
+            elif data_type == 3 and ds + 4 <= len(data):
+                current_datatype = struct.unpack_from(">i", data, ds)[0]
         elif rec_type == 0x12:  # SNAME
             sname = data[ds:ds + dl].rstrip(b"\x00").decode("ascii", errors="replace").strip()
-        elif rec_type == 0x17:  # MAG
+        elif rec_type == 0x1a:  # STRANS
+            if dl >= 2:
+                strans = struct.unpack_from(">H", data, ds)[0]
+                reflected = bool(strans & 0x8000)
+        elif rec_type == 0x1b:  # MAG
             mag = read_real8(ds)
-        elif rec_type == 0x18:  # ANGLE
+        elif rec_type == 0x1c:  # ANGLE
             angle = read_real8(ds)
         elif rec_type == 0x13:  # COLROW
             cols = struct.unpack_from(">H", data, ds)[0]
             rows = struct.unpack_from(">H", data, ds + 2)[0]
         elif rec_type == 0x10:  # XY
             current_xy = []
-            if data_type == 2:
+            if data_type == 3:
                 for i in range(0, dl, 8):
                     if ds + i + 8 <= len(data):
                         current_xy.append(struct.unpack_from(">i", data, ds + i)[0])
                         current_xy.append(struct.unpack_from(">i", data, ds + i + 4)[0])
+            elif data_type == 2:
+                for i in range(0, dl, 4):
+                    if ds + i + 4 <= len(data):
+                        current_xy.append(struct.unpack_from(">h", data, ds + i)[0])
+                        current_xy.append(struct.unpack_from(">h", data, ds + i + 2)[0])
         elif rec_type == 0x11:  # ENDEL
             if element_type in ("boundary", "path", "box") and current_cell:
                 current_cell["polygons"] += 1
                 current_cell["layers"].add(current_layer)
+                current_cell["layer_counts"][current_layer] = current_cell["layer_counts"].get(current_layer, 0) + 1
                 total_polys += 1
+                # Update cell bounding box from polygon XY points
+                bb = current_cell["bbox"]
+                for pi in range(0, len(current_xy) - 1, 2):
+                    px, py = current_xy[pi], current_xy[pi + 1]
+                    expand_bbox(bb, px, py)
             elif element_type == "sref":
-                srefs.append(sname)
+                origin = (current_xy[0], current_xy[1]) if len(current_xy) >= 2 else (0, 0)
+                srefs.append({
+                    "type": "sref",
+                    "name": sname,
+                    "origin": origin,
+                    "mag": mag,
+                    "angle": angle,
+                    "reflected": reflected,
+                })
             elif element_type == "aref":
-                arefs.append(sname)
+                origin = (current_xy[0], current_xy[1]) if len(current_xy) >= 2 else (0, 0)
+                col_vec = (0, 0)
+                row_vec = (0, 0)
+                if len(current_xy) >= 6 and cols and rows:
+                    col_div = max(cols - 1, 1)
+                    row_div = max(rows - 1, 1)
+                    col_vec = ((current_xy[2] - origin[0]) / col_div, (current_xy[3] - origin[1]) / col_div) if cols > 1 else (0, 0)
+                    row_vec = ((current_xy[4] - origin[0]) / row_div, (current_xy[5] - origin[1]) / row_div) if rows > 1 else (0, 0)
+                arefs.append({
+                    "type": "aref",
+                    "name": sname,
+                    "origin": origin,
+                    "cols": cols or 1,
+                    "rows": rows or 1,
+                    "col_vec": col_vec,
+                    "row_vec": row_vec,
+                    "mag": mag,
+                    "angle": angle,
+                    "reflected": reflected,
+                })
             element_type = None
         elif rec_type == 0x04:  # ENDLIB
             break
 
         offset += rec_len
 
-    # Find top cell (not referenced by others)
-    referenced = set()
+    # Find top cell: the cell NOT referenced by any other cell (= layout top).
+    # Build referenced set from stored sref_names.
+    referenced: set = set()
     for cell in cells.values():
-        # We didn't store sref names per cell, but we counted them
-        pass
-    if top_cell and cells:
-        unreferenced = [name for name in cells.keys() if name not in referenced]
-        if unreferenced:
-            top_cell = unreferenced[-1]
+        for sref_name in cell.get("sref_names", []):
+            referenced.add(sref_name)
+
+    unreferenced = [name for name in cells.keys() if name not in referenced]
+    score_cache = {}
+
+    def hierarchical_score(cell_name, visiting_score=None):
+        if visiting_score is None:
+            visiting_score = set()
+        if cell_name in score_cache:
+            return score_cache[cell_name]
+        if cell_name in visiting_score:
+            return 0
+        cell = cells.get(cell_name)
+        if not cell:
+            return 0
+        visiting_score.add(cell_name)
+        score = int(cell.get("polygons") or 0)
+        for ref in cell.get("refs", []):
+            multiplier = 1
+            if ref.get("type") == "aref":
+                multiplier = max(int(ref.get("cols") or 1), 1) * max(int(ref.get("rows") or 1), 1)
+            score += hierarchical_score(ref.get("name"), visiting_score) * multiplier
+        visiting_score.remove(cell_name)
+        score_cache[cell_name] = score
+        return score
+
+    if unreferenced:
+        # Prefer the unreferenced cell with the largest hierarchy, not just the
+        # most direct polygons. Top cells often contain mostly references.
+        top_cell = max(unreferenced, key=lambda n: (hierarchical_score(n), cells[n].get("polygons", 0), n))
+    elif cells:
+        top_cell = max(cells.keys(), key=lambda n: (hierarchical_score(n), cells[n].get("polygons", 0), n))
+
+    bbox_cache = {}
+    visiting = set()
+
+    def hierarchical_bbox(cell_name):
+        if cell_name in bbox_cache:
+            return bbox_cache[cell_name]
+        cell = cells.get(cell_name)
+        if not cell or cell_name in visiting:
+            return None
+        visiting.add(cell_name)
+        out = empty_bbox()
+        merge_bbox(out, cell.get("bbox"))
+        for ref in cell.get("refs", []):
+            child_bbox = hierarchical_bbox(ref.get("name"))
+            if not child_bbox:
+                continue
+            if ref.get("type") == "aref":
+                cols_local = max(int(ref.get("cols") or 1), 1)
+                rows_local = max(int(ref.get("rows") or 1), 1)
+                ox, oy = ref.get("origin", (0, 0))
+                cvx, cvy = ref.get("col_vec", (0, 0))
+                rvx, rvy = ref.get("row_vec", (0, 0))
+                for col in range(cols_local):
+                    for row in range(rows_local):
+                        origin = (ox + col * cvx + row * rvx, oy + col * cvy + row * rvy)
+                        merge_bbox(out, transform_bbox(
+                            child_bbox,
+                            origin=origin,
+                            mag_value=ref.get("mag") or 1.0,
+                            angle_value=ref.get("angle") or 0.0,
+                            reflected_value=bool(ref.get("reflected")),
+                        ))
+            else:
+                merge_bbox(out, transform_bbox(
+                    child_bbox,
+                    origin=ref.get("origin", (0, 0)),
+                    mag_value=ref.get("mag") or 1.0,
+                    angle_value=ref.get("angle") or 0.0,
+                    reflected_value=bool(ref.get("reflected")),
+                ))
+        visiting.remove(cell_name)
+        bbox_cache[cell_name] = None if out["minX"] is None else out
+        return bbox_cache[cell_name]
+
+    top_bbox = hierarchical_bbox(top_cell) if top_cell else None
+    bbox_um = bbox_to_um(top_bbox)
+
+    # Build per-layer polygon counts
+    layer_counts: dict = {}
+    for cell in cells.values():
+        for layer, count in cell.get("layer_counts", {}).items():
+            layer_counts[layer] = layer_counts.get(layer, 0) + count
 
     # Build hierarchy (first 50 cells)
     hierarchy = []
     for name, cell in list(cells.items())[:50]:
+        cell_bbox_um = bbox_to_um(hierarchical_bbox(name))
         hierarchy.append({
             "name": name,
             "polygons": cell["polygons"],
             "srefs": cell["srefs"],
             "arefs": cell["arefs"],
             "layers": sorted(cell["layers"]),
+            "layer_polygon_counts": dict(sorted(cell.get("layer_counts", {}).items())),
+            "bbox_um": cell_bbox_um,
+            "is_top": name == top_cell,
         })
 
     layers_sorted = sorted(layers_seen)
@@ -795,11 +1014,16 @@ def _parse_gds_summary(data: bytes) -> dict:
     # Compact summary for the agent
     biggest = sorted(cells.values(), key=lambda x: x["polygons"], reverse=True)[:5]
     biggest_str = ", ".join(f'{c["name"]}({c["polygons"]}p)' for c in biggest)
+    layer_note = ", ".join(f"{l}:{layer_counts.get(l,0)}p" for l in layers_sorted[:12])
+    um_per_unit = database_unit_m * 1e6
     compact = (
         f"GDS layout: {total_polys} polygons, {len(cells)} cells, {len(layers_sorted)} layers. "
-        f"Top cell: {top_cell}. Layers: {', '.join(str(l) for l in layers_sorted[:20])}. "
-        f"Largest cells: {biggest_str}."
+        f"Top cell: {top_cell}. GDS database unit: {database_unit_m:.2e} m = {um_per_unit:.6f} µm/unit. "
+        f"Layers (layer:poly_count): {layer_note}. Largest cells: {biggest_str}."
     )
+    if bbox_um:
+        compact += (f" Top-cell bbox: ({bbox_um['minX_um']},{bbox_um['minY_um']}) to "
+                    f"({bbox_um['maxX_um']},{bbox_um['maxY_um']}) µm.")
 
     return {
         "available": True,
@@ -807,7 +1031,14 @@ def _parse_gds_summary(data: bytes) -> dict:
         "cell_count": len(cells),
         "polygon_count": total_polys,
         "layers": layers_sorted,
+        "layer_polygon_counts": layer_counts,
         "hierarchy": hierarchy,
+        "bbox_um": bbox_um,
+        "bbox_source": "hierarchical_sref_aref_bbox",
+        "user_unit_in_db_units": user_unit_in_db_units,
+        "database_unit_m": database_unit_m,
+        "user_unit_m": database_unit_m,
+        "um_per_unit": um_per_unit,
         "compact_for_agent": compact,
     }
 
@@ -844,7 +1075,10 @@ def schematic_json_tool(path: str, workspace_root: str, module: str = "") -> str
     except Exception:
         pass
 
-    digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:16]
+    full_json_cell_limit = int(os.environ.get("AGENTIC_SCHEMATIC_FULL_JSON_CELL_LIMIT", "2500"))
+    full_json_net_limit = int(os.environ.get("AGENTIC_SCHEMATIC_FULL_JSON_NET_LIMIT", "10000"))
+    cache_version = f"schematic_json_v4_cells{full_json_cell_limit}_nets{full_json_net_limit}"
+    digest = hashlib.sha256((cache_version + "\n" + content).encode("utf-8", errors="replace")).hexdigest()[:16]
     cache_key = f"{module}_{digest}"
     cache_path = os.path.join(cache_dir, f"{cache_key}.json")
 
@@ -880,10 +1114,31 @@ def schematic_json_tool(path: str, workspace_root: str, module: str = "") -> str
         pass
 
 
-    script_parts = [f"read_verilog {' '.join('-I' + d for d in inc_dirs)} {' '.join(verilog_files)}"]
-    script_parts.append(f"hierarchy -check -top {module}")
+    # Detect gate-level netlists: .pnl.v / .gl.v / .synth.v / .mapped.v, or
+    # files containing PDK standard-cell instantiations (sky130_fd_sc*, gf180mcu*, etc.)
+    # For these, use `hierarchy -nocheck` so PDK cells are treated as black boxes.
+    gate_level_extensions = (".pnl.v", ".gl.v", ".synth.v", ".mapped.v", ".pnl.sv", ".gl.sv")
+    is_gate_level = (
+        any(full.endswith(ext) for ext in gate_level_extensions)
+        or bool(re.search(r"\bsky130_fd_sc_\w+\b|\bgf180mcu_fd_sc_\w+\b|\basap7sc\w+\b", content[:4000]))
+    )
+    hierarchy_flag = "-nocheck" if is_gate_level else "-check"
+
+    def yosys_quote(value: str) -> str:
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    def rel_to_workspace(value: str) -> str:
+        try:
+            return os.path.relpath(value, workspace_root)
+        except Exception:
+            return value
+
+    read_opts = [f"-I{rel_to_workspace(d)}" for d in inc_dirs]
+    read_files = [yosys_quote(rel_to_workspace(f)) for f in verilog_files]
+    script_parts = [f"read_verilog {' '.join(read_opts + read_files)}"]
+    script_parts.append(f"hierarchy {hierarchy_flag} -top {module}")
     script_parts.append("prep -top %s" % module)
-    script_parts.append(f"write_json {cache_path}")
+    script_parts.append(f"write_json {yosys_quote(rel_to_workspace(cache_path))}")
     yosys_script = "; ".join(script_parts)
 
     try:
@@ -893,6 +1148,7 @@ def schematic_json_tool(path: str, workspace_root: str, module: str = "") -> str
             stderr=subprocess.PIPE,
             text=True,
             timeout=60,
+            cwd=workspace_root,
         )
     except subprocess.TimeoutExpired:
         return json.dumps({"available": False, "reason": "yosys timed out (design too large or complex)"})
@@ -911,15 +1167,120 @@ def schematic_json_tool(path: str, workspace_root: str, module: str = "") -> str
 
     modules = yosys_json.get("modules", {}) if isinstance(yosys_json, dict) else {}
     mod_data = modules.get(module, {})
-    ports = len(mod_data.get("ports", {}))
-    cells = len(mod_data.get("cells", {}))
+    ports_data = mod_data.get("ports", {})
+    cells_data = mod_data.get("cells", {})
+    ports = len(ports_data)
+    cells = len(cells_data)
+
+    # Build compact netlist_summary for agent consumption.
+    # Top-level port list with direction and bit-width.
+    top_ports = []
+    for pname, pinfo in ports_data.items():
+        if isinstance(pinfo, dict):
+            bits = pinfo.get("bits", [])
+            top_ports.append({
+                "name": pname,
+                "direction": pinfo.get("direction", "input"),
+                "width": len(bits) if isinstance(bits, list) else 1,
+            })
+
+    # Compact named-net preview. The full bit-level connectivity remains in
+    # yosys_json; this summary gives the agent a cheap reality check.
+    netnames_data = mod_data.get("netnames", {})
+    named_nets = []
+    if isinstance(netnames_data, dict):
+        for nname, ninfo in list(netnames_data.items())[:80]:
+            if not isinstance(ninfo, dict):
+                continue
+            if str(ninfo.get("hide_name", "0")) == "1":
+                continue
+            bits = ninfo.get("bits", [])
+            named_nets.append({
+                "name": nname,
+                "width": len(bits) if isinstance(bits, list) else 1,
+                "bits": bits[:16] if isinstance(bits, list) else [],
+                "truncated": isinstance(bits, list) and len(bits) > 16,
+            })
+
+    # Cell type histogram.
+    cell_type_hist: dict = {}
+    for cinfo in cells_data.values():
+        if isinstance(cinfo, dict):
+            ct = cinfo.get("type", "unknown")
+            cell_type_hist[ct] = cell_type_hist.get(ct, 0) + 1
+
+    # Per-cell connection table (capped at 80 cells to stay token-friendly).
+    cell_connections = []
+    for cname, cinfo in list(cells_data.items())[:80]:
+        if not isinstance(cinfo, dict):
+            continue
+        conn = cinfo.get("connections", {})
+        dirs = cinfo.get("port_directions", {})
+        pins = []
+        for pn, bits in (conn.items() if isinstance(conn, dict) else []):
+            pins.append({
+                "pin": pn,
+                "direction": dirs.get(pn, "input") if isinstance(dirs, dict) else "input",
+                "width": len(bits) if isinstance(bits, list) else 1,
+            })
+        cell_connections.append({
+            "instance": cname,
+            "type": cinfo.get("type", "unknown"),
+            "pins": pins,
+        })
+
+    netlist_summary = {
+        "top_ports": top_ports,
+        "named_net_count": len(netnames_data) if isinstance(netnames_data, dict) else 0,
+        "named_nets": named_nets,
+        "cell_type_histogram": cell_type_hist,
+        "total_cells": cells,
+        "cell_connections": cell_connections,
+        "note": "cell_connections capped at 80; full netlist in yosys_json" if cells > 80 else None,
+    }
+
+    # Complex-chip guardrail: do not ship huge Yosys JSON into the browser/model.
+    # The full JSON remains cached on disk for future trace/subgraph APIs.
+    named_net_count = len(netnames_data) if isinstance(netnames_data, dict) else 0
+    large_design = cells > full_json_cell_limit or named_net_count > full_json_net_limit
+    netlist_health = _schematic_health(mod_data)
+    netlist_summary["health"] = netlist_health
+    netlist_summary["complexity"] = {
+        "large_design": large_design,
+        "full_json_cell_limit": full_json_cell_limit,
+        "full_json_net_limit": full_json_net_limit,
+        "recommended_mode": "summary_trace_subgraph" if large_design else "interactive_full_graph",
+    }
+
+    if large_design:
+        result = json.dumps({
+            "available": True,
+            "large_design": True,
+            "module": module,
+            "ports": ports,
+            "cells": cells,
+            "netlist_summary": netlist_summary,
+            "cache_ref": os.path.relpath(cache_path, workspace_root),
+            "reason": (
+                "Large schematic: full Yosys JSON kept in local cache; returning compact "
+                "health/index summary to avoid browser/model overload."
+            ),
+        })
+        try:
+            with open(cache_path, "w", encoding="utf-8") as cf:
+                cf.write(result)
+        except Exception:
+            pass
+        return result
 
     result = json.dumps({
         "available": True,
+        "large_design": False,
         "module": module,
         "yosys_json": yosys_json,
         "ports": ports,
         "cells": cells,
+        "netlist_summary": netlist_summary,
     })
 
     try:
@@ -928,6 +1289,99 @@ def schematic_json_tool(path: str, workspace_root: str, module: str = "") -> str
     except Exception:
         pass
     return result
+
+
+def _schematic_health(mod_data: dict) -> dict:
+    ports_data = mod_data.get("ports", {}) if isinstance(mod_data, dict) else {}
+    cells_data = mod_data.get("cells", {}) if isinstance(mod_data, dict) else {}
+    netnames_data = mod_data.get("netnames", {}) if isinstance(mod_data, dict) else {}
+
+    drivers: dict[str, list[str]] = {}
+    loads: dict[str, list[str]] = {}
+    constants: dict[str, int] = {}
+
+    def bit_key(bit) -> str:
+        return str(bit)
+
+    def is_const(bit) -> bool:
+        return isinstance(bit, str) and bit.lower() in {"0", "1", "x", "z"}
+
+    def add(mapping: dict[str, list[str]], bit, endpoint: str):
+        key = bit_key(bit)
+        mapping.setdefault(key, []).append(endpoint)
+
+    for pname, pinfo in ports_data.items():
+        if not isinstance(pinfo, dict):
+            continue
+        direction = str(pinfo.get("direction", "input"))
+        bits = pinfo.get("bits", [])
+        if not isinstance(bits, list):
+            continue
+        for bit in bits:
+            if is_const(bit):
+                constants[str(bit).lower()] = constants.get(str(bit).lower(), 0) + 1
+                continue
+            if direction == "input":
+                add(drivers, bit, f"port:{pname}")
+            elif direction == "output":
+                add(loads, bit, f"port:{pname}")
+            else:
+                add(drivers, bit, f"port:{pname}")
+                add(loads, bit, f"port:{pname}")
+
+    for cname, cinfo in cells_data.items():
+        if not isinstance(cinfo, dict):
+            continue
+        dirs = cinfo.get("port_directions", {})
+        conns = cinfo.get("connections", {})
+        if not isinstance(dirs, dict) or not isinstance(conns, dict):
+            continue
+        for pin, bits in conns.items():
+            if not isinstance(bits, list):
+                continue
+            direction = str(dirs.get(pin, "input"))
+            for bit in bits:
+                if is_const(bit):
+                    constants[str(bit).lower()] = constants.get(str(bit).lower(), 0) + 1
+                    if direction in {"input", "inout"}:
+                        add(loads, bit, f"{cname}.{pin}")
+                    continue
+                if direction in {"input", "inout"}:
+                    add(loads, bit, f"{cname}.{pin}")
+                if direction in {"output", "inout"}:
+                    add(drivers, bit, f"{cname}.{pin}")
+
+    all_bits = set(drivers) | set(loads)
+    undriven = []
+    unloaded = []
+    multidriven = []
+    high_fanout = []
+    for bit in sorted(all_bits, key=lambda v: (len(v), v)):
+        driver_count = len(drivers.get(bit, []))
+        load_count = len(loads.get(bit, []))
+        if driver_count == 0 and load_count > 0:
+            undriven.append({"bit": bit, "loads": loads.get(bit, [])[:8], "load_count": load_count})
+        if load_count == 0 and driver_count > 0:
+            unloaded.append({"bit": bit, "drivers": drivers.get(bit, [])[:8], "driver_count": driver_count})
+        if driver_count > 1:
+            multidriven.append({"bit": bit, "drivers": drivers.get(bit, [])[:8], "driver_count": driver_count})
+        if load_count >= 32:
+            high_fanout.append({"bit": bit, "fanout": load_count, "driver": (drivers.get(bit, []) or ["unknown"])[0]})
+
+    high_fanout.sort(key=lambda item: item["fanout"], reverse=True)
+    return {
+        "bit_count": len(all_bits),
+        "named_net_count": len(netnames_data) if isinstance(netnames_data, dict) else 0,
+        "constant_bit_uses": dict(sorted(constants.items())),
+        "undriven_count": len(undriven),
+        "unloaded_count": len(unloaded),
+        "multidriven_count": len(multidriven),
+        "high_fanout_count": len(high_fanout),
+        "undriven_preview": undriven[:20],
+        "unloaded_preview": unloaded[:20],
+        "multidriven_preview": multidriven[:20],
+        "high_fanout_preview": high_fanout[:20],
+    }
 
 
 def lint_file_tool(path: str, workspace_root: str) -> str:
@@ -1075,6 +1529,349 @@ def lint_file_tool(path: str, workspace_root: str) -> str:
     return json.dumps({"errors": errors})
 
 
+def rtl_repair_diagnose_tool(path: str, workspace_root: str) -> str:
+    """Run RTL lint and return compact, categorized repair guidance."""
+    full = _safe_workspace_path(path, workspace_root)
+    if not full or not os.path.isfile(full):
+        return json.dumps({
+            "status": "failed",
+            "stage": "lint",
+            "path": path,
+            "diagnostics": [{
+                "severity": "error",
+                "category": "file_not_found",
+                "line": 1,
+                "message": f"File not found: {path}",
+                "hint": "Check the RTL path and run the diagnosis on an existing .v/.sv file.",
+                "next_action": "inspect_path",
+            }],
+        }, indent=2)
+
+    try:
+        available_linter = next((tool for tool in ("vlogan", "xmvlog", "vlog", "verilator", "iverilog") if shutil.which(tool)), None)
+        if available_linter:
+            lint = json.loads(lint_file_tool(path, workspace_root))
+            linter_engine = available_linter
+        else:
+            lint = {"errors": _builtin_rtl_lint(full, path)}
+            linter_engine = "agentic_builtin_static"
+    except Exception as exc:
+        return json.dumps({
+            "status": "failed",
+            "stage": "lint",
+            "path": path,
+            "diagnostics": [{
+                "severity": "error",
+                "category": "lint_runner_error",
+                "line": None,
+                "message": f"Could not run or parse lint output: {exc}",
+                "hint": "Inspect local lint tool availability and rerun the diagnosis.",
+                "next_action": "inspect_toolchain",
+            }],
+        }, indent=2)
+
+    errors = lint.get("errors") if isinstance(lint, dict) else []
+    diagnostics = []
+    for item in (errors or [])[:12]:
+        if not isinstance(item, dict):
+            continue
+        message = str(item.get("message") or "")
+        line = _safe_int(item.get("line"))
+        category, hint, next_action = _categorize_rtl_lint_message(message)
+        diagnostics.append({
+            "severity": item.get("severity") or "error",
+            "category": category,
+            "file": path,
+            "line": line,
+            "message": message,
+            "nearby_code": _nearby_code(full, line),
+            "hint": hint,
+            "next_action": next_action,
+        })
+
+    status = "clean" if not diagnostics else "failed"
+    primary = diagnostics[0] if diagnostics else None
+    return json.dumps({
+        "status": status,
+        "stage": "lint",
+        "path": path,
+        "linter_engine": linter_engine,
+        "diagnostic_count": len(diagnostics),
+        "primary_category": primary.get("category") if primary else None,
+        "primary_hint": primary.get("hint") if primary else "RTL lint is clean.",
+        "repair_policy": "Use surgical edits for the reported line/context. Rerun rtl_repair_diagnose after each edit. Escalate to block rewrite only if the same category persists after two surgical attempts.",
+        "diagnostics": diagnostics,
+    }, indent=2)
+
+
+def _categorize_rtl_lint_message(message: str) -> tuple[str, str, str]:
+    text = (message or "").lower()
+    rules = [
+        (
+            "undeclared_signal",
+            (r"not declared", r"undeclared", r"can't find definition", r"cannot find.*definition", r"unknown identifier", r"identifier .* undefined", r"used before declaration", r"not visible in this scope", r"not found"),
+            "Declare the signal in the correct scope or fix a typo in the signal/port name.",
+            "surgical_edit_declaration_or_name",
+        ),
+        (
+            "width_mismatch",
+            (r"width", r"expects .* bits", r"generate[s]? .* bits", r"truncat", r"extend", r"size mismatch", r"port size"),
+            "Match bit widths by fixing declarations, adding explicit slices, or using explicit zero/sign extension.",
+            "surgical_edit_width",
+        ),
+        (
+            "syntax_error",
+            (r"syntax error", r"unexpected", r"parse error", r"unexpected token", r"near unexpected", r"unexpected end"),
+            "Fix the local Verilog syntax near the reported line: punctuation, begin/end balance, declarations, or statement form.",
+            "surgical_edit_syntax",
+        ),
+        (
+            "inferred_latch",
+            (r"latch", r"not assigned in all", r"incomplete assignment"),
+            "Add default assignments at the start of the combinational block, or add missing else/default branches.",
+            "surgical_edit_comb_defaults",
+        ),
+        (
+            "blocking_in_sequential",
+            (r"blocking", r"blocked assignment", r"use nonblocking", r"non-blocking"),
+            "Use non-blocking <= assignments for registers inside clocked sequential blocks.",
+            "surgical_edit_assignment",
+        ),
+        (
+            "multiple_driver",
+            (r"multiple driver", r"multidriven", r"driven from multiple", r"also assigned", r"conflicting drivers"),
+            "Ensure each net/register has one driver; remove duplicate assign/always drivers or split signals.",
+            "inspect_drivers",
+        ),
+        (
+            "port_mismatch",
+            (r"port .*not", r"pin .*not", r"too few port", r"too many port", r"missing port", r"does not exist in module"),
+            "Check the instance port map against the child module declaration and fix names or connections.",
+            "surgical_edit_instance_ports",
+        ),
+        (
+            "missing_module",
+            (r"module .*not found", r"can't resolve module", r"unknown module", r"cannot find module", r"cell .*not found"),
+            "Add the missing RTL file to the file list/include path, or correct the instantiated module name.",
+            "inspect_filelist_or_module_name",
+        ),
+        (
+            "non_synthesizable_construct",
+            (r"delay", r"initial", r"\$display", r"\$finish", r"\$random", r"unsupported.*synth"),
+            "Move simulation-only constructs to the testbench or replace them with synthesizable logic.",
+            "surgical_edit_synthesizability",
+        ),
+        (
+            "reset_issue",
+            (r"reset", r"uninitialized", r"not initialized", r"no reset"),
+            "Add or fix the reset branch so every sequential register has a deterministic reset value.",
+            "surgical_edit_reset",
+        ),
+    ]
+    for category, patterns, hint, next_action in rules:
+        if any(re.search(pattern, text) for pattern in patterns):
+            return category, hint, next_action
+    return (
+        "unknown",
+        "Inspect the reported line and nearby code. Preserve intended behavior and make the smallest fix that satisfies the lint tool.",
+        "inspect_line",
+    )
+
+
+def _builtin_rtl_lint(full_path: str, rel_path: str) -> list[dict[str, Any]]:
+    """Small dependency-free RTL checker used when no external linter exists."""
+    try:
+        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception as exc:
+        return [{"severity": "error", "line": 1, "message": f"Could not read RTL file: {exc}"}]
+
+    errors: list[dict[str, Any]] = []
+    stripped = _strip_sv_comments_preserve_lines(content)
+    lines = stripped.splitlines()
+
+    modules = list(re.finditer(r"(?m)^\s*module\s+([A-Za-z_][A-Za-z0-9_$]*)\b", stripped))
+    endmodules = list(re.finditer(r"(?m)^\s*endmodule\b", stripped))
+    if not modules:
+        errors.append({"severity": "error", "line": 1, "message": "No Verilog module declaration found."})
+    if len(modules) != len(endmodules):
+        line = _offset_to_line(stripped, modules[-1].start() if modules else 0)
+        errors.append({
+            "severity": "error",
+            "line": line,
+            "message": f"module/endmodule mismatch: found {len(modules)} module and {len(endmodules)} endmodule token(s).",
+        })
+    if len(modules) > 1:
+        errors.append({
+            "severity": "warning",
+            "line": _offset_to_line(stripped, modules[1].start()),
+            "message": "Multiple modules in one file; AgentIC RTL policy expects one module per file.",
+        })
+
+    block_pairs = (
+        ("begin", "end"),
+        ("case", "endcase"),
+        ("function", "endfunction"),
+        ("task", "endtask"),
+        ("generate", "endgenerate"),
+    )
+    for open_token, close_token in block_pairs:
+        opens = list(re.finditer(rf"\b{open_token}\b", stripped))
+        closes = list(re.finditer(rf"\b{close_token}\b", stripped))
+        if len(opens) != len(closes):
+            line = _offset_to_line(stripped, (opens[-1].start() if opens else closes[-1].start() if closes else 0))
+            errors.append({
+                "severity": "error",
+                "line": line,
+                "message": f"{open_token}/{close_token} mismatch: found {len(opens)} {open_token} and {len(closes)} {close_token}.",
+            })
+
+    for char_open, char_close, name in (("(", ")", "parenthesis"), ("[", "]", "bracket")):
+        balance = 0
+        first_bad_line = None
+        for idx, line in enumerate(lines, start=1):
+            balance += line.count(char_open)
+            balance -= line.count(char_close)
+            if balance < 0 and first_bad_line is None:
+                first_bad_line = idx
+        if balance != 0:
+            errors.append({
+                "severity": "error",
+                "line": first_bad_line or len(lines) or 1,
+                "message": f"Unbalanced {name} tokens: `{char_open}` and `{char_close}` counts do not match.",
+            })
+
+    try:
+        quality = evaluate_rtl_quality(rel_path, content, None)
+        for issue in quality.issues:
+            errors.append({
+                "severity": issue.severity,
+                "line": _line_from_message(issue.message),
+                "message": f"{issue.code}: {issue.message}",
+            })
+    except Exception:
+        pass
+
+    errors.extend(_builtin_undeclared_signal_checks(stripped))
+    return _dedupe_builtin_errors(errors)[:24]
+
+
+def _strip_sv_comments_preserve_lines(content: str) -> str:
+    text = re.sub(r"//.*", "", content or "")
+
+    def repl(match: re.Match) -> str:
+        return "\n" * match.group(0).count("\n")
+
+    return re.sub(r"/\*.*?\*/", repl, text, flags=re.S)
+
+
+def _builtin_undeclared_signal_checks(content: str) -> list[dict[str, Any]]:
+    declared: set[str] = set()
+    module_names: set[str] = set()
+    instance_names: set[str] = set()
+    errors: list[dict[str, Any]] = []
+
+    for match in re.finditer(r"(?m)^\s*module\s+([A-Za-z_][A-Za-z0-9_$]*)\b", content or ""):
+        module_names.add(match.group(1))
+        declared.add(match.group(1))
+    for match in re.finditer(r"\b(?:input|output|inout|wire|reg|logic|integer|genvar|parameter|localparam)\b\s*(?:signed\s*)?(?:\[[^\]]+\]\s*)?([^;,)]+)", content or ""):
+        for piece in re.split(r",", match.group(1)):
+            name = re.sub(r"=.*$", "", piece).strip()
+            name = re.sub(r"\[[^\]]+\]", "", name).strip()
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_$]*$", name):
+                declared.add(name)
+    for match in re.finditer(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_$]*)\s+(?:#\s*\([^;]*?\)\s*)?([A-Za-z_][A-Za-z0-9_$]*)\s*\(", content or ""):
+        module_type, instance_name = match.group(1), match.group(2)
+        if module_type not in _SV_KEYWORDS:
+            instance_names.add(instance_name)
+            declared.add(instance_name)
+
+    expressions: list[tuple[int, str]] = []
+    for idx, line in enumerate((content or "").splitlines(), start=1):
+        clean = line.strip()
+        if not clean:
+            continue
+        assign = re.search(r"(?:assign\s+)?[A-Za-z_][A-Za-z0-9_$]*(?:\[[^\]]+\])?\s*(?:<=|=)\s*(.+?);?\s*$", clean)
+        if assign:
+            expressions.append((idx, assign.group(1)))
+            lhs = re.match(r"(?:assign\s+)?([A-Za-z_][A-Za-z0-9_$]*)", clean)
+            if lhs:
+                declared.add(lhs.group(1))
+            continue
+        condition = re.search(r"\b(?:if|case)\s*\((.*?)\)", clean)
+        if condition:
+            expressions.append((idx, condition.group(1)))
+
+    seen: set[tuple[int, str]] = set()
+    for line, expr in expressions:
+        for ident in re.findall(r"\b[A-Za-z_][A-Za-z0-9_$]*\b", expr):
+            if ident in declared or ident in module_names or ident in instance_names or ident in _SV_KEYWORDS:
+                continue
+            if ident.startswith("$"):
+                continue
+            key = (line, ident)
+            if key in seen:
+                continue
+            seen.add(key)
+            errors.append({
+                "severity": "error",
+                "line": line,
+                "message": f"Identifier `{ident}` is used before declaration or is not visible in this scope.",
+            })
+    return errors[:12]
+
+
+def _offset_to_line(content: str, offset: int) -> int:
+    return (content or "")[:max(0, offset)].count("\n") + 1
+
+
+def _line_from_message(message: str) -> int | None:
+    match = re.search(r"\bline\s+(\d+)\b", message or "", re.I)
+    return int(match.group(1)) if match else None
+
+
+def _dedupe_builtin_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[Any, Any, Any]] = set()
+    result: list[dict[str, Any]] = []
+    for item in errors:
+        key = (item.get("severity"), item.get("line"), item.get("message"))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+_SV_KEYWORDS = {
+    "always", "always_comb", "always_ff", "assign", "begin", "case", "casex", "casez", "default",
+    "else", "end", "endcase", "endfunction", "endmodule", "endtask", "for", "function", "generate",
+    "if", "inout", "input", "integer", "localparam", "logic", "module", "negedge", "or", "output",
+    "parameter", "posedge", "reg", "signed", "task", "wire", "while",
+}
+
+
+def _nearby_code(full_path: str, line: int | None, radius: int = 3) -> list[dict[str, Any]]:
+    if not line or line < 1:
+        return []
+    try:
+        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except Exception:
+        return []
+    start = max(1, line - radius)
+    end = min(len(lines), line + radius)
+    return [{"line": idx, "text": lines[idx - 1]} for idx in range(start, end + 1)]
+
+
+def _safe_int(value) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
 def write_tool_combined(path: str, workspace_root: str, design_name: str = "scratch", content: str = "", old_string: str = "", new_string: str = "") -> str:
     state = DesignStateStore(workspace_root, design_name).load()
     artifact_decision = evaluate_artifact_write(
@@ -1179,6 +1976,9 @@ def bash_tool(command: str, workspace_root: str, design_name: str, timeout: int 
 
     verdict = checkpoint_result["verdict"]
     truncated_log = checkpoint_result["truncated_log"]
+    auto_repair_diagnosis = None
+    if not verdict.get("pass"):
+        auto_repair_diagnosis = _auto_rtl_repair_diagnosis_for_failure(command, raw_log, workspace_root)
     try:
         DesignStateStore(workspace_root, design_name).record_checkpoint(
             eda_tool,
@@ -1188,11 +1988,14 @@ def bash_tool(command: str, workspace_root: str, design_name: str, timeout: int 
     except Exception:
         pass
 
-    return json.dumps({
+    response = {
         "bash_exit_code": exit_code,
         "checkpoint_verdict": verdict,
         "log_snippet": truncated_log
-    }, indent=2)
+    }
+    if auto_repair_diagnosis:
+        response["auto_repair_diagnosis"] = auto_repair_diagnosis
+    return json.dumps(response, indent=2)
 
 
 def flow_command_for_target(
@@ -1228,6 +2031,48 @@ def flow_command_for_target(
         )
         return True, wrapped, ""
     return False, command, f"unknown execution target '{target}'. Use native, wsl, or docker."
+
+
+def _auto_rtl_repair_diagnosis_for_failure(command: str, raw_log: str, workspace_root: str) -> dict[str, Any] | None:
+    """Attach RTL repair guidance to failed checkpointed EDA runs when possible."""
+    rtl_path = _extract_rtl_path_from_text(f"{raw_log}\n{command}", workspace_root)
+    if not rtl_path:
+        return None
+    try:
+        diagnosis = json.loads(rtl_repair_diagnose_tool(rtl_path, workspace_root))
+    except Exception:
+        return None
+    if not isinstance(diagnosis, dict):
+        return None
+    return {
+        "trigger": "failed_checkpoint",
+        "path": rtl_path,
+        "status": diagnosis.get("status"),
+        "linter_engine": diagnosis.get("linter_engine"),
+        "primary_category": diagnosis.get("primary_category"),
+        "primary_hint": diagnosis.get("primary_hint"),
+        "repair_policy": diagnosis.get("repair_policy"),
+        "diagnostics": (diagnosis.get("diagnostics") or [])[:5],
+    }
+
+
+def _extract_rtl_path_from_text(text: str, workspace_root: str) -> str | None:
+    candidates: list[str] = []
+    for match in re.finditer(r"(?<![A-Za-z0-9_$./-])([A-Za-z0-9_./~$ -]+?\.(?:sv|v|vh|svh))(?=$|[\s:),;])", text or "", re.I):
+        raw = match.group(1).strip().strip("'\"")
+        if not raw:
+            continue
+        # Skip obvious generated/system paths that are not user RTL.
+        lower = raw.lower().replace("\\", "/")
+        if any(part in lower for part in ("/tb/", "/testbench/", "/sim/", "/simulation/", "/.agentic/")):
+            continue
+        candidates.append(raw)
+    candidates.sort(key=lambda item: ("/rtl/" not in "/" + item.lower().replace("\\", "/"), len(item)))
+    for candidate in candidates[:20]:
+        full = _safe_workspace_path(candidate, workspace_root)
+        if full and os.path.isfile(full):
+            return os.path.relpath(full, workspace_root).replace("\\", "/")
+    return None
 
 
 def web_search(query: str, max_results: int = 5) -> str:
@@ -1666,6 +2511,414 @@ def _eda_next_actions(stage_context: dict, env: dict, conflicts: dict) -> list[s
     return actions[:8]
 
 
+def design_contract_tool(action: str, workspace_root: str, design_name: str = "scratch") -> str:
+    action = (action or "get").strip().lower()
+    store = DesignStateStore(workspace_root, design_name)
+    if action == "infer":
+        contract = _infer_design_contract(workspace_root, design_name)
+        store.set_design_contract(contract)
+        try:
+            store.record_evidence("design_contract", contract.get("top_module") or "unknown", contract)
+        except Exception:
+            pass
+        return json.dumps(contract, indent=2, default=str)
+    if action == "validate":
+        state = store.load()
+        contract = state.get("design_contract") if isinstance(state.get("design_contract"), dict) else None
+        if not contract:
+            contract = _infer_design_contract(workspace_root, design_name)
+        contract = _validate_design_contract(contract, workspace_root, design_name)
+        store.set_design_contract(contract)
+        try:
+            store.record_evidence("design_contract_validation", contract.get("top_module") or "unknown", {
+                "status": (contract.get("status") or {}).get("contract"),
+                "issues": contract.get("validation_issues") or [],
+                "next_actions": contract.get("next_actions") or [],
+            })
+        except Exception:
+            pass
+        return json.dumps(contract, indent=2, default=str)
+    if action == "get":
+        state = store.load()
+        contract = state.get("design_contract") if isinstance(state.get("design_contract"), dict) else None
+        if not contract:
+            return json.dumps({
+                "schema_version": "agentic.design_contract.v1",
+                "status": {"contract": "missing"},
+                "message": "No active design contract is stored yet. Run agentic_design_contract(action='infer') first.",
+                "next_actions": ["Run design_contract infer", "Then run design_contract validate"],
+            }, indent=2)
+        return json.dumps(_compact_design_contract(contract), indent=2, default=str)
+    return f"Error: unknown design_contract action '{action}'. Use infer, validate, or get."
+
+
+def _infer_design_contract(workspace_root: str, design_name: str) -> dict[str, Any]:
+    rtl_files = _find_rtl_files(workspace_root)
+    modules: dict[str, dict[str, Any]] = {}
+    referenced: set[str] = set()
+    for rel_path in rtl_files:
+        full = os.path.join(workspace_root, rel_path)
+        try:
+            content = open(full, "r", encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        for module in _parse_rtl_modules_for_contract(content, rel_path):
+            modules[module["name"]] = module
+            referenced.update(inst.get("module") for inst in module.get("instances", []) if inst.get("module"))
+
+    top_module = _select_top_module(modules, referenced)
+    top = modules.get(top_module or "") if top_module else None
+    sdc_files = _find_sdc_files(workspace_root)
+    clock_ports = _clock_ports(top.get("ports", []) if top else [])
+    reset_ports = _reset_ports(top.get("ports", []) if top else [])
+    sdc_clock_defined, sdc_clock_names = _sdc_clock_status(workspace_root, sdc_files, clock_ports)
+    stage_status = _contract_stage_status(workspace_root, design_name)
+    validation_issues = []
+    if not top_module:
+        validation_issues.append(_contract_issue("top_missing", "error", "No top module candidate could be inferred from RTL."))
+
+    contract = {
+        "schema_version": "agentic.design_contract.v1",
+        "generated_at": time.time(),
+        "design_name": design_name,
+        "top_module": top_module,
+        "top_file": top.get("file") if top else None,
+        "clock_ports": clock_ports,
+        "reset_ports": reset_ports,
+        "io_ports": [p["name"] for p in (top.get("ports", []) if top else [])],
+        "submodules": sorted({inst["module"] for inst in (top.get("instances", []) if top else []) if inst.get("module")}),
+        "rtl_files": rtl_files[:200],
+        "module_count": len(modules),
+        "modules": {name: _compact_contract_module(module) for name, module in sorted(modules.items())},
+        "constraints": {
+            "sdc_files": sdc_files[:50],
+            "clock_defined": sdc_clock_defined,
+            "clock_names": sdc_clock_names,
+        },
+        "policy": {
+            "top_structural_only": True,
+            "one_module_per_file": True,
+            "constraints_required": True,
+            "no_behavioral_large_memory": True,
+        },
+        "status": {
+            "contract": "draft" if validation_issues else "inferred",
+            "top_valid": bool(top_module),
+            "sdc_clock": "present" if sdc_clock_defined else "missing",
+            **stage_status,
+        },
+        "validation_issues": validation_issues,
+        "next_actions": [],
+    }
+    contract["next_actions"] = _contract_next_actions(contract)
+    contract["compact_for_agent"] = _contract_compact_text(contract)
+    return contract
+
+
+def _validate_design_contract(contract: dict[str, Any], workspace_root: str, design_name: str) -> dict[str, Any]:
+    inferred = _infer_design_contract(workspace_root, design_name)
+    top_module = contract.get("top_module") or inferred.get("top_module")
+    top_file = contract.get("top_file") or inferred.get("top_file")
+    merged = dict(inferred)
+    if top_module and top_module in (inferred.get("modules") or {}):
+        merged["top_module"] = top_module
+        merged["top_file"] = top_file or (inferred.get("modules") or {}).get(top_module, {}).get("file")
+
+    issues = list(merged.get("validation_issues") or [])
+    modules = merged.get("modules") or {}
+    top = modules.get(merged.get("top_module") or "")
+    if not top:
+        issues.append(_contract_issue("top_missing", "error", "Active top module does not exist in scanned RTL."))
+    else:
+        if top.get("always_count", 0) > 0 or top.get("nontrivial_assign_count", 0) > 2:
+            issues.append(_contract_issue(
+                "top_not_structural",
+                "error",
+                f"Top module `{merged.get('top_module')}` has {top.get('always_count')} always block(s) and {top.get('nontrivial_assign_count')} non-trivial assign(s).",
+                top.get("file"),
+            ))
+        missing_children = [
+            name for name in (merged.get("submodules") or [])
+            if name not in modules and not _contract_external_module_ok(name)
+        ]
+        for child in missing_children[:12]:
+            issues.append(_contract_issue("missing_submodule", "warning", f"Top instantiates `{child}`, but no local RTL module was found. It may be an external macro/IP.", top.get("file")))
+        if not merged.get("clock_ports"):
+            issues.append(_contract_issue("clock_missing", "warning", "No obvious top clock port was detected."))
+        if not merged.get("reset_ports"):
+            issues.append(_contract_issue("reset_missing", "warning", "No obvious top reset port was detected."))
+        if not (merged.get("constraints") or {}).get("clock_defined"):
+            issues.append(_contract_issue("sdc_clock_missing", "warning", "No SDC create_clock matching the top clock was found."))
+        full = os.path.join(workspace_root, top.get("file") or "")
+        if os.path.isfile(full):
+            try:
+                quality = evaluate_rtl_quality(top.get("file") or "", open(full, "r", encoding="utf-8", errors="replace").read(), None)
+                for issue in quality.issues:
+                    if issue.code in {"logic_in_top_module", "multiple_modules_in_file", "non_synthesizable_in_design", "behavioral_memory_in_design"}:
+                        issues.append(_contract_issue(issue.code, issue.severity, issue.message, top.get("file")))
+            except Exception:
+                pass
+
+    deduped = _dedupe_contract_issues(issues)
+    merged["validation_issues"] = deduped
+    errors = [item for item in deduped if item.get("severity") == "error"]
+    warnings = [item for item in deduped if item.get("severity") == "warning"]
+    merged["status"]["contract"] = "invalid" if errors else "valid_with_warnings" if warnings else "valid"
+    merged["status"]["top_valid"] = not any(item.get("code") in {"top_missing", "top_not_structural"} and item.get("severity") == "error" for item in deduped)
+    merged["next_actions"] = _contract_next_actions(merged)
+    merged["compact_for_agent"] = _contract_compact_text(merged)
+    merged["validated_at"] = time.time()
+    return merged
+
+
+def _find_rtl_files(workspace_root: str) -> list[str]:
+    results: list[str] = []
+    exclude = {".git", ".agentic", "node_modules", "out", "dist", "build", ".venv", "venv", "__pycache__"}
+    for dirpath, dirnames, filenames in os.walk(workspace_root):
+        dirnames[:] = [d for d in dirnames if d not in exclude]
+        rel_dir = os.path.relpath(dirpath, workspace_root).replace("\\", "/")
+        if rel_dir == ".":
+            rel_dir = ""
+        if any(part in f"/{rel_dir.lower()}/" for part in ("/sim/", "/tb/", "/testbench/", "/verification/")):
+            continue
+        for filename in filenames:
+            if filename.lower().endswith((".v", ".sv")):
+                rel = os.path.join(rel_dir, filename).replace("\\", "/").lstrip("/")
+                results.append(rel)
+    results.sort(key=lambda p: ("/rtl/" not in f"/{p.lower()}", p))
+    return results[:300]
+
+
+def _find_sdc_files(workspace_root: str) -> list[str]:
+    results: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(workspace_root):
+        dirnames[:] = [d for d in dirnames if d not in {".git", ".agentic", "node_modules", "out", "dist", "build", ".venv", "venv"}]
+        for filename in filenames:
+            if filename.lower().endswith(".sdc"):
+                results.append(os.path.relpath(os.path.join(dirpath, filename), workspace_root).replace("\\", "/"))
+    return sorted(results)[:100]
+
+
+def _parse_rtl_modules_for_contract(content: str, rel_path: str) -> list[dict[str, Any]]:
+    text = _strip_sv_comments_preserve_lines(content or "")
+    modules = []
+    for match in re.finditer(r"(?ms)\bmodule\s+([A-Za-z_][A-Za-z0-9_$]*)\b(.*?)\bendmodule\b", text):
+        name = match.group(1)
+        body = match.group(2)
+        header = body.split(";", 1)[0] if ";" in body else body[:1000]
+        ports = _contract_ports(header + "\n" + body)
+        instances = _contract_instances(body)
+        always_count = len(re.findall(r"(?m)^\s*always(?:_[a-z]+)?\b", body))
+        modules.append({
+            "name": name,
+            "file": rel_path,
+            "ports": ports,
+            "instances": instances,
+            "always_count": always_count,
+            "assign_count": len(re.findall(r"(?m)^\s*assign\s+", body)),
+            "nontrivial_assign_count": _contract_nontrivial_assign_count(body),
+            "line": _offset_to_line(text, match.start()),
+        })
+    return modules
+
+
+def _contract_ports(text: str) -> list[dict[str, Any]]:
+    ports: dict[str, dict[str, Any]] = {}
+    pattern = re.compile(r"\b(input|output|inout)\b\s+(?:wire|reg|logic)?\s*(?:signed\s*)?(?P<width>\[[^\]]+\])?\s*(?P<name>[A-Za-z_][A-Za-z0-9_$]*)", re.I)
+    for match in pattern.finditer(text or ""):
+        direction = match.group(1).lower()
+        width = (match.group("width") or "1").strip()
+        name = match.group("name")
+        if name.lower() not in {"input", "output", "inout", "wire", "reg", "logic"}:
+            ports[name] = {"name": name, "direction": direction, "width": width, "role": _port_role(name)}
+    return list(ports.values())[:256]
+
+
+def _contract_instances(body: str) -> list[dict[str, str]]:
+    instances = []
+    skip = _SV_KEYWORDS | {"assign", "always", "initial"}
+    for match in re.finditer(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_$]*)\s*(?:#\s*\([^;]*?\)\s*)?([A-Za-z_][A-Za-z0-9_$]*)\s*\(", body or ""):
+        module_type, instance_name = match.group(1), match.group(2)
+        if module_type in skip or instance_name in skip:
+            continue
+        instances.append({"module": module_type, "instance": instance_name})
+    return instances[:256]
+
+
+def _contract_nontrivial_assign_count(body: str) -> int:
+    count = 0
+    for match in re.finditer(r"(?m)^\s*assign\s+[^=]+=\s*([^;]+);", body or ""):
+        rhs = match.group(1).strip()
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_$]*(?:\[[^\]]+\])?$", rhs):
+            count += 1
+    return count
+
+
+def _select_top_module(modules: dict[str, dict[str, Any]], referenced: set[str]) -> str | None:
+    if not modules:
+        return None
+    candidates = [name for name in modules if name not in referenced] or list(modules)
+    def score(name: str) -> tuple[int, str]:
+        module = modules[name]
+        lower_name = name.lower()
+        lower_file = (module.get("file") or "").lower()
+        value = 0
+        if lower_name in {"chip_top", "soc_top", "top"}:
+            value += 100
+        if lower_name.endswith("_top") or lower_name.endswith("top"):
+            value += 60
+        if "/top/" in f"/{lower_file}" or lower_file.endswith("_top.v") or lower_file.endswith("_top.sv"):
+            value += 40
+        value += min(len(module.get("instances") or []), 20)
+        value += min(len(module.get("ports") or []), 20)
+        return (value, name)
+    return max(candidates, key=score)
+
+
+def _clock_ports(ports: list[dict[str, Any]]) -> list[str]:
+    return [p["name"] for p in ports if p.get("direction") == "input" and re.search(r"(?i)(^clk$|clock|clk_?|_clk)", p.get("name") or "")][:16]
+
+
+def _reset_ports(ports: list[dict[str, Any]]) -> list[str]:
+    return [p["name"] for p in ports if p.get("direction") == "input" and re.search(r"(?i)(rst|reset)", p.get("name") or "")][:16]
+
+
+def _port_role(name: str) -> str:
+    lower = (name or "").lower()
+    if re.search(r"(^clk$|clock|clk_?|_clk)", lower):
+        return "clock"
+    if "rst" in lower or "reset" in lower:
+        return "reset"
+    if "valid" in lower or "ready" in lower:
+        return "handshake"
+    if "addr" in lower:
+        return "address"
+    if "data" in lower:
+        return "data"
+    return "signal"
+
+
+def _sdc_clock_status(workspace_root: str, sdc_files: list[str], clock_ports: list[str]) -> tuple[bool, list[str]]:
+    clocks: list[str] = []
+    for rel in sdc_files[:20]:
+        try:
+            text = open(os.path.join(workspace_root, rel), "r", encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        for match in re.finditer(r"(?i)create_clock\b[^\n;]*", text):
+            line = match.group(0)
+            clocks.extend(re.findall(r"\b(?:get_ports|get_pins)\s+([A-Za-z_][A-Za-z0-9_$]*)", line))
+            for port in clock_ports:
+                if re.search(rf"\b{re.escape(port)}\b", line):
+                    clocks.append(port)
+    unique = sorted(set(clocks))
+    if not clock_ports:
+        return bool(unique), unique
+    return bool(set(clock_ports) & set(unique)), unique
+
+
+def _contract_stage_status(workspace_root: str, design_name: str) -> dict[str, str]:
+    state = DesignStateStore(workspace_root, design_name).load()
+    statuses = {}
+    stage_status = state.get("stage_status") or {}
+    for stage in ("rtl", "lint", "simulation", "synthesis", "sta", "drc", "lvs", "signoff"):
+        item = stage_status.get(stage) or {}
+        statuses[stage] = item.get("status") or "missing"
+    for checkpoint in state.get("checkpoints") or []:
+        stage = str(checkpoint.get("stage") or "").lower()
+        if not stage:
+            continue
+        mapped = "simulation" if "sim" in stage else "synthesis" if "synth" in stage else "sta" if "sta" in stage or "timing" in stage else "drc" if "drc" in stage else "lvs" if "lvs" in stage else "lint" if "lint" in stage else stage
+        if mapped in statuses:
+            statuses[mapped] = "passed" if checkpoint.get("pass") else "failed"
+    return statuses
+
+
+def _compact_contract_module(module: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "file": module.get("file"),
+        "port_count": len(module.get("ports") or []),
+        "ports": (module.get("ports") or [])[:40],
+        "instances": (module.get("instances") or [])[:80],
+        "always_count": module.get("always_count", 0),
+        "assign_count": module.get("assign_count", 0),
+        "nontrivial_assign_count": module.get("nontrivial_assign_count", 0),
+        "line": module.get("line"),
+    }
+
+
+def _contract_issue(code: str, severity: str, message: str, path: str | None = None) -> dict[str, Any]:
+    return {"code": code, "severity": severity, "message": message, "path": path}
+
+
+def _dedupe_contract_issues(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen = set()
+    result = []
+    for issue in issues:
+        key = (issue.get("code"), issue.get("severity"), issue.get("message"), issue.get("path"))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(issue)
+    return result[:80]
+
+
+def _contract_external_module_ok(name: str) -> bool:
+    lowered = (name or "").lower()
+    return lowered.startswith(("sky130_", "gf180", "asap7", "tsmc", "saed", "nangate")) or "__" in lowered
+
+
+def _contract_next_actions(contract: dict[str, Any]) -> list[str]:
+    actions = []
+    status = contract.get("status") or {}
+    if not contract.get("top_module"):
+        actions.append("Select or create a top module, then rerun design_contract infer.")
+    if status.get("top_valid") is False:
+        actions.append("Fix top module structure: keep top as ports, wires, instances, and simple wiring only.")
+    if status.get("sdc_clock") == "missing":
+        actions.append("Create or update SDC with create_clock for the detected top clock.")
+    if status.get("lint") in {"missing", "failed"} and contract.get("top_file"):
+        actions.append(f"Run rtl_repair_diagnose on {contract.get('top_file')}.")
+    if status.get("simulation") == "missing":
+        actions.append("Run or create a self-checking simulation checkpoint.")
+    if status.get("sta") in {"missing", "failed"}:
+        actions.append("Run STA or inspect timing evidence before timing claims.")
+    return actions[:8]
+
+
+def _contract_compact_text(contract: dict[str, Any]) -> str:
+    status = contract.get("status") or {}
+    constraints = contract.get("constraints") or {}
+    return (
+        f"Design contract: top={contract.get('top_module') or 'unknown'} "
+        f"file={contract.get('top_file') or 'unknown'} clocks={','.join(contract.get('clock_ports') or []) or 'none'} "
+        f"resets={','.join(contract.get('reset_ports') or []) or 'none'} "
+        f"submodules={len(contract.get('submodules') or [])} sdc_clock={constraints.get('clock_defined')} "
+        f"contract_status={status.get('contract')} lint={status.get('lint')} sim={status.get('simulation')} "
+        f"sta={status.get('sta')} drc={status.get('drc')} lvs={status.get('lvs')}."
+    )
+
+
+def _compact_design_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": contract.get("schema_version"),
+        "design_name": contract.get("design_name"),
+        "top_module": contract.get("top_module"),
+        "top_file": contract.get("top_file"),
+        "clock_ports": contract.get("clock_ports") or [],
+        "reset_ports": contract.get("reset_ports") or [],
+        "io_port_count": len(contract.get("io_ports") or []),
+        "submodules": (contract.get("submodules") or [])[:80],
+        "rtl_file_count": len(contract.get("rtl_files") or []),
+        "constraints": contract.get("constraints") or {},
+        "policy": contract.get("policy") or {},
+        "status": contract.get("status") or {},
+        "validation_issues": (contract.get("validation_issues") or [])[:20],
+        "next_actions": contract.get("next_actions") or [],
+        "compact_for_agent": contract.get("compact_for_agent") or _contract_compact_text(contract),
+    }
+
+
 def ledger_tool(action: str, workspace_root: str, design_name: str, **kwargs) -> str:
     store = DesignStateStore(workspace_root, design_name)
     if action == "get_state":
@@ -1732,6 +2985,10 @@ def dispatch_tool(name: str, args: dict, workspace_root: str, design_name: str =
     elif name == "design_state":
         max_events = int(args.get("max_events") or 20)
         return json.dumps(DesignStateStore(workspace_root, design_name).summary(max_events=max_events), indent=2, default=str)
+    elif name == "design_contract":
+        return design_contract_tool(str(args.get("action") or "get"), workspace_root, design_name)
+    elif name == "app_capability":
+        return json.dumps(build_app_capability_contract(workspace_root, detect_environment()), indent=2, default=str)
     elif name == "eda_capability":
         return eda_capability_tool(str(args.get("scope") or "agent_context"), workspace_root, design_name)
     elif name == "layout_inspect":

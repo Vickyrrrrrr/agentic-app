@@ -41,6 +41,25 @@ export type FatalRendererError = {
   os?: string
 }
 
+export type BackendStatus = {
+  mode: string
+  started: boolean
+  ready: boolean
+  degraded: boolean
+  message: string
+  url: string
+  wsl?: {
+    available: boolean
+    distro?: string
+    python: boolean
+    bootstrapped: boolean
+    pdkRoot?: string
+    tools: Record<string, string | null>
+    missingTools: string[]
+    reason?: string
+  }
+}
+
 export type ElectronAPI = {
   killSidecar: () => Promise<void>
   installCli: () => Promise<string>
@@ -100,6 +119,7 @@ export type ElectronAPI = {
   exportDebugLogs: () => Promise<string>
   recordFatalRendererError: (error: FatalRendererError) => Promise<void>
   getBackendMode: () => Promise<string>
+  getBackendStatus: () => Promise<BackendStatus>
   installWsl: () => Promise<{ success: boolean; message: string }>
   checkDocker: () => Promise<{ available: boolean; version: string | null }>
 }

@@ -4,6 +4,7 @@ import { z } from "zod"
 
 const AGENT_NAME = "agentic-vlsi"
 const DEFAULT_AGENTIC_LOCAL_URL = "http://127.0.0.1:7860"
+const DEFAULT_FAST_CONTEXT_TIMEOUT_MS = 900
 
 type AgenticSession = {
   session_id: string
@@ -183,7 +184,8 @@ async function runAgenticTool(input: PluginInput, context: ToolContext, payload:
   const design = response.session?.design_name
   const run = response.session?.run_id
   const title = design ? `AgentIC ${payload.name}: ${design}` : `AgentIC ${payload.name}`
-  const output = response.result || (response.success ? "AgentIC tool completed." : "AgentIC tool failed.")
+  const rawOutput = response.result || (response.success ? "AgentIC tool completed." : "AgentIC tool failed.")
+  const output = formatAgenticToolOutput(payload.name, rawOutput)
   return {
     title,
     output,
@@ -199,6 +201,43 @@ async function runAgenticTool(input: PluginInput, context: ToolContext, payload:
 
 const toolResult = (input: PluginInput, context: ToolContext, name: string, args: Record<string, unknown>) =>
   runAgenticTool(input, context, { name, args })
+
+function formatAgenticToolOutput(name: string, rawOutput: string) {
+  let parsed: any
+  try {
+    parsed = JSON.parse(rawOutput)
+  } catch {
+    return rawOutput
+  }
+
+  const hints: string[] = []
+  if (name === "design_contract") {
+    const status = parsed.status || {}
+    hints.push(
+      `Answer hint: design contract status=${status.contract || "unknown"}, top=${parsed.top_module || "unknown"}, file=${parsed.top_file || "unknown"}.`,
+    )
+    if (Array.isArray(parsed.validation_issues) && parsed.validation_issues.length > 0) {
+      hints.push(`Main issue: ${parsed.validation_issues[0].code || "issue"} - ${parsed.validation_issues[0].message || "see JSON"}.`)
+    }
+  } else if (name === "eda_capability") {
+    const ctx = parsed.agent_context || parsed
+    hints.push(
+      `Answer hint: capability tier=${ctx.capability_tier || "unknown"}, ready stages=${(ctx.ready_required_stages || []).join(",") || "none"}, missing stages=${(ctx.missing_required_stages || []).join(",") || "none"}.`,
+    )
+  } else if (name === "query_pdk") {
+    hints.push(`Answer hint: PDK query returned ${Array.isArray(parsed.results) ? parsed.results.length : "structured"} result(s); use the JSON below as the local PDK evidence.`)
+  } else if (name === "report") {
+    const summary = parsed.summary || parsed.signoff || parsed
+    hints.push(`Answer hint: this is the current checkpoint/signoff evidence. Do not run shell unless the user asked to execute the next missing stage.`)
+    if (summary.status) hints.push(`Reported status: ${summary.status}.`)
+  } else if (name === "timing_inspect" || name === "drc_inspect" || name === "layout_inspect") {
+    hints.push("Answer hint: this inspector output is already structured evidence; answer from it unless a required report/file is missing.")
+  }
+
+  if (hints.length === 0) return rawOutput
+  hints.push("Shell policy: do not call shell just to reinterpret this result; call shell only to create missing evidence or run a user-requested step.")
+  return `${hints.join("\n")}\n\nRaw AgentIC JSON:\n${rawOutput}`
+}
 
 export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
   return {
@@ -217,7 +256,7 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
         pdk_profile: process.env.AGENTIC_PDK_PROFILE || process.env.PDK || "",
         agentic_mode: agenticMode,
         fast: true,
-      }, { timeoutMs: Number(process.env.AGENTIC_FAST_CONTEXT_TIMEOUT_MS || 900) })
+      }, { timeoutMs: Number(process.env.AGENTIC_FAST_CONTEXT_TIMEOUT_MS || DEFAULT_FAST_CONTEXT_TIMEOUT_MS) })
         .catch((error) => ({ success: false, error: error instanceof Error ? error.message : String(error) }))
 
       if (!response?.success) {
@@ -244,11 +283,13 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
             "Fast context: true. Full VLSI context is intentionally deferred to reduce first-token latency.",
             "",
             "Use native read/grep/glob/write for normal file UX. Use AgentIC tools before making VLSI-specific claims.",
-            "Use agentic_context for full context, agentic_design_state for durable chip facts, agentic_eda_capability(scope='agent_context') for tool/PDK evidence, agentic_query_pdk for PDK/macro facts, agentic_run_flow for checkpointed EDA execution, agentic_timing_inspect for STA, agentic_drc_inspect for DRC/LVS logs, and agentic_layout_inspect for GDS.",
+            "For chip work, use this evidence loop: agentic_design_contract(action='validate') -> agentic_eda_capability(scope='agent_context') -> agentic_query_pdk(query_type='readiness' or 'find_memory' when needed) -> agentic_run_flow -> inspect generated reports/logs -> answer from evidence.",
+            "Use agentic_context for full context, agentic_design_state for durable chip facts, agentic_design_contract for top-module/clock/reset/hierarchy/SDC evidence, agentic_eda_capability for tool/PDK evidence, agentic_query_pdk for PDK/macro facts, agentic_run_flow for checkpointed EDA execution, agentic_timing_inspect for STA, agentic_drc_inspect for DRC/LVS logs, and agentic_layout_inspect for GDS.",
             agenticMode === "builder"
               ? "BUILDER mode is active: after any required approval, you may write files and run EDA tools."
               : "ADVISOR mode is active: inspect, explain, plan, and write docs/reports only.",
             "Do not invent PDK cells, SRAM macros, tool licenses, timing corners, or signoff readiness; retrieve evidence with AgentIC tools first.",
+            "If evidence is missing, say exactly what is missing and the next AgentIC tool/command needed. Do not fill gaps from memory.",
           ].join("\n"),
         )
         return
@@ -269,10 +310,13 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
           "Use agentic_run_flow for EDA commands so AgentIC can execute on the selected target and capture checkpoints. Use the native bash tool for ordinary shell inspection when checkpointing is not needed.",
           "Use the native write tool for ALL file writes — it shows a diff view.",
           "Use the native read/grep/glob tools for file access — they have syntax highlighting.",
-          "After EDA commands, inspect generated logs/reports with agentic_drc_inspect or agentic_timing_inspect to get pass/fail, errors, warnings, and metrics.",
-          "After writing RTL files (.v/.sv), call agentic_workspace(action='lint', path=<file>) to verify quality (behavioral memory, non-synthesizable constructs, one-module-per-file).",
+          "Before serious RTL/top/flow/signoff work, follow the AgentIC evidence loop: (1) validate the design contract, (2) inspect EDA/PDK capability, (3) query exact PDK readiness or macros when relevant, (4) run the smallest needed EDA step through agentic_run_flow, (5) inspect generated reports/logs, (6) record or cite the evidence.",
+          "Use agentic_design_contract(action='infer'|'validate'|'get') to establish the active top module, clocks/resets, hierarchy, constraints, and evidence status before making top-level or flow claims. Prefer validate when RTL/SDC may have changed; prefer get only when you need the compact stored summary.",
+          "After EDA commands, inspect generated logs/reports with agentic_drc_inspect or agentic_timing_inspect to get pass/fail, errors, warnings, and metrics. If the command produced a GDS, inspect it with agentic_layout_inspect before layout claims.",
+          "After writing RTL files (.v/.sv), call agentic_workspace(action='rtl_repair_diagnose', path=<file>) to verify quality and get compact categorized repair guidance. Use action='lint' only when you need raw lint diagnostics.",
           "For GDS inspection, use agentic_layout_inspect. For STA analysis, use agentic_timing_inspect. For DRC/LVS log parsing, use agentic_drc_inspect.",
           "For PDK queries, use agentic_query_pdk. For design state, use agentic_ledger. For signoff reports, use agentic_report.",
+          "When evidence is missing, stop at the missing gate and state the exact blocker plus the next command/tool to produce evidence. Do not turn assumptions into chip facts.",
           "",
           "## RTL Generation Methodology (Research-Backed)",
           "Derived from AutoChip, RTLFixer, MAGE, HDLFORGE, AutoVeriFix+, EvolVE, AoT, VerilogCoder, PDAGENT-BENCH, AgentDSE.",
@@ -348,9 +392,9 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
         },
       }),
       agentic_workspace: tool({
-        description: "VLSI-specific workspace actions: lint RTL (action='lint'), parse Verilog modules for ports/interfaces (action='parse_module'), generate Yosys schematics (action='schematic_json'). For reading/searching/listing files, use the native read/grep/glob tools instead. For EDA log parsing, use agentic_drc_inspect. For GDS inspection, use agentic_layout_inspect. For STA analysis, use agentic_timing_inspect.",
+        description: "VLSI-specific workspace actions: diagnose RTL lint failures with compact categorized repair packets (action='rtl_repair_diagnose'), lint RTL (action='lint'), parse Verilog modules for ports/interfaces (action='parse_module'), generate Yosys schematics (action='schematic_json'). For reading/searching/listing files, use the native read/grep/glob tools instead. For EDA log parsing, use agentic_drc_inspect. For GDS inspection, use agentic_layout_inspect. For STA analysis, use agentic_timing_inspect.",
         args: {
-          action: z.enum(["lint", "parse_module", "schematic_json"]),
+          action: z.enum(["lint", "rtl_repair_diagnose", "parse_module", "schematic_json"]),
           path: z.string().default("."),
           pattern: z.string().default(""),
           module: z.string().default(""),
@@ -368,8 +412,17 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
           return toolResult(input, context, "design_state", args)
         },
       }),
+      agentic_design_contract: tool({
+        description: "Infer, validate, or read the active AgentIC chip design contract: top module, top file, clocks/resets, hierarchy, SDC status, policy checks, evidence status, and next actions. Use validate before top-level edits, flow setup, signoff claims, or after RTL/SDC changes; use infer to create/refresh from scratch; use get only for the compact stored summary.",
+        args: {
+          action: z.enum(["infer", "validate", "get"]).default("get"),
+        },
+        async execute(args, context) {
+          return toolResult(input, context, "design_contract", args)
+        },
+      }),
       agentic_eda_capability: tool({
-        description: "Inspect local EDA/PDK capability evidence before choosing a flow. Use scope='agent_context' for the compact low-token decision packet, 'conflicts' for PATH/license/PDK conflicts, 'tools' for compact adapter details, 'readiness' for design readiness gates, 'manifests' for capability manifests, or 'summary' for compact capability graph.",
+        description: "Inspect local EDA/PDK capability evidence before choosing a tool, execution target, or flow. Use scope='agent_context' first for a compact decision packet, 'conflicts' for PATH/license/PDK conflicts, 'tools' for adapter details, 'readiness' for design gates, 'manifests' for capability manifests, or 'summary' for the graph.",
         args: {
           scope: z.enum(["agent_context", "summary", "tools", "readiness", "manifests", "conflicts"]).default("agent_context"),
         },
@@ -405,7 +458,7 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
         },
       }),
       agentic_run_flow: tool({
-        description: "Run a named EDA step through AgentIC with one calm execution target: native, wsl, or docker. The backend captures command history, logs, checkpoints, and VLSI verdicts.",
+        description: "Run the smallest needed EDA step through AgentIC with one calm execution target: native, wsl, or docker. Always provide eda_tool and stage so the backend can capture command history, logs, checkpoints, and VLSI verdicts; pass log_file when the tool writes one.",
         args: {
           command: z.string(),
           target: z.enum(["native", "wsl", "docker"]).default("native"),
@@ -423,7 +476,7 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
         },
       }),
       agentic_query_pdk: tool({
-        description: "Query AgentIC's local PDK/capability graph for libraries, cells, routing layers, memory macros, readiness gates, manifests, tool adapters, and flow evidence.",
+        description: "Query AgentIC's local PDK/capability graph for exact libraries, cells, routing layers, memory macros, readiness gates, manifests, tool adapters, and flow evidence. Use before naming stdcells/macros/layers/corners/decks, and use find_memory before any SRAM/ROM decision.",
         args: {
           query_type: z.enum(["list_libraries", "find_cell", "get_layers", "capability_summary", "find_memory", "readiness", "manifest_status", "tool_adapters"]),
           cell_type: z.string().optional(),
@@ -433,7 +486,7 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
         },
       }),
       agentic_report: tool({
-        description: "Generate the AgentIC checkpoint/signoff summary for the current VLSI design session.",
+        description: "Generate the AgentIC checkpoint/signoff summary for the current VLSI design session. Use before claiming simulation, synthesis, STA, DRC, LVS, antenna, ERC, or tapeout readiness.",
         args: {},
         async execute(args, context) {
           return toolResult(input, context, "report", args)

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { Effect } from "effect"
 import { HttpRouter, HttpServerResponse } from "effect/unstable/http"
 import { runYosys } from "@yowasp/yosys"
+import { runDesignContractTool } from "../../../../agentic/design-contract"
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const BRIDGE_TIMEOUT_MS = 120_000 // 2 minutes max per bridge call
@@ -451,6 +452,22 @@ export const opencodeBridgeRoute = HttpRouter.use((router) =>
 
         // Intercept schematic_json to run via WebAssembly if the native Yosys tool fails or is missing
         const toolArgs = body.args || body.arguments || {}
+        if (body.name === "design_contract") {
+          const nativeResult = yield* Effect.promise(() => runDesignContractTool(body)).pipe(
+            Effect.catch((nativeErr) =>
+              runPythonBridge({ action: "tool", ...body }).pipe(
+                Effect.catch((bridgeErr) =>
+                  Effect.succeed({
+                    success: false,
+                    error: `Native design contract failed: ${String(nativeErr)}; Python fallback failed: ${String(bridgeErr)}`,
+                  }),
+                ),
+              ),
+            ),
+          )
+          return HttpServerResponse.jsonUnsafe(nativeResult)
+        }
+
         if (body.name === "workspace" && toolArgs.action === "schematic_json") {
           const workspaceRoot = body.workspace_root || ""
           const filePath = toolArgs.path || ""
@@ -468,8 +485,26 @@ export const opencodeBridgeRoute = HttpRouter.use((router) =>
             // bridge failed/not found — fall through to WebAssembly
           }
 
-          // Execute WebAssembly Yosys synthesis natively inside Electron/Hono
-          const wasmResult = yield* Effect.promise(() => runYosysWasm(workspaceRoot, filePath, moduleName)).pipe(
+          // Execute WebAssembly Yosys synthesis natively inside Electron/Hono.
+          // Note: in dev mode (npm run dev), yosys.core.wasm is NOT bundled yet —
+          // it only exists after `npm run build`. We catch ENOENT and return a
+          // clean available:false instead of crashing the bridge.
+          const wasmResult = yield* Effect.promise(async () => {
+            try {
+              return await runYosysWasm(workspaceRoot, filePath, moduleName)
+            } catch (err: any) {
+              const msg = String(err?.message || err)
+               if (err?.code === "ENOENT" && msg.includes("yosys.core.wasm")) {
+                 console.warn("[YoWASP] WASM file not found. If in dev mode, run `npm run build` once to compile and bundle assets.")
+                 return {
+                   available: false,
+                   reason: "Schematic generation failed: Yosys compiler is not installed on this system, and the built-in WebAssembly fallback engine could not be loaded. Please install Yosys locally or contact support."
+                 }
+               }
+               console.error("[YoWASP] Unexpected error:", msg)
+               return { available: false, reason: `WebAssembly Yosys compiler error: ${msg}` }
+            }
+          }).pipe(
             Effect.map((result) => HttpServerResponse.jsonUnsafe({ success: true, result: JSON.stringify(result) })),
             Effect.catch((err) =>
               Effect.succeed(
@@ -479,6 +514,7 @@ export const opencodeBridgeRoute = HttpRouter.use((router) =>
           )
           return wasmResult
         }
+
 
 
         const res = yield* runPythonBridge({ action: "tool", ...body }).pipe(

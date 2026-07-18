@@ -19,7 +19,7 @@ import { SessionContextTab, SortableTab, FileVisual, PDKCatalogDock, DRCLVSDashb
 import { useCommand } from "@/context/command"
 import { useFile, type SelectedLineRange } from "@/context/file"
 import { useLanguage } from "@/context/language"
-import { useLayout } from "@/context/layout"
+import { useLayout, type FileTreeTab } from "@/context/layout"
 import { usePlatform } from "@/context/platform"
 import { useSettings } from "@/context/settings"
 import { useSync } from "@/context/sync"
@@ -228,8 +228,8 @@ export function SessionSidePanel(props: {
   const fileTreeTab = () => layout.fileTree.tab()
 
   const setFileTreeTabValue = (value: string) => {
-    if (value !== "changes" && value !== "all" && value !== "pdk" && value !== "signoff" && value !== "schematic" && value !== "waves") return
-    layout.fileTree.setTab(value)
+    if (value !== "changes" && value !== "all" && value !== "pdk" && value !== "signoff") return
+    layout.fileTree.setTab(value as FileTreeTab)
   }
 
   const showAllFiles = () => {

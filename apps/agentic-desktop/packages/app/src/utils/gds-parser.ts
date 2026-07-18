@@ -168,8 +168,8 @@ export function parseGds(data: ArrayBuffer): GdsFile {
         resetElement()
         break
 
-      case 0x0c: // BOX
-        elementType = "box"
+      case 0x0c: // TEXT (not rendered as geometry)
+        elementType = null
         resetElement()
         break
 
@@ -193,16 +193,21 @@ export function parseGds(data: ArrayBuffer): GdsFile {
         currentSname = readGdsString(view, dataStart, dataLen)
         break
 
-      case 0x16: // STRANS
+      case 0x1a: // STRANS
         currentStrans = readGdsInt2(view, dataStart, dataType)
         break
 
-      case 0x17: // MAG — GDS 8-byte real
+      case 0x1b: // MAG — GDS 8-byte real
         currentMag = parseGdsReal8(view, dataStart)
         break
 
-      case 0x18: // ANGLE — GDS 8-byte real
+      case 0x1c: // ANGLE — GDS 8-byte real
         currentAngle = parseGdsReal8(view, dataStart)
+        break
+
+      case 0x2d: // BOX
+        elementType = "box"
+        resetElement()
         break
 
       case 0x13: // COLROW
@@ -253,14 +258,16 @@ export function parseGds(data: ArrayBuffer): GdsFile {
             // AREF has 3 XY points: origin, col-step, row-step
             if (currentXY.length >= 6) {
               const ox = currentXY[0], oy = currentXY[1]
+              const colDiv = currentCols > 1 ? currentCols - 1 : 1
+              const rowDiv = currentRows > 1 ? currentRows - 1 : 1
               currentCell.arefs.push({
                 name: currentSname,
                 x: ox,
                 y: oy,
-                colDx: currentCols > 0 ? (currentXY[2] - ox) / currentCols : 0,
-                colDy: currentCols > 0 ? (currentXY[3] - oy) / currentCols : 0,
-                rowDx: currentRows > 0 ? (currentXY[4] - ox) / currentRows : 0,
-                rowDy: currentRows > 0 ? (currentXY[5] - oy) / currentRows : 0,
+                colDx: currentCols > 1 ? (currentXY[2] - ox) / colDiv : 0,
+                colDy: currentCols > 1 ? (currentXY[3] - oy) / colDiv : 0,
+                rowDx: currentRows > 1 ? (currentXY[4] - ox) / rowDiv : 0,
+                rowDy: currentRows > 1 ? (currentXY[5] - oy) / rowDiv : 0,
                 columns: currentCols,
                 rows: currentRows,
                 mag: currentMag,
@@ -289,7 +296,11 @@ export function parseGds(data: ArrayBuffer): GdsFile {
       for (const ref of cell.arefs) referenced.add(ref.name)
     }
     const unreferenced = [...cells.keys()].filter((name) => !referenced.has(name))
-    if (unreferenced.length > 0) topCell = unreferenced[unreferenced.length - 1]
+    if (unreferenced.length > 0) {
+      topCell = unreferenced
+        .map((name) => ({ name, score: scoreHierarchy(name, new Set()) }))
+        .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))[0]?.name ?? unreferenced[0]
+    }
   }
 
   return { cells, topCell, units, totalPolygons }
@@ -306,6 +317,27 @@ export function parseGds(data: ArrayBuffer): GdsFile {
     currentStrans = 0
     currentCols = 0
     currentRows = 0
+  }
+
+  function scoreHierarchy(cellName: string, seen: Set<string>): number {
+    if (seen.has(cellName)) return 0
+    const cell = cells.get(cellName)
+    if (!cell) return 0
+    seen.add(cellName)
+
+    const width = Number.isFinite(cell.bbox.minX) ? Math.max(cell.bbox.maxX - cell.bbox.minX, 0) : 0
+    const height = Number.isFinite(cell.bbox.minY) ? Math.max(cell.bbox.maxY - cell.bbox.minY, 0) : 0
+    let score = cell.polygons.length * 1_000_000 + width * height
+
+    for (const ref of cell.srefs) {
+      score += scoreHierarchy(ref.name, seen)
+    }
+    for (const ref of cell.arefs) {
+      score += scoreHierarchy(ref.name, seen) * Math.max(ref.columns, 1) * Math.max(ref.rows, 1)
+    }
+
+    seen.delete(cellName)
+    return score
   }
 }
 

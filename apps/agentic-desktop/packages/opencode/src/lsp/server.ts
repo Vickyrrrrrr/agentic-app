@@ -141,6 +141,25 @@ export const Typescript: Info = {
   },
 }
 
+export const Slang: Info = {
+  id: "slang",
+  extensions: [".v", ".sv", ".vh", ".svh"],
+  root: NearestRoot([".slang/server.json", "slang.f", "filelist.f"]),
+  async spawn(root) {
+    const bundled = process.env.AGENTIC_SLANG_SERVER
+    const bin = bundled && (await pathExists(bundled)) ? bundled : which("slang-server")
+    if (!bin) return
+    return {
+      process: spawn(bin, [], {
+        cwd: root,
+        env: {
+          ...process.env,
+        },
+      }),
+    }
+  },
+}
+
 export const Vue: Info = {
   id: "vue",
   extensions: [".vue"],

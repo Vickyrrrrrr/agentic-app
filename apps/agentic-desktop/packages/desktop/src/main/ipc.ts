@@ -12,7 +12,7 @@ import { getStore } from "./store"
 import { getPinchZoomEnabled, setPinchZoomEnabled, setTitlebar, updateTitlebar } from "./windows"
 import type { UpdaterController } from "./updater-controller"
 import { createUpdaterSubscriptions } from "./updater-subscriptions"
-import { getBackendMode } from "./agentic-backend"
+import { getBackendMode, getBackendStatus } from "./agentic-backend"
 
 const pickerFilters = (ext?: string[]) => {
   if (!ext || ext.length === 0) return undefined
@@ -243,6 +243,7 @@ export function registerIpcHandlers(deps: Deps) {
 
   // Backend mode + WSL/Docker detection for the no-WSL banner
   ipcMain.handle("get-backend-mode", () => getBackendMode())
+  ipcMain.handle("get-backend-status", () => getBackendStatus())
 
   ipcMain.handle("install-wsl", async () => {
     try {

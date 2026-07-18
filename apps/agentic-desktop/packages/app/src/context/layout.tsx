@@ -74,7 +74,7 @@ type TabHandoff = {
 export type LocalProject = Partial<Project> & { worktree: string; expanded: boolean }
 
 export type ReviewDiffStyle = "unified" | "split"
-export type FileTreeTab = "changes" | "all" | "pdk" | "signoff" | "schematic" | "waves"
+export type FileTreeTab = "changes" | "all" | "pdk" | "signoff"
 
 export type LayoutRoute =
   | { type: "home" }
