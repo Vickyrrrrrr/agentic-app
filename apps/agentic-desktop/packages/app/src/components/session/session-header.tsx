@@ -200,6 +200,7 @@ export function SessionHeader() {
 
   const [agenticMode, setAgenticMode] = createSignal<string>("advisor")
 
+  let _modeFetchFailures = 0
   const fetchMode = async () => {
     const id = params.id
     if (!id) return
@@ -207,13 +208,18 @@ export function SessionHeader() {
     try {
       const res = await fetch(`${base}/opencode/session/mode/${id}`)
       if (res.ok) {
+        _modeFetchFailures = 0
         const data = await res.json()
         if (data.success && data.agentic_mode) {
           setAgenticMode(data.agentic_mode)
         }
       }
-    } catch (e) {
-      console.error("Failed to fetch agentic mode:", e)
+    } catch {
+      _modeFetchFailures += 1
+      // Only log first failure and every 10th after — avoids console spam when backend is starting
+      if (_modeFetchFailures === 1 || _modeFetchFailures % 10 === 0) {
+        console.warn(`[agentic] backend not reachable at ${base} (attempt ${_modeFetchFailures})`)
+      }
     }
   }
 
@@ -254,7 +260,7 @@ export function SessionHeader() {
     const id = params.id
     if (!id) return
     void fetchMode()
-    const timer = setInterval(fetchMode, 3000)
+    const timer = setInterval(fetchMode, 10000)
     onCleanup(() => clearInterval(timer))
   })
 

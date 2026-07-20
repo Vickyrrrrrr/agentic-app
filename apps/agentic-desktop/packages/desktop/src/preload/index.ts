@@ -122,16 +122,24 @@ const api: ElectronAPI = {
   checkDocker: () => ipcRenderer.invoke("check-docker"),
 }
 
-// Sync the dynamically-allocated backend URL from the main process to localStorage.
-// The main process may allocate a free port (not 7860) for the bundled backend.
-// Without this, the renderer defaults to 7860 and can't reach the backend.
-const dynamicBackendUrl = process.env.AGENTIC_LOCAL_URL
-if (dynamicBackendUrl && dynamicBackendUrl.replace(/\/+$/, "") !== "http://127.0.0.1:7860") {
-  try {
-    localStorage.setItem("agentic_local_api_base", dynamicBackendUrl.replace(/\/+$/, ""))
-  } catch {
-    // localStorage may not be available in some contexts
+// Always sync the backend URL to localStorage on every startup.
+// This clears any stale port from a previous session (e.g. old dynamic port no longer listening).
+// AGENTIC_OPENCODE_URL is the Hono sidecar — it serves all /opencode/* routes and proxies to Python.
+// AGENTIC_LOCAL_URL is the Python backend direct URL (fallback only).
+try {
+  const sidecaUrl = process.env.AGENTIC_OPENCODE_URL?.replace(/\/+$/, "")
+  const backendUrl = process.env.AGENTIC_LOCAL_URL?.replace(/\/+$/, "")
+  // Prefer the sidecar — it has all routes and is always available in Electron.
+  // Fall back to direct Python URL only if sidecar is not configured.
+  const resolvedUrl = sidecaUrl || backendUrl
+  if (resolvedUrl) {
+    localStorage.setItem("agentic_local_api_base", resolvedUrl)
+  } else {
+    // No URL from main process — clear stale value so DEFAULT_AGENTIC_URL kicks in
+    localStorage.removeItem("agentic_local_api_base")
   }
+} catch {
+  // localStorage may not be available in some contexts (e.g. sandboxed preload)
 }
 
 contextBridge.exposeInMainWorld("api", api)

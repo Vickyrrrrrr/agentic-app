@@ -29,6 +29,15 @@ const FOLDERS = new Set([
   "mypy_cache",
   ".history",
   ".gradle",
+  // VLSI / EDA tool build directories
+  "obj_dir",
+  "csrc",
+  "simv.daidir",
+  "simv.vdb",
+  "xcelium.d",
+  "work",
+  "work._info",
+  "runs",
 ])
 
 const FILES = [
@@ -43,6 +52,16 @@ const FILES = [
   "**/*.log",
   "**/coverage/**",
   "**/.nyc_output/**",
+  // VLSI / EDA simulation waveforms, logs & binary outputs
+  "**/*.vcd",
+  "**/*.fst",
+  "**/*.wlf",
+  "**/*.fsdb",
+  "**/*.vpd",
+  "**/*.vvp",
+  "**/*.rpt",
+  "**/*.jou",
+  "**/*.cmd",
 ]
 
 export const PATTERNS = [...FILES, ...FOLDERS]

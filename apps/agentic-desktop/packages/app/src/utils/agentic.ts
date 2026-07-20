@@ -1,4 +1,4 @@
-const DEFAULT_AGENTIC_URL = typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:7860"
+const DEFAULT_AGENTIC_URL = typeof window !== "undefined" && window.location.origin !== "null" ? window.location.origin : "http://127.0.0.1:7860"
 
 export function getAgenticBase(): string {
   return localStorage.getItem("agentic_local_api_base")?.replace(/\/+$/, "") || DEFAULT_AGENTIC_URL

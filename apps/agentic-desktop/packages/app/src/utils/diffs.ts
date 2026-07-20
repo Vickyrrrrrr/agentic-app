@@ -23,17 +23,60 @@ function object(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value)
 }
 
-/** Returns true for AgentIC internal backend state files that should never be shown to the user. */
-function isAgenticInternal(file: string): boolean {
-  return file.includes("/.agentic/") || file.startsWith(".agentic/")
+/** Returns true for AgentIC internal backend state files and EDA/VLSI build artifacts that should never be shown in diffs. */
+function isIrrelevantFile(file: string): boolean {
+  if (file.includes("/.agentic/") || file.startsWith(".agentic/")) return true
+  if (file.includes("/.git/") || file.startsWith(".git/")) return true
+  if (file.includes("/node_modules/") || file.startsWith("node_modules/")) return true
+
+  // EDA / VLSI Build & Execution Directories
+  if (file.includes("/obj_dir/") || file.startsWith("obj_dir/")) return true
+  if (file.includes("/csrc/") || file.startsWith("csrc/")) return true
+  if (file.includes("/simv.daidir/") || file.startsWith("simv.daidir/")) return true
+  if (file.includes("/simv.vdb/") || file.startsWith("simv.vdb/")) return true
+  if (file.includes("/xcelium.d/") || file.startsWith("xcelium.d/")) return true
+  if (file.includes("/work/") || file.startsWith("work/")) return true
+  if (file.includes("/work._info/") || file.startsWith("work._info/")) return true
+  if (file.includes("/runs/") || file.startsWith("runs/")) return true
+
+  const lower = file.toLowerCase()
+  const base = lower.split("/").pop() ?? ""
+
+  if (base === "simv" || base === "xmsim.key") return true
+
+  // Waveforms, compiled outputs, logs, reports, and object files
+  if (
+    lower.endsWith(".vcd") ||
+    lower.endsWith(".fst") ||
+    lower.endsWith(".wlf") ||
+    lower.endsWith(".fsdb") ||
+    lower.endsWith(".vpd") ||
+    lower.endsWith(".vvp") ||
+    lower.endsWith(".log") ||
+    lower.endsWith(".rpt") ||
+    lower.endsWith(".jou") ||
+    lower.endsWith(".cmd") ||
+    lower.endsWith(".history") ||
+    lower.endsWith(".o") ||
+    lower.endsWith(".a") ||
+    lower.endsWith(".d") ||
+    lower.endsWith(".out") ||
+    lower.endsWith(".tmp") ||
+    lower.endsWith(".swp") ||
+    lower.endsWith(".bak")
+  ) {
+    return true
+  }
+
+  return false
 }
 
 export function diffs(value: unknown): Diff[] {
-  if (Array.isArray(value) && value.every(diff)) return value.filter((d) => !isAgenticInternal(d.file))
-  if (Array.isArray(value)) return value.filter(diff).filter((d) => !isAgenticInternal(d.file))
-  if (diff(value)) return isAgenticInternal(value.file) ? [] : [value]
+  if (Array.isArray(value) && value.every(diff)) return value.filter((d) => !isIrrelevantFile(d.file))
+  if (Array.isArray(value)) return value.filter(diff).filter((d) => !isIrrelevantFile(d.file))
+  if (diff(value)) return isIrrelevantFile(value.file) ? [] : [value]
   if (!object(value)) return []
-  return Object.values(value).filter(diff).filter((d) => !isAgenticInternal(d.file))
+  return Object.values(value).filter(diff).filter((d) => !isIrrelevantFile(d.file))
 }
 
 export function message(value: Message): Message {
