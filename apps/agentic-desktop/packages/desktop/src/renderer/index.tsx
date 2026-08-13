@@ -12,7 +12,6 @@ import {
   PlatformProvider,
   ServerConnection,
   useCommand,
-  useWslServers,
 } from "@opencode-ai/app"
 import type { UpdaterState } from "@opencode-ai/app/updater"
 import * as Sentry from "@sentry/solid"
@@ -24,7 +23,6 @@ import pkg from "../../package.json"
 import { initI18n, t } from "./i18n"
 import { initializationData, initializationReady } from "./initialization"
 import { resetZoom, setPinchZoomEnabled, webviewZoom, zoomIn, zoomOut } from "./webview-zoom"
-import { availableStartupServer, readyWslConnections } from "./wsl/connections"
 import "./styles.css"
 import { GLOBAL_STORE } from "./store-keys"
 import { Splash } from "@opencode-ai/ui/logo"
@@ -211,9 +209,7 @@ const createPlatform = (): Platform => {
   const os = (() => {
     const ua = navigator.userAgent
     if (ua.includes("Mac")) return "macos"
-    if (ua.includes("Windows")) return "windows"
-    if (ua.includes("Linux")) return "linux"
-    return undefined
+    return "linux"
   })()
 
   const runDesktopMenuAction: Platform["runDesktopMenuAction"] = (action) => {
@@ -259,7 +255,6 @@ const createPlatform = (): Platform => {
     }
   })()
 
-  const wslServersApi = os === "windows" ? window.api.wslServers : undefined
 
   return {
     platform: "desktop",
@@ -301,10 +296,6 @@ const createPlatform = (): Platform => {
       window.api.openLink(url)
     },
     async openPath(path: string, app?: string) {
-      if (os === "windows") {
-        const resolvedApp = app ? await window.api.resolveAppPath(app).catch(() => null) : null
-        return window.api.openPath(path, resolvedApp ?? undefined)
-      }
       return window.api.openPath(path, app)
     },
 
@@ -364,7 +355,6 @@ const createPlatform = (): Platform => {
       await window.api.setDefaultServerUrl(url)
     },
 
-    wslServers: wslServersApi,
 
     getDisplayBackend: async () => {
       return window.api.getDisplayBackend().catch(() => null)
@@ -711,7 +701,6 @@ render(() => {
   }
 
   function App() {
-    const wslServers = useWslServers()
     const splash = (
       <div class="h-dvh w-screen flex flex-col items-center justify-center bg-background-base">
         <Splash class="w-16 h-20 opacity-50 animate-pulse" />
@@ -736,11 +725,10 @@ render(() => {
           },
         })
       }
-      list.push(...readyWslConnections(wslServers.data))
       return list
     })
     const effectiveDefaultServer = createMemo(() =>
-      ServerConnection.Key.make(availableStartupServer(defaultServer.latest, wslServers.data)),
+      ServerConnection.Key.make(defaultServer.latest ?? "sidecar"),
     )
 
     return (

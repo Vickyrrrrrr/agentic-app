@@ -1,46 +1,19 @@
-import { execFile } from "node:child_process"
 import { existsSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { promisify } from "node:util"
 
-import type { BeforePackContext, Configuration } from "electron-builder"
+import type { Configuration } from "electron-builder"
 
-const execFileAsync = promisify(execFile)
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)))
-const signScript = path.join(rootDir, "script", "sign-windows.ps1")
 const slangRuntimeDir = path.join(desktopDir, "resources", "tools", "slang")
 
-async function signWindows(configuration: { path: string }) {
-  if (process.platform !== "win32") return
-  if (process.env.GITHUB_ACTIONS !== "true") return
-  if (!existsSync(signScript)) return
-
-  await execFileAsync(
-    "pwsh",
-    ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", signScript, configuration.path],
-    { cwd: rootDir },
-  )
-}
-
-async function verifyAgenticBackendRuntime(context: BeforePackContext) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function verifyAgenticBackendRuntime(context: any) {
   const platform = context.electronPlatformName || process.platform
   const arch = process.arch
-  const executable = platform === "win32" ? "agentic-backend.exe" : "agentic-backend"
-  const backendPath = path.join(desktopDir, "resources", "backend", `${platform}-${arch}`, executable)
 
-  if (!existsSync(backendPath)) {
-    throw new Error(
-      [
-        `Missing AgentIC backend runtime: ${backendPath}`,
-        `Run "bun run build:agentic-backend" on ${platform} before packaging.`,
-        "The backend runtime is OS-specific and cannot be reused from another platform.",
-      ].join("\n"),
-    )
-  }
-  const slangExecutable = platform === "win32" ? "slang-server.exe" : "slang-server"
-  const slangPath = path.join(slangRuntimeDir, `${platform}-${arch}`, slangExecutable)
+  const slangPath = path.join(slangRuntimeDir, `${platform}-${arch}`, "slang-server")
   if (channel !== "dev" && !existsSync(slangPath)) {
     throw new Error(
       `Missing bundled Slang runtime: ${slangPath}. Build the exact platform/arch binary before beta/production packaging.`,
@@ -87,11 +60,11 @@ const getBase = (): Configuration => ({
       to: "license.json",
     },
     {
-      // Bundle the Python bridge scripts so the packaged app can invoke them
-      // via WSL python3 on Windows (where EDA tools and PDKs live in WSL).
+      // Bundle the Python backend scripts so the packaged app can invoke them
+      // directly on Linux/macOS where EDA tools and PDKs live on PATH.
       from: "../../../../server/",
       to: "server/",
-      filter: ["**/*.py", "requirements*.txt"],
+      filter: ["**/*.py", "**/*.sh", "requirements*.txt"],
     },
   ],
 
@@ -112,24 +85,12 @@ const getBase = (): Configuration => ({
     name: "AgentIC",
     schemes: ["agentic"],
   },
-  win: {
-    icon: `resources/icons/icon.ico`,
-    signtoolOptions: {
-      sign: signWindows,
-    },
-    target: ["nsis"],
-    verifyUpdateCodeSignature: false,
-  },
-  nsis: {
-    oneClick: true,
-    perMachine: false,
-    installerIcon: `resources/icons/icon.ico`,
-    installerHeaderIcon: `resources/icons/icon.ico`,
-  },
   linux: {
     icon: `resources/icons`,
     category: "Development",
-    target: ["AppImage", "deb", "rpm"],
+    // AppImage runs on every Linux distro (Ubuntu, RHEL, Fedora, Rocky, Arch…)
+    // One file, no installation required — launch like: ./AgentIC.AppImage &
+    target: ["AppImage"],
   },
 })
 
@@ -142,7 +103,6 @@ function getConfig() {
         ...base,
         appId: "live.buildstack.agentic.dev",
         productName: "AgentIC Dev",
-        rpm: { packageName: "agentic-dev" },
       }
     }
     case "beta": {
@@ -158,7 +118,6 @@ function getConfig() {
           channel: "beta",
           releaseType: "prerelease",
         },
-        rpm: { packageName: "agentic-beta" },
       }
     }
     case "prod": {
@@ -174,7 +133,6 @@ function getConfig() {
           channel: "latest",
           releaseType: "release",
         },
-        rpm: { packageName: "agentic" },
       }
     }
   }

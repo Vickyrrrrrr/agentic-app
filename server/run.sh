@@ -1,44 +1,86 @@
 #!/usr/bin/env bash
-set -e
+# ─────────────────────────────────────────────────────────────────────────────
+# AgentIC server launcher — Linux (bare metal + WSL) & macOS
+#
+# Usage:
+#   ./run.sh          — run in foreground (logs visible in terminal)
+#   ./run.sh &        — run in background (standard Cadence-style)
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "[scan] Checking environment..."
+# ── Python version check ──────────────────────────────────────────────────────
+_check_python() {
+  if ! command -v python3 &>/dev/null; then
+    echo "❌  python3 not found. Install Python 3.8+ and try again."
+    exit 1
+  fi
+  local ver
+  ver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  local major minor
+  major="$(echo "$ver" | cut -d. -f1)"
+  minor="$(echo "$ver" | cut -d. -f2)"
+  if [[ "$major" -lt 3 || ("$major" -eq 3 && "$minor" -lt 8) ]]; then
+    echo "❌  Python $ver found, but AgentIC requires Python 3.8+."
+    echo "    On RHEL/CentOS: sudo dnf install python3.11"
+    echo "    On Ubuntu:      sudo apt install python3.11"
+    exit 1
+  fi
+}
 
-for tool in docker yosys iverilog verilator opensta openroad gtkwave make python3; do
-    if command -v "$tool" &>/dev/null; then
-        echo "[scan] Found $tool ✓"
-    fi
-done
+_check_python
 
-if command -v docker &>/dev/null; then
-    images=$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | head -5)
-    if [ -n "$images" ]; then
-        echo "[scan] Docker images available:"
-        echo "$images" | while read -r img; do echo "         $img"; done
-    fi
-fi
+# ── Dependencies ──────────────────────────────────────────────────────────────
+pip3 install -q -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null \
+  || pip install -q -r "$SCRIPT_DIR/requirements.txt"
 
-echo "[scan] PDK paths are discovered from PDK_ROOT, PDKPATH, PDK_HOME, or AGENTIC_PDK_SEARCH_PATHS."
-IFS=':' read -r -a pdk_candidates <<< "${PDK_ROOT:-}:${PDKPATH:-}:${PDK_HOME:-}:${AGENTIC_PDK_SEARCH_PATHS:-}"
-for pdk_dir in "${pdk_candidates[@]}"; do
-    [ -z "$pdk_dir" ] && continue
-    expanded="${pdk_dir/#\~/$HOME}"
-    if [ -d "$expanded" ]; then
-        echo "[scan] Found configured PDK directory: $expanded"
-    fi
-done
+# ── Start server ──────────────────────────────────────────────────────────────
+REQUESTED_PORT="${AGENTIC_PORT:-${PORT:-7860}}"
 
-echo "[scan] Installing Python dependencies..."
-pip3 install -q -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null || pip install -q -r "$SCRIPT_DIR/requirements.txt"
-
-echo ""
-AGENTIC_PORT="${AGENTIC_PORT:-${PORT:-7860}}"
+AGENTIC_PORT="$(python3 -c "
+import socket
+port = int('$REQUESTED_PORT')
+for p in range(port, port + 100):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(('0.0.0.0', p))
+            print(p)
+            break
+        except OSError:
+            continue
+" 2>/dev/null || echo "$REQUESTED_PORT")"
 export AGENTIC_PORT
 
-echo "→ AgentIC Local Server starting at http://localhost:${AGENTIC_PORT}"
+if [ "$AGENTIC_PORT" != "$REQUESTED_PORT" ]; then
+  echo "[port] Requested port $REQUESTED_PORT was in use. Using next available free port: $AGENTIC_PORT"
+fi
+
+echo ""
+echo "→ AgentIC starting at http://localhost:${AGENTIC_PORT}"
+echo "  (like \`virtuoso &\` — Ctrl-C or kill to stop)"
 echo ""
 
+# ── Auto-open browser ─────────────────────────────────────────────────────────
+# Non-blocking: opens the UI in the default browser after a short delay
+# so the server has time to start first.
+_open_browser() {
+  local url="http://localhost:${AGENTIC_PORT}"
+  sleep 2
+  if command -v xdg-open &>/dev/null; then
+    xdg-open "$url" &>/dev/null &   # Linux / WSL (if DISPLAY or WAYLAND_DISPLAY set)
+  elif command -v open &>/dev/null; then
+    open "$url" &>/dev/null &       # macOS
+  fi
+}
+
+# Only auto-open if we have a display (skip in headless CI/SSH without X)
+if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ] || [ "$(uname)" = "Darwin" ]; then
+  _open_browser &
+fi
+
+export AGENTIC_LICENSE_STATUS_URL="${AGENTIC_LICENSE_STATUS_URL:-https://api.buildstack.live/license/status}"
+
 cd "$SCRIPT_DIR"
-export AGENTIC_LICENSE_STATUS_URL=${AGENTIC_LICENSE_STATUS_URL:-"https://api.buildstack.live/license/status"}
-python3 main.py
+exec python3 main.py

@@ -6,12 +6,7 @@ import shutil
 import subprocess
 import time
 
-if hasattr(subprocess, "CREATE_NO_WINDOW"):
-    _NO_WINDOW = subprocess.CREATE_NO_WINDOW
-elif getattr(os, "name", "") == "nt":
-    _NO_WINDOW = 0x08000000
-else:
-    _NO_WINDOW = 0
+
 
 import threading
 from pathlib import Path
@@ -146,8 +141,6 @@ def _environment_cache_key() -> tuple[tuple[str, str], ...]:
         "AGENTIC_OPENLANE_ROOT",
         "AGENTIC_ORFS_ROOT",
         "AGENTIC_EDA_TOOLS",
-        "AGENTIC_WSL_TOOL_SCAN",
-        "AGENTIC_WSL_PROBE_TIMEOUT_SECONDS",
         *manifest_env_names(),
         *CAPABILITY_INSTALL_ENVS.values(),
         *(env_name for env_name, _defaults in CAPABILITY_TOOL_ENVS.values()),
@@ -172,138 +165,71 @@ def _license_env_status() -> dict:
     return {key: bool(os.environ.get(key)) for key in keys}
 
 
-def _decode_wsl_output(raw: bytes) -> str:
-    if not raw:
-        return ""
-    if raw.count(b"\x00") > max(2, len(raw) // 8):
-        for encoding in ("utf-16le", "utf-16"):
-            try:
-                return raw.decode(encoding, errors="ignore")
-            except Exception:
-                pass
-    return raw.decode("utf-8", errors="replace")
-
-
-def _wsl_probe_timeout() -> float:
-    raw = os.environ.get("AGENTIC_WSL_PROBE_TIMEOUT_SECONDS", "8").strip()
-    try:
-        return max(1.0, min(30.0, float(raw)))
-    except ValueError:
-        return 8.0
-
-
-def _wsl_tool_scan_enabled() -> bool:
-    return os.environ.get("AGENTIC_WSL_TOOL_SCAN", "1").strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _wsl_status() -> dict:
-    if platform.system().lower() != "windows":
-        return {"available": False, "required": False, "distros": [], "tool_inventory": []}
-    if not shutil.which("wsl"):
-        return {"available": False, "required": False, "distros": [], "tool_inventory": []}
-    try:
-        result = subprocess.run(["wsl", "-l", "-q"], capture_output=True,
-            creationflags=_NO_WINDOW, timeout=8)
-        stdout = _decode_wsl_output(result.stdout)
-        distros = [
-            line.strip("*\x00\r\n ")
-            for line in stdout.splitlines()
-            if line.strip("*\x00\r\n ")
-        ]
-        return {
-            "available": result.returncode == 0,
-            "required": False,
-            "distros": distros,
-            "tool_inventory": _wsl_tool_inventory(distros) if result.returncode == 0 and _wsl_tool_scan_enabled() else [],
-        }
-    except Exception:
-        return {"available": True, "required": False, "distros": [], "tool_inventory": []}
-
-
-def _wsl_tool_inventory(distros: list[str]) -> list[dict]:
-    inventory = []
-    tool_names = configured_eda_tools()
-    license_names = ("LM_LICENSE_FILE", "CDS_LIC_FILE", "SNPSLMD_LICENSE_FILE", "MGLS_LICENSE_FILE", *license_env_names())
-    tool_loop = "\n".join(
-        [
-            f"candidate={shlex.quote(tool)}; path=$(command -v \"$candidate\" 2>/dev/null || true); "
-            "if [ -n \"$path\" ]; then printf 'TOOL\\t%s\\t%s\\n' \"$candidate\" \"$path\"; fi"
-            for tool in tool_names
-        ]
-    )
-    license_loop = "\n".join(
-        [
-            f"value=$(printenv {shlex.quote(name)} 2>/dev/null || true); "
-            f"if [ -n \"$value\" ]; then printf 'LICENSE\\t%s\\t1\\n' {shlex.quote(name)}; fi"
-            for name in license_names
-        ]
-    )
-    script = "\n".join(["set +e", tool_loop, license_loop])
-    for distro in distros:
-        entry = {
-            "distro": distro,
-            "can_execute": False,
-            "tools": {},
-            "paths": {},
-            "license_env": {},
-        }
-        try:
-            result = subprocess.run(
-                ["wsl", "-d", distro, "--", "sh", "-lc", script],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=_NO_WINDOW,
-                timeout=_wsl_probe_timeout(),
-            )
-            entry["can_execute"] = result.returncode == 0
-            if result.returncode != 0:
-                entry["error"] = (result.stderr or result.stdout or "").strip()[:500]
-            for line in (result.stdout or "").splitlines():
-                parts = line.split("\t")
-                if len(parts) >= 3 and parts[0] == "TOOL":
-                    entry["tools"][parts[1]] = True
-                    entry["paths"][parts[1]] = parts[2]
-                elif len(parts) >= 3 and parts[0] == "LICENSE":
-                    entry["license_env"][parts[1]] = True
-        except Exception as exc:
-            entry["error"] = str(exc)
-        inventory.append(entry)
-    return inventory
-
-
-def _wsl_tool_presence(inventory: list[dict]) -> dict[str, bool]:
-    tools: dict[str, bool] = {}
-    for distro in inventory:
-        for name, available in (distro.get("tools") or {}).items():
-            tools[name] = bool(tools.get(name) or available)
-    return tools
-
-
-def _wsl_capabilities(wsl_tools: dict[str, bool]) -> dict[str, bool]:
-    return {
-        "simulation": any(wsl_tools.get(tool) for tool in configured_tools_for("simulation")),
-        "synthesis": any(wsl_tools.get(tool) for tool in configured_tools_for("synthesis")),
-        "pnr": any(wsl_tools.get(tool) for tool in configured_tools_for("pnr")),
-        "sta": any(wsl_tools.get(tool) for tool in configured_tools_for("sta")),
-        "waveform": bool(wsl_tools.get("gtkwave")),
-        "physical_verification": any(wsl_tools.get(tool) for tool in configured_tools_for("physical_verification")),
-    }
-
-
 def _subprocess_cwd(workspace_root: str) -> str | None:
-    if os.name == "nt" and str(workspace_root or "").startswith("\\\\"):
-        # cmd.exe cannot use UNC paths as its current directory. WSL commands
-        # should cd inside their own shell; this cwd only needs to launch wsl.exe.
-        return os.path.expanduser("~")
     if workspace_root and os.path.isdir(workspace_root):
         return workspace_root
     return None
 
 
-def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_line=None, cancel_checker=None) -> dict:
-    """Run a command, streaming each output line via on_line callback. Returns same dict as run_bash."""
+# Background promotion threshold: if a process runs longer than this, it is
+# registered in the BACKGROUND_JOBS registry and the calling agent is unblocked.
+_BG_PROMOTE_THRESHOLD_S = 3.0
+
+
+def _register_background_job(
+    job_id: str,
+    title: str,
+    command: str,
+    pid: int,
+    log_path: str,
+    session_id: str = "",
+) -> None:
+    """Thread-safe persistent registration of a shell process into SQLite JobQueue."""
+    try:
+        from job_queue import get_job_queue
+        jq = get_job_queue()
+        jq.submit(
+            title=title or command[:60],
+            command=command[:200],
+            session_id=session_id,
+            pid=pid,
+        )
+    except Exception as e:
+        import logging
+        logging.warning("Error registering background job in SQLite JobQueue: %s", e)
+
+
+def _update_background_job(job_id: str, success: bool, exit_code: int = 0) -> None:
+    """Mark a persistent background job as completed or failed in SQLite JobQueue."""
+    try:
+        from job_queue import get_job_queue
+        jq = get_job_queue()
+        status = "completed" if success else "failed"
+        jq.update_status(job_id=job_id, status=status, exit_code=exit_code)
+    except Exception as e:
+        import logging
+        logging.warning("Error updating background job in SQLite JobQueue: %s", e)
+
+
+
+
+def run_bash_stream(
+    command: str,
+    workspace_root: str,
+    timeout: int = 300,
+    on_line=None,
+    cancel_checker=None,
+    promote_callback=None,
+    job_title: str = "",
+) -> dict:
+    """Run a command, streaming each output line via on_line callback.
+
+    If the process exceeds _BG_PROMOTE_THRESHOLD_S seconds, it is automatically
+    promoted to a background job. `promote_callback(job_id)` is called at that
+    point so the caller (chat agent) can unblock the LLM turn immediately.
+    The process continues running and BACKGROUND_JOBS is updated on completion.
+    """
+    import uuid as _uuid
     try:
         kwargs = {}
         if os.name != "nt":
@@ -320,14 +246,27 @@ def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_li
             **kwargs
         )
 
+        # Prepare log file in .agentic/job-logs/
+        job_id = str(_uuid.uuid4())[:8]
+        log_dir = os.path.join(workspace_root or os.path.expanduser("~"), ".agentic", "job-logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"{job_id}.log")
+
         output_lines = []
+        promoted = threading.Event()
+        completion_event = threading.Event()
+        return_code_holder = [None]
+
         def reader():
             try:
-                for line in process.stdout:
-                    stripped = line.rstrip("\n\r")
-                    output_lines.append(stripped)
-                    if on_line:
-                        on_line(stripped)
+                with open(log_path, "w", encoding="utf-8") as log_f:
+                    for line in process.stdout:
+                        stripped = line.rstrip("\n\r")
+                        output_lines.append(stripped)
+                        log_f.write(line)
+                        log_f.flush()
+                        if on_line and not promoted.is_set():
+                            on_line(stripped)
             except ValueError:
                 pass
 
@@ -350,12 +289,46 @@ def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_li
                 kill_process()
                 thread.join(timeout=2)
                 full_output = "\n".join(output_lines)
+                if promoted.is_set():
+                    _update_background_job(job_id, success=False)
                 return {
                     "success": False,
                     "stdout": full_output,
                     "stderr": "Command cancelled",
                     "code": -1,
                 }
+
+            # Auto-promote after threshold
+            if not promoted.is_set() and elapsed >= _BG_PROMOTE_THRESHOLD_S:
+                promoted.set()
+                title = job_title or command.split()[0] if command else "shell"
+                _register_background_job(
+                    job_id=job_id,
+                    title=title,
+                    command=command,
+                    pid=process.pid,
+                    log_path=log_path,
+                )
+                if promote_callback:
+                    promote_callback(job_id)
+                # Unblock caller — background watcher thread will update on completion
+                def _bg_watcher():
+                    thread.join()
+                    try:
+                        process.wait(timeout=5)
+                    except Exception:
+                        pass
+                    _update_background_job(job_id, success=(process.returncode == 0))
+                threading.Thread(target=_bg_watcher, daemon=True).start()
+                return {
+                    "success": True,
+                    "stdout": "\n".join(output_lines),
+                    "stderr": "",
+                    "code": 0,
+                    "background": True,
+                    "job_id": job_id,
+                }
+
             thread.join(timeout=0.2)
             elapsed += 0.2
 
@@ -375,34 +348,24 @@ def run_bash_stream(command: str, workspace_root: str, timeout: int = 300, on_li
         return {"success": False, "stdout": "", "stderr": str(e), "code": -1}
 
 
-def run_bash(command: str, workspace_root: str, timeout: int = 300, cancel_checker=None) -> dict:
-    if cancel_checker:
-        return run_bash_stream(command, workspace_root, timeout=timeout, cancel_checker=cancel_checker)
-    try:
-        kwargs = {}
-        if os.name != "nt":
-            kwargs["preexec_fn"] = os.setsid
+def run_bash(
+    command: str,
+    workspace_root: str,
+    timeout: int = 300,
+    cancel_checker=None,
+    promote_callback=None,
+    job_title: str = "",
+) -> dict:
+    """Run a shell command, routing through run_bash_stream for 15s auto-promotion."""
+    return run_bash_stream(
+        command,
+        workspace_root,
+        timeout=timeout,
+        cancel_checker=cancel_checker,
+        promote_callback=promote_callback,
+        job_title=job_title,
+    )
 
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            creationflags=_NO_WINDOW,
-            timeout=timeout,
-            cwd=_subprocess_cwd(workspace_root),
-            **kwargs
-        )
-        return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout.strip(),
-            "stderr": result.stderr.strip(),
-            "code": result.returncode,
-        }
-    except subprocess.TimeoutExpired:
-        return {"success": False, "stdout": "", "stderr": "Command timed out", "code": -1}
-    except Exception as e:
-        return {"success": False, "stdout": "", "stderr": str(e), "code": -1}
 
 
 def _version_for(tool: str) -> str | None:
@@ -520,9 +483,6 @@ def detect_environment(force_refresh: bool = False) -> dict:
     pdk_index = build_pdk_index()
     capability_manifests = load_capability_manifests()
     exposed_pdk_index = _augment_pdk_index_with_manifests(pdk_index, capability_manifests)
-    wsl = _wsl_status()
-    wsl_tools = _wsl_tool_presence(wsl.get("tool_inventory") or [])
-    wsl_capabilities = _wsl_capabilities(wsl_tools)
     has_sim = any(tools.get(tool) for tool in configured_tools_for("simulation"))
     has_synth = any(tools.get(tool) for tool in configured_tools_for("synthesis"))
     has_pnr_native = any(tools.get(tool) for tool in configured_tools_for("pnr"))
@@ -530,15 +490,14 @@ def detect_environment(force_refresh: bool = False) -> dict:
     has_physical_verify = any(tools.get(tool) for tool in configured_tools_for("physical_verification"))
 
     capabilities = {
-        "simulation": has_sim or wsl_capabilities["simulation"],
-        "synthesis": has_synth or wsl_capabilities["synthesis"],
-        "pnr": has_pnr_native or has_pnr_docker or wsl_capabilities["pnr"],
-        "sta": any(tools.get(tool) for tool in configured_tools_for("sta")) or wsl_capabilities["sta"],
-        "waveform": bool(tools.get("gtkwave")) or wsl_capabilities["waveform"],
-        "physical_verification": has_physical_verify or wsl_capabilities["physical_verification"],
+        "simulation": has_sim,
+        "synthesis": has_synth,
+        "pnr": has_pnr_native or has_pnr_docker,
+        "sta": any(tools.get(tool) for tool in configured_tools_for("sta")),
+        "waveform": bool(tools.get("gtkwave")),
+        "physical_verification": has_physical_verify,
         "pdk": bool(pdk_dirs or (capability_manifests.get("pdks") or [])),
         "docker": bool(tools.get("docker")),
-        "wsl": wsl["available"],
     }
 
     flows = detect_flows(tools, images)
@@ -610,9 +569,6 @@ def detect_environment(force_refresh: bool = False) -> dict:
             for capability, (env_name, _defaults) in CAPABILITY_TOOL_ENVS.items()
         },
         "license_env": _license_env_status(),
-        "wsl": wsl,
-        "wsl_tools": wsl_tools,
-        "wsl_capabilities": wsl_capabilities,
         "capabilities": capabilities,
         "missing": missing,
         "capability_tier": tier,

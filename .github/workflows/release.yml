@@ -1,4 +1,4 @@
-name: Release AgentIC Desktop
+name: Release AgentIC Desktop — Linux & macOS
 
 on:
   push:
@@ -53,7 +53,7 @@ jobs:
             exit 1
           fi
 
-          if gh release view "$RELEASE_TAG" --repo Vickyrrrrrr/buildstack >/dev/null 2>&1; then
+          if gh release view "$RELEASE_TAG" --repo Vickyrrrrrr/buildstack > /dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
               --repo Vickyrrrrrr/buildstack \
               --title "$RELEASE_VERSION" \
@@ -76,21 +76,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux: AppImage runs on every distro (Ubuntu, RHEL, Fedora, Rocky, Arch…)
           - os: ubuntu-22.04
             platform: linux
             runtime_platform: linux
             runtime_arch: x64
-            package_flag: --linux AppImage deb
-          - os: windows-latest
-            platform: windows
-            runtime_platform: win32
-            runtime_arch: x64
-            package_flag: --win nsis
+            package_flag: --linux AppImage
+          # macOS Intel
           - os: macos-13
             platform: macos-intel
             runtime_platform: darwin
             runtime_arch: x64
             package_flag: --mac dmg zip --x64
+          # macOS Apple Silicon
           - os: macos-14
             platform: macos-apple-silicon
             runtime_platform: darwin
@@ -125,15 +123,6 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cmake ninja
 
-      - name: Install Windows Slang build dependencies
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: choco install cmake ninja --no-progress --yes
-
-      - name: Configure MSVC environment
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-
       - name: Build bundled Slang language server
         shell: bash
         env:
@@ -145,20 +134,16 @@ jobs:
           cmake -S "$RUNNER_TEMP/slang-server" -B "$RUNNER_TEMP/slang-server/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build "$RUNNER_TEMP/slang-server/build" --target slang_server --parallel
 
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            slang_binary="$RUNNER_TEMP/slang-server/build/bin/slang-server.exe"
-          else
-            slang_binary="$RUNNER_TEMP/slang-server/build/bin/slang-server"
-          fi
-          if [[ ! -x "$slang_binary" && ! -f "$slang_binary" ]]; then
+          slang_binary="$RUNNER_TEMP/slang-server/build/bin/slang-server"
+          if [[ ! -x "$slang_binary" ]]; then
             echo "Expected Slang language server was not produced: $slang_binary"
             exit 1
           fi
 
           destination="apps/agentic-desktop/packages/desktop/resources/tools/slang/${RUNTIME_PLATFORM}-${RUNTIME_ARCH}"
           mkdir -p "$destination"
-          cp "$slang_binary" "$destination/$(basename "$slang_binary")"
-          export SLANG_BINARY="$destination/$(basename "$slang_binary")"
+          cp "$slang_binary" "$destination/slang-server"
+          export SLANG_BINARY="$destination/slang-server"
           python - <<'PY'
           import hashlib
           import os
@@ -176,7 +161,6 @@ jobs:
           RUNTIME_ARCH: ${{ matrix.runtime_arch }}
         run: |
           binary="apps/agentic-desktop/packages/desktop/resources/tools/slang/${RUNTIME_PLATFORM}-${RUNTIME_ARCH}/slang-server"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then binary="${binary}.exe"; fi
           test -f "$binary"
           test -f "$(dirname "$binary")/slang-server.sha256"
           export SLANG_BINARY="$binary"
@@ -205,10 +189,6 @@ jobs:
           OPENCODE_DEFAULT_AGENT: agentic-vlsi
           OPENCODE_CHANNEL: prod
         run: bun run build
-
-      - name: Build AgentIC backend runtime
-        working-directory: apps/agentic-desktop/packages/desktop
-        run: bun run build:agentic-backend
 
       - name: Publish to GitHub Releases
         working-directory: apps/agentic-desktop/packages/desktop

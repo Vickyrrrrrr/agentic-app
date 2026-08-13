@@ -246,9 +246,23 @@ def run_pipeline(payload):
         "flow_decision": flow_decision,
     }
 
+def _start_http_background():
+    try:
+        import uvicorn
+        from main import app
+        port = int(os.environ.get("AGENTIC_PORT") or os.environ.get("PORT") or "7860")
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    except Exception as e:
+        sys.stderr.write(f"[Python Bridge Daemon] HTTP server start failed or port in use: {e}\n")
+        sys.stderr.flush()
+
 def main():
     if "--daemon" in sys.argv:
+        import threading as _threading
+        t = _threading.Thread(target=_start_http_background, daemon=True)
+        t.start()
         try:
+
             while True:
                 line = sys.stdin.readline()
                 if not line:

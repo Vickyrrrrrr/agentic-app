@@ -18,14 +18,24 @@ export function PDKCatalogDock() {
   const [libraries] = createResource(
     () => params.id,
     async (sessionId) => {
+      setFetchError(null)
+      if (!sessionId) return []
       try {
         const res = await callAgenticTool(
           "query_pdk",
           { session_id: sessionId, workspace_root: decode64(params.dir) ?? "" },
           { query_type: "list_libraries" }
         )
-        if (!res.success || !res.result) throw new Error(res.result || "No PDK data returned")
-        const parsed = JSON.parse(res.result)
+        if (!res || !res.success || !res.result) {
+          setFetchError("No local PDK detected. Set $PDK_ROOT or place a PDK in ~/pdks")
+          return []
+        }
+        let parsed: any = {}
+        try { parsed = JSON.parse(res.result) } catch {}
+        if (parsed.status === "DEPENDENCY_MISSING" || parsed.error) {
+          setFetchError("No local PDK detected. Set $PDK_ROOT or place a PDK in ~/pdks")
+          return []
+        }
         const rawLibs = Array.isArray(parsed.libraries) ? parsed.libraries : Array.isArray(parsed) ? parsed : []
         const libs: PDKLibrary[] = rawLibs.map((item: any) => {
           if (typeof item === "string") return { name: item }
@@ -33,8 +43,8 @@ export function PDKCatalogDock() {
         })
         if (libs.length > 0 && !selectedLib()) setSelectedLib(libs[0].name)
         return libs
-      } catch (e) {
-        setFetchError(e instanceof Error ? e.message : String(e))
+      } catch {
+        setFetchError("No local PDK detected. Set $PDK_ROOT or place a PDK in ~/pdks")
         return []
       }
     },
@@ -134,8 +144,8 @@ export function PDKCatalogDock() {
       </Show>
 
       <Show when={fetchError()}>
-        <div class="px-3 py-1.5 text-11-regular text-text-weaker border-b border-border-weaker-base">
-          {fetchError()}
+        <div class="p-4 text-12-regular text-text-weaker text-center border-b border-border-weaker-base">
+          <div>{fetchError()}</div>
         </div>
       </Show>
 

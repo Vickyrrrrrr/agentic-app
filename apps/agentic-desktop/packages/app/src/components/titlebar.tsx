@@ -39,6 +39,9 @@ import { useGlobal } from "@/context/global"
 import { decode64 } from "@/utils/base64"
 import { ServerConnection, useServer } from "@/context/server"
 import { tabHref, useTabs, type Tab } from "@/context/tabs"
+import { useDialog } from "@opencode-ai/ui/context/dialog"
+import { Dialog } from "@opencode-ai/ui/dialog"
+
 
 type TauriDesktopWindow = {
   startDragging?: () => Promise<void>
@@ -86,7 +89,7 @@ export function Titlebar(props: { update?: TitlebarUpdate }) {
   const useV2Titlebar = createMemo(() => settings.general.newLayoutDesigns())
 
   const mac = createMemo(() => platform.platform === "desktop" && platform.os === "macos")
-  const windows = createMemo(() => platform.platform === "desktop" && platform.os === "windows")
+  const windows = createMemo(() => platform.platform === "desktop" && (platform.os as string) === "windows")
   const electronWindows = createMemo(() => windows() && !tauriApi())
   const linux = createMemo(() => platform.platform === "desktop" && platform.os === "linux")
   const web = createMemo(() => platform.platform === "web")
@@ -101,7 +104,11 @@ export function Titlebar(props: { update?: TitlebarUpdate }) {
   }
   const windowsControlsWidth = () => `${windowsControlsBaseWidth / Math.max(titlebarZoom(), 1)}px`
 
+
+
+
   const [history, setHistory] = createStore({
+
     stack: [] as string[],
     index: 0,
     action: undefined as "back" | "forward" | undefined,

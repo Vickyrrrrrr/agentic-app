@@ -125,6 +125,49 @@ def run_role_pipeline(ctx: RoleContext) -> list[RoleResult]:
     return results
 
 
+def run_single_role(role: str, ctx: RoleContext) -> RoleResult:
+    """Execute exactly one kernel role on-demand through the full validation pipeline.
+
+    This is the public API for the /opencode/kernel/role/{role} endpoint.
+    The caller must pass a fully-resolved RoleContext (scope already derived
+    from session state, not from caller input).
+
+    The role runs with an empty upstream `outputs` dict — dependencies are not
+    re-executed. If the role requires upstream data (e.g. rtl_author needs
+    spec_architect output), the relevant stored design_state facts are used
+    by the role handler via ctx.design_state.
+    """
+    validation_ctx = build_validation_context(
+        env=ctx.env,
+        design_state=ctx.design_state,
+        context_contract=ctx.context_contract,
+        flow_decision=ctx.flow_decision,
+    )
+    result = _run_role(role, ctx, {})
+    accepted_envelopes: list[HandoffEnvelope] = []
+    for envelope in result.envelopes:
+        envelope.validate()
+        validation = validate_handoff_envelope(envelope, validation_ctx)
+        validation_record = validation.to_record()
+        result.validation.append(validation_record)
+        result.evidence.append({
+            "kind": "validation_result",
+            "ref": f"{role}:{envelope.kind}:{validation.payload_digest}",
+            "payload": validation_record,
+        })
+        if validation.accepted:
+            accepted_envelopes.append(envelope)
+        else:
+            result.risks.extend([
+                f"Rejected {envelope.kind}: {issue.get('message')}"
+                for issue in validation_record.get("issues", [])
+                if issue.get("severity") == "error"
+            ])
+    result.envelopes = accepted_envelopes
+    return result
+
+
+
 def _run_role(role: str, ctx: RoleContext, outputs: dict[str, list[HandoffEnvelope]]) -> RoleResult:
     if role == "spec_architect":
         return _spec_architect(ctx)

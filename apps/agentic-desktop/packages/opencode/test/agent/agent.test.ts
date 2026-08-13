@@ -54,6 +54,7 @@ it.instance("returns default native agents when no config", () =>
     expect(names).toContain("build")
     expect(names).toContain("plan")
     expect(names).toContain("general")
+    expect(names).toContain("vlsi-verification")
     expect(names).toContain("explore")
     expect(names).toContain("compaction")
     expect(names).toContain("title")
@@ -141,6 +142,17 @@ it.instance("general agent denies todo tools", () =>
     expect(general?.mode).toBe("subagent")
     expect(general?.hidden).toBeUndefined()
     expect(evalPerm(general, "todowrite")).toBe("deny")
+  }),
+)
+
+it.instance("VLSI verification worker cannot edit shared design files", () =>
+  Effect.gen(function* () {
+    const verification = yield* load((svc) => svc.get("vlsi-verification"))
+    expect(verification).toBeDefined()
+    expect(verification?.mode).toBe("subagent")
+    expect(evalPerm(verification, "edit")).toBe("deny")
+    expect(evalPerm(verification, "write")).toBe("deny")
+    expect(evalPerm(verification, "bash")).toBe("deny")
   }),
 )
 

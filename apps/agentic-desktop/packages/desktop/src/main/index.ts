@@ -36,9 +36,6 @@ import {
   setBackgroundColor,
   setDockIcon,
 } from "./windows"
-import { createWslServersController } from "./wsl/servers"
-import { registerWslIpcHandlers } from "./wsl/ipc"
-import { spawnWslSidecar } from "./wsl/sidecar"
 import { migrate } from "./migrate"
 
 const APP_NAMES: Record<string, string> = {
@@ -201,6 +198,10 @@ const main = Effect.gen(function* () {
   process.env.AGENTIC_MODE ??= "advisor"
   process.env.AGENTIC_PRODUCT ??= "1"
   process.env.OPENCODE_DEFAULT_AGENT ??= "agentic-vlsi"
+  // AgentIC's verification workers only run isolated flow jobs, so parallel
+  // subagents are a supported product capability rather than a user toggle.
+  // An explicit false value remains an escape hatch for constrained machines.
+  process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS ??= "true"
 
   app.setName(app.isPackaged ? APP_NAMES[CHANNEL] : "AgentIC Dev")
   app.setAppUserModelId(appId)
@@ -212,24 +213,8 @@ const main = Effect.gen(function* () {
   logger = initLogging()
   initCrashReporter()
 
-  const wslServers = createWslServersController(
-    app.getVersion(),
-    async (distro) => {
-      logger.log("spawning wsl sidecar", { distro })
-      return spawnWslSidecar(distro, {
-        onLine: (line) => logger.log("wsl sidecar", { distro, stream: line.stream, text: line.text }),
-      })
-    },
-    {
-      logger: {
-        log: (message, meta) => logger.log(message, meta),
-        error: (message, meta) => logger.error(message, meta),
-      },
-    },
-  )
   const stopSidecars = async () => {
     await killSidecar()
-    wslServers.stopAll()
     stopAgenticBackend()
   }
   const relaunch = () => {
@@ -254,6 +239,18 @@ const main = Effect.gen(function* () {
   ensureLoopbackNoProxy()
   useEnvProxy()
   app.commandLine.appendSwitch("proxy-bypass-list", "<-loopback>")
+
+  // Linux performance optimizations: GPU hardware acceleration
+  if (process.platform === "linux") {
+    const isWsl = Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)
+    app.commandLine.appendSwitch("ignore-gpu-blocklist")
+    app.commandLine.appendSwitch("enable-gpu-rasterization")
+    if (!isWsl) {
+      app.commandLine.appendSwitch("enable-zero-copy")
+      app.commandLine.appendSwitch("enable-native-gpu-memory-buffers")
+    }
+  }
+
   const features = app.commandLine.getSwitchValue("enable-features")
   app.commandLine.appendSwitch("enable-features", features ? `${jsCallStackFeature},${features}` : jsCallStackFeature)
   if (!app.isPackaged) app.commandLine.appendSwitch("remote-debugging-port", "9222")
@@ -286,13 +283,11 @@ const main = Effect.gen(function* () {
   app.on("before-quit", () => {
     stopAgenticBackend()
     void killSidecar()
-    wslServers.stopAll()
   })
 
   app.on("will-quit", () => {
     stopAgenticBackend()
     void killSidecar()
-    wslServers.stopAll()
   })
 
   app.on("child-process-gone", (_event, details) => {
@@ -390,7 +385,6 @@ const main = Effect.gen(function* () {
     exportDebugLogs: () => exportDebugLogs(),
     recordFatalRendererError: (error) => writeLog("renderer", "fatal renderer error", { ...error }, "error"),
   })
-  registerWslIpcHandlers(wslServers)
   void updater.start()
   const updateTimer = setInterval(() => void updater.check(), 10 * 60 * 1000)
   updateTimer.unref()
@@ -425,10 +419,6 @@ const main = Effect.gen(function* () {
       username: "opencode",
       password,
     })
-
-    if (process.platform === "win32") {
-      void wslServers.initialize().catch((error) => logger.error("wsl server initialization failed", error))
-    }
 
     yield* Effect.promise(() => health.wait).pipe(
       Effect.timeout("30 seconds"),

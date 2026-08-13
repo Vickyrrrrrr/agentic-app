@@ -62,7 +62,10 @@ def build_agent_context_packet(
     flow_summary = _compact_flow_decision(flow_decision)
     design_memory = _design_memory_summary(state, raw_state)
     working_set = _working_set_summary(state, raw_state, repo_map, snippets)
-    retrieval_index = _retrieval_index(repo_map, snippets, role_context, state, root)
+    from flow_discovery import discover_flow, format_flow_context_prompt
+    disc_flow = discover_flow(str(root))
+    disc_prompt = format_flow_context_prompt(disc_flow)
+
     packet = {
         "schema_version": CONTEXT_SCHEMA_VERSION,
         "budget": {
@@ -85,6 +88,11 @@ def build_agent_context_packet(
         "kernel_contract": context_contract or state.get("context_contract"),
         "role_context": role_context,
         "environment_summary": env_summary,
+        "discovered_flow": {
+            "has_existing_flow": disc_flow.has_existing_flow,
+            "recommended_targets": disc_flow.recommended_targets,
+            "prompt_text": disc_prompt,
+        },
         "repo_map": repo_map,
         "relevant_snippets": snippets,
         "context_policy": {
@@ -93,8 +101,10 @@ def build_agent_context_packet(
             "edit_mode": "Prefer surgical old_string/new_string edits. Whole-file writes are for new files or deliberate small rewrites.",
             "log_mode": "Use checkpoint verdicts and short failing excerpts; never paste full EDA logs into chat context.",
             "omission_rule": "If a detail is omitted, retrieve it with tools before making design or signoff claims.",
+            "flow_rule": "Always prefer discovered Makefile targets over inventing arbitrary shell command lines.",
         },
     }
+
     trimmed = _trim_packet(packet, budget_chars)
     trimmed.setdefault("budget", {}).setdefault("truncated", False)
     trimmed["budget"]["actual_chars"] = _packet_size(trimmed)

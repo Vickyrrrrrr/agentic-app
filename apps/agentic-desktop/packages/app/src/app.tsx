@@ -44,7 +44,7 @@ import { ServerConnection, ServerProvider, serverName, useServer } from "@/conte
 import { SettingsProvider, useSettings } from "@/context/settings"
 import { TerminalProvider } from "@/context/terminal"
 import { TabsProvider } from "@/context/tabs"
-import { WslServersProvider } from "@/wsl/context"
+
 import DirectoryLayout from "@/pages/directory-layout"
 import Layout from "@/pages/layout"
 import { ErrorPage } from "./pages/error"
@@ -83,19 +83,7 @@ declare global {
         degraded: boolean
         message: string
         url: string
-        wsl?: {
-          available: boolean
-          distro?: string
-          python: boolean
-          bootstrapped: boolean
-          pdkRoot?: string
-          tools: Record<string, string | null>
-          missingTools: string[]
-          reason?: string
-        }
       }>
-      installWsl?: () => Promise<{ success: boolean; message: string }>
-      checkDocker?: () => Promise<{ available: boolean; version: string | null }>
     }
   }
 }
@@ -191,13 +179,11 @@ export function AppBaseProviders(props: ParentProps<{ locale?: Locale }>) {
               }}
             >
               <QueryProvider>
-                <WslServersProvider>
-                  <DialogProvider>
-                    <MarkedProvider>
-                      <FileComponentProvider component={File}>{props.children}</FileComponentProvider>
-                    </MarkedProvider>
-                  </DialogProvider>
-                </WslServersProvider>
+                <DialogProvider>
+                  <MarkedProvider>
+                    <FileComponentProvider component={File}>{props.children}</FileComponentProvider>
+                  </MarkedProvider>
+                </DialogProvider>
               </QueryProvider>
             </ErrorBoundary>
           </UiI18nBridge>

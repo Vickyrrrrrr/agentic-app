@@ -3068,6 +3068,103 @@ def dispatch_tool(name: str, args: dict, workspace_root: str, design_name: str =
         ledger_args = dict(args)
         action = ledger_args.pop("action", "")
         return ledger_tool(action, workspace_root, design_name, **ledger_args)
+    elif name == "ipython":
+        code = args.get("code", "")
+        from ipyt_harness import get_rlm_harness
+        harness = get_rlm_harness(workspace_root=workspace_root)
+        result = harness.execute_code_sync(code)
+        out = []
+        if result.get("stdout"):
+            out.append(f"STDOUT:\n{result['stdout']}")
+        if result.get("stderr"):
+            out.append(f"STDERR:\n{result['stderr']}")
+        if not out:
+            out.append("Cell executed with no output.")
+        out.append(f"\n[IPython Kernel Status: {'SUCCESS' if result.get('success') else 'FAILED'}, Active Scope: {', '.join(result.get('active_variables', [])[:10])}]")
+        return "\n".join(out)
+    elif name == "container":
+        action = args.get("action", "status")
+        from collab_container import get_container_manager
+        mgr = get_container_manager(workspace_root=workspace_root)
+        if action == "configure":
+            cfg = mgr.configure_environment(design_name=design_name, docker_image=args.get("docker_image", "efabless/openlane:latest"))
+            return f"Configured container environment for '{design_name}': {json.dumps(cfg.to_dict(), indent=2)}"
+        elif action == "start":
+            res = mgr.start_container(design_name=design_name)
+            return json.dumps(res, indent=2)
+        elif action == "stop":
+            res = mgr.stop_container(design_name=design_name)
+            return json.dumps(res, indent=2)
+        elif action == "exec":
+            cmd = args.get("command", "pwd")
+            res = mgr.run_command_in_container(design_name=design_name, command=cmd)
+            return json.dumps(res, indent=2)
+        elif action == "status":
+            return json.dumps(mgr.get_container_status(design_name=design_name), indent=2)
+        else:
+            return f"Error: unknown container action '{action}'"
+    elif name == "chip_pr":
+        action = args.get("action", "list")
+        from chip_pr_engine import get_chip_pr_manager
+        pr_mgr = get_chip_pr_manager(workspace_root=workspace_root)
+        if action == "create":
+            pr = pr_mgr.create_pull_request(
+                title=args.get("title", "RTL Improvement"),
+                description=args.get("description", ""),
+                author_id="agent_local",
+                author_name="AgentIC Assistant",
+                design_name=design_name,
+                affected_files=args.get("affected_files", []),
+                patch_diff=args.get("patch_diff", ""),
+            )
+            return f"Created Chip PR '{pr.pr_id}': {json.dumps(pr.to_dict(), indent=2)}"
+        elif action == "list":
+            prs = pr_mgr.list_pull_requests(design_name=design_name)
+            return json.dumps({"prs": prs}, indent=2)
+        elif action == "get":
+            pr_id = args.get("pr_id", "")
+            pr = pr_mgr.get_pull_request(pr_id)
+            return json.dumps(pr or {"error": "PR not found"}, indent=2)
+        elif action == "approve":
+            pr_id = args.get("pr_id", "")
+            role = args.get("role", "RTL Lead")
+            res = pr_mgr.approve_pull_request(pr_id=pr_id, approver_id="lead_user", approver_name="Chip Reviewer", role=role, comment=args.get("comment", "Approved."))
+            return json.dumps(res, indent=2)
+        elif action == "merge":
+            pr_id = args.get("pr_id", "")
+            res = pr_mgr.merge_pull_request(pr_id=pr_id)
+            return json.dumps(res, indent=2)
+        else:
+            return f"Error: unknown chip_pr action '{action}'"
+    elif name == "chip_space":
+        action = args.get("action", "list_spaces")
+        from chip_space_engine import get_chip_space_manager
+        sp_mgr = get_chip_space_manager(workspace_root=workspace_root)
+        if action == "create_space":
+            space = sp_mgr.create_space(
+                space_name=args.get("space_name", "Chip Design Space"),
+                target_pdk=args.get("target_pdk", "sky130"),
+                server_url=args.get("server_url", "https://api.buildstack.live"),
+            )
+            return f"Created Collaborative Chip Space '{space.space_name}'! Space ID: {space.space_id}, Invite Code: {space.invite_code}\nConfig: {json.dumps(space.to_dict(), indent=2)}"
+        elif action == "join_space":
+            identifier = args.get("invite_code") or args.get("space_id") or ""
+            res = sp_mgr.join_space(identifier=identifier, engineer_id="eng_local", name="Team Member", role=args.get("role", "RTL Design"))
+            return json.dumps(res, indent=2)
+        elif action == "list_spaces":
+            return json.dumps({"spaces": sp_mgr.list_spaces()}, indent=2)
+        elif action == "get_config":
+            sid = args.get("space_id") or args.get("invite_code") or ""
+            return json.dumps(sp_mgr.get_space_config(sid) or {"error": "Space not found"}, indent=2)
+        else:
+            return f"Error: unknown chip_space action '{action}'"
+    elif name == "chip_build":
+        target = args.get("target", "freepdk45demo")
+        clock_period_ns = float(args.get("clock_period_ns", 10.0))
+        from silicon_compiler_adapter import get_sc_adapter
+        sc_adapter = get_sc_adapter(workspace_root=workspace_root)
+        res = sc_adapter.run_flow(design_name=design_name, target=target, clock_period_ns=clock_period_ns)
+        return json.dumps(res, indent=2)
     elif name == "git_clone":
         return git_clone(args.get("url", ""), workspace_root, args.get("target_dir"), args.get("branch", "main"), args.get("token", ""))
     else:

@@ -99,13 +99,30 @@ class CoverageEvidence:
 
 
 @dataclass
+class FlowLockContract:
+    """Enterprise Flow Lock contract: locks company-approved Makefiles/TCL flows for multi-engineer teams."""
+    flow_name: str
+    signed_off_by: str
+    master_script_path: str
+    is_locked: bool = True
+    allowed_parameters: list[str] = field(default_factory=list)
+    prohibited_actions: list[str] = field(default_factory=list)
+    team_leads: list[str] = field(default_factory=list)
+    group_project_id: str = "default_group"
+
+
+
+
+@dataclass
 class ToolAdapterPlan:
     selected_backend: str | None
     selected_pdk: str | None
     required_capabilities: list[str] = field(default_factory=list)
     adapter_sequence: list[dict[str, Any]] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
-    fallback_policy: str = "prefer_detected_user_toolchain_then_open_source_with_approval"
+    flow_lock: FlowLockContract | None = None
+    fallback_policy: str = "strictly_use_user_signed_off_flow_and_makefiles"
+
 
 
 @dataclass

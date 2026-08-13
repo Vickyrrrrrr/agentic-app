@@ -89,6 +89,7 @@ function prepareSidecarEnv(password: string, userDataPath: string) {
     OPENCODE_SERVER_USERNAME: "opencode",
     OPENCODE_SERVER_PASSWORD: password,
     OPENCODE_DEFAULT_AGENT: process.env.OPENCODE_DEFAULT_AGENT ?? "agentic-vlsi",
+    OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS: process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS ?? "true",
     XDG_DATA_HOME: runtime.data,
     XDG_CONFIG_HOME: runtime.config,
     XDG_CACHE_HOME: runtime.cache,

@@ -3,7 +3,6 @@ import type { AsyncStorage, SyncStorage } from "@solid-primitives/storage"
 import type { Accessor } from "solid-js"
 import type { DesktopMenuAction } from "../desktop-menu"
 import { ServerConnection } from "./server"
-import type { WslServersPlatform } from "../wsl/types"
 import type { UpdaterPlatform } from "../updater"
 
 type PickerPaths = string | string[] | null
@@ -17,7 +16,7 @@ type OpenAttachmentPickerOptions = {
 }
 type SaveFilePickerOptions = { title?: string; defaultPath?: string }
 type PlatformName = "web" | "desktop"
-type DesktopOS = "macos" | "windows" | "linux"
+type DesktopOS = "macos" | "linux"
 
 export type FatalRendererErrorLog = {
   error: string
@@ -72,9 +71,6 @@ type PlatformBase = {
 
   /** Set the default server URL to use on app startup (platform-specific) */
   setDefaultServer?(url: ServerConnection.Key | null): Promise<void> | void
-
-  /** Manage WSL sidecar servers (Electron on Windows only) */
-  wslServers?: WslServersPlatform
 
   /** Get the preferred display backend (desktop only) */
   getDisplayBackend?(): Promise<DisplayBackend | null> | DisplayBackend | null

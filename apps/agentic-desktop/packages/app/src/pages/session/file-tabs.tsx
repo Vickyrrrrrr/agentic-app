@@ -25,6 +25,7 @@ import { GdsLayoutTab } from "@/components/session/gds-layout-tab"
 import { HdlEditorTab } from "@/components/session/hdl-editor-tab"
 import { Markdown } from "@opencode-ai/ui/markdown"
 
+
 function FileCommentMenu(props: {
   moreLabel: string
   editLabel: string
@@ -453,7 +454,8 @@ export function FileTabContent(props: { tab: string }) {
     <Tabs.Content value={props.tab} class="mt-3 relative h-full">
       <ScrollView class="h-full" viewportRef={scrollSync.setViewport} onScroll={scrollSync.handleScroll as any}>
           <Switch>
-            <Match when={state()?.loaded && (path()?.endsWith(".vcd") || path()?.endsWith(".fst"))}>
+            <Match when={state()?.loaded && path()?.endsWith(".vcd")}>
+
               <SessionWaveformTab path={path()!} />
             </Match>
             <Match when={state()?.loaded && (path()?.endsWith(".log") || path()?.endsWith(".rpt"))}>

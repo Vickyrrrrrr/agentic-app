@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { spawn, spawnSync, type ChildProcess } from "node:child_process"
+import { spawn, type ChildProcess } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { get as httpGet } from "node:http"
 import { createServer } from "node:net"
@@ -17,8 +17,9 @@ const BRIDGE_HEALTH_PATH = "/opencode/bridge/health"
 let backendProcess: ChildProcess | null = null
 let started = false
 
-export type BackendMode = "wsl" | "windows-native" | "linux" | "dev" | "unknown"
-let backendMode: BackendMode = process.platform === "win32" ? "windows-native" : "linux"
+// On Linux and macOS the backend is always "native" — EDA tools live on the user's PATH.
+export type BackendMode = "linux" | "macos" | "dev" | "unknown"
+let backendMode: BackendMode = process.platform === "linux" ? "linux" : process.platform === "darwin" ? "macos" : "dev"
 
 export type BackendStatus = {
   mode: BackendMode
@@ -27,27 +28,14 @@ export type BackendStatus = {
   degraded: boolean
   message: string
   url: string
-  wsl?: {
-    available: boolean
-    distro?: string
-    python: boolean
-    bootstrapped: boolean
-    pdkRoot?: string
-    tools: Record<string, string | null>
-    missingTools: string[]
-    reason?: string
-  }
 }
 
 let backendStatus: BackendStatus = {
   mode: backendMode,
   started: false,
   ready: false,
-  degraded: process.platform === "win32",
-  message:
-    process.platform === "win32"
-      ? "Windows native backend will be used until WSL is verified."
-      : "Backend has not started yet.",
+  degraded: false,
+  message: "Backend has not started yet.",
   url: DEFAULT_AGENTIC_URL,
 }
 
@@ -56,7 +44,7 @@ export function getBackendMode(): BackendMode {
 }
 
 export function getBackendStatus(): BackendStatus {
-  return { ...backendStatus, wsl: backendStatus.wsl ? { ...backendStatus.wsl, tools: { ...backendStatus.wsl.tools } } : undefined }
+  return { ...backendStatus }
 }
 
 export function getAgenticBackendUrl() {
@@ -74,7 +62,7 @@ export async function configureAgenticBackendUrl(conflictingUrl: string) {
 }
 
 export async function startAgenticBackend() {
-  const baseUrl = getAgenticBackendUrl()
+  let baseUrl = getAgenticBackendUrl()
   backendStatus = { ...backendStatus, url: baseUrl, started: false, ready: false }
 
   // If backend is already running (dev mode), skip spawning.
@@ -86,11 +74,8 @@ export async function startAgenticBackend() {
       mode: backendMode,
       started: true,
       ready: true,
-      degraded: backendMode !== "wsl" && process.platform === "win32",
-      message:
-        backendMode === "wsl"
-          ? "AgentIC backend is running inside WSL."
-          : "AgentIC backend is already running.",
+      degraded: false,
+      message: "AgentIC backend is already running.",
     }
     if (await isBridgeHealthy(baseUrl)) {
       writeLog("agentic-backend", "Bridge is healthy — backend fully ready")
@@ -98,18 +83,29 @@ export async function startAgenticBackend() {
     return
   }
 
-  // Resolve the backend command: WSL → bundled exe → dev python3
+  // If target port (e.g. 7860) is occupied by another non-AgentIC process, find next free port
+  const preferredPort = Number(portFromLocalUrl(baseUrl)) || 7860
+  const freePort = await findFreeLoopbackPort(preferredPort)
+  if (freePort !== preferredPort) {
+    baseUrl = `http://127.0.0.1:${freePort}`
+    process.env.AGENTIC_LOCAL_URL = baseUrl
+    process.env.AGENTIC_PORT = String(freePort)
+    backendStatus = { ...backendStatus, url: baseUrl }
+    writeLog("agentic-backend", "Preferred port was occupied; auto-assigned free port", { freePort, url: baseUrl })
+  }
+
+  // Resolve the backend command: bundled binary → dev run.sh → dev python3
   const env = backendEnvironment()
   const command = resolveBackendCommand(env)
   if (!command) {
-    writeLog("agentic-backend", "No backend command found. User must start it manually.", {}, "warn")
+    writeLog("agentic-backend", "No backend command found. Start the backend manually.", {}, "warn")
     backendStatus = {
       ...backendStatus,
       mode: "unknown",
       started: false,
       ready: false,
       degraded: true,
-      message: "AgentIC backend could not be started. Install WSL with Python and EDA tools, or reinstall AgentIC.",
+      message: "AgentIC backend could not be started. Reinstall AgentIC or run the backend manually.",
     }
     return
   }
@@ -122,7 +118,6 @@ export async function startAgenticBackend() {
       cwd: command.cwd,
       shell: command.shell,
       stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
     })
     backendProcess = child
     started = true
@@ -131,7 +126,7 @@ export async function startAgenticBackend() {
       mode: backendMode,
       started: true,
       ready: false,
-      degraded: backendMode !== "wsl" && process.platform === "win32",
+      degraded: false,
     }
     attachProcessLogging(child)
   } catch (error) {
@@ -156,11 +151,8 @@ export async function startAgenticBackend() {
         mode: backendMode,
         started: true,
         ready: true,
-        degraded: backendMode !== "wsl" && process.platform === "win32",
-        message:
-          backendMode === "wsl"
-            ? "AgentIC backend is running inside WSL."
-            : "AgentIC is running in Windows native mode. Install WSL EDA tools for full local flows.",
+        degraded: false,
+        message: "AgentIC backend is running.",
       }
       return
     }
@@ -186,24 +178,14 @@ export function stopAgenticBackend() {
   if (!backendProcess) return
   const current = backendProcess
   backendProcess = null
-  // Force-kill immediately. On Windows, kill() calls TerminateProcess (force).
-  // On Linux/Mac, SIGKILL is immediate. No setTimeout — the app may exit before it fires.
   try {
-    if (process.platform === "win32") {
-      // Kill the entire process tree (PyInstaller may spawn child processes like wsl.exe)
-      const { execFileSync } = require("node:child_process")
-      execFileSync("taskkill", ["/PID", String(current.pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      })
-    } else {
-      current.kill("SIGKILL")
-    }
+    if (current.pid) process.kill(-current.pid, "SIGKILL")
+    else current.kill("SIGKILL")
   } catch {
-    // Process may have already exited
     try { current.kill() } catch {}
   }
 }
+
 
 function resolveBackendCommand(env?: NodeJS.ProcessEnv):
   | {
@@ -213,422 +195,28 @@ function resolveBackendCommand(env?: NodeJS.ProcessEnv):
       shell?: boolean
     }
   | undefined {
-  // Priority 1: WSL (Windows) — run backend natively inside WSL where EDA tools + PDKs live.
-  if (process.platform === "win32") {
-    const wslCommand = tryWslBackendCommand(env)
-    if (wslCommand) {
-      backendMode = "wsl"
-      return wslCommand
-    }
-  }
-
-  // Priority 2: Bundled exe (packaged, Windows-native fallback — limited, no EDA tools)
-  const bundled = packagedBackendExecutablePath()
-  if (app.isPackaged && existsSync(bundled)) {
-    backendMode = "windows-native"
-    writeLog("agentic-backend", "using bundled Windows-native backend (limited — no EDA tools without WSL)", {}, "warn")
-    return { executable: bundled, args: [], cwd: dirname(bundled) }
-  }
-
-  // Priority 3: Dev mode — find server dir in the repo
-  const serverDir = findRepoServerDir()
+  const serverDir = findServerDir()
   if (!serverDir) return
 
   const runScript = join(serverDir, "run.sh")
   const mainScript = join(serverDir, "main.py")
 
-  if (process.platform !== "win32" && existsSync(runScript)) {
-    backendMode = process.platform === "linux" ? "linux" : "dev"
+  if (existsSync(runScript)) {
+    backendMode = process.platform === "linux" ? "linux" : process.platform === "darwin" ? "macos" : "dev"
+    writeLog("agentic-backend", "Using system python backend launcher", { runScript, serverDir })
     return { executable: "bash", args: [runScript], cwd: serverDir }
   }
 
-  const python = process.platform === "win32" ? "python" : "python3"
   if (existsSync(mainScript)) {
     backendMode = "dev"
-    return { executable: python, args: [mainScript], cwd: serverDir, shell: process.platform === "win32" }
+    writeLog("agentic-backend", "Using python3 main.py directly", { mainScript, serverDir })
+    return { executable: "python3", args: [mainScript], cwd: serverDir }
   }
 }
 
-function tryWslBackendCommand(env?: NodeJS.ProcessEnv):
-  | {
-      executable: string
-      args: string[]
-      cwd: string
-      shell?: boolean
-    }
-  | undefined {
-  const wslExe = existsSync("C:\\Windows\\System32\\wsl.exe")
-    ? "C:\\Windows\\System32\\wsl.exe"
-    : "wsl"
-
-  // Get default WSL distro
-  let distro: string
-  try {
-    // Don't set encoding — we need the raw Buffer because WSL -l -q outputs UTF-16LE on Windows.
-    // If we decode as utf-8 first, the bytes are already corrupted and can't be recovered.
-    const result = spawnSync(wslExe, ["-l", "-q"], {
-      windowsHide: true,
-      timeout: 5000,
-    })
-    if (result.status !== 0 || !result.stdout) {
-      writeLog("agentic-backend", "WSL detection: wsl -l -q failed", { status: result.status, error: result.error?.message }, "warn")
-      backendStatus = {
-        ...backendStatus,
-        degraded: true,
-        message: "WSL is not ready. Install WSL with an Ubuntu distro plus EDA tools for full local flows.",
-        wsl: {
-          available: false,
-          python: false,
-          bootstrapped: false,
-          tools: {},
-          missingTools: ["WSL", "python3", "yosys", "iverilog", "verilator", "openroad", "openlane", "PDK_ROOT"],
-          reason: result.error?.message || `wsl exited with status ${result.status}`,
-        },
-      }
-      return undefined
-    }
-    // result.stdout is a Buffer — decode properly
-    let output: string
-    const buf = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout as string)
-    // Detect UTF-16LE: null byte at odd positions
-    if (buf.length >= 2 && buf[0] !== 0 && buf[1] === 0) {
-      output = buf.toString("utf-16le")
-    } else {
-      output = buf.toString("utf-8")
-    }
-    const lines = output.split("\n").map((l) => l.trim().replace(/\r/g, "").replace(/\x00/g, "")).filter(Boolean)
-    if (lines.length === 0) {
-      writeLog("agentic-backend", "WSL detection: no distros found", { rawLength: buf.length, output: output.slice(0, 200) }, "warn")
-      backendStatus = {
-        ...backendStatus,
-        degraded: true,
-        message: "WSL is installed, but no Linux distro is configured. Install Ubuntu, then install EDA tools inside it.",
-        wsl: {
-          available: true,
-          python: false,
-          bootstrapped: false,
-          tools: {},
-          missingTools: ["Linux distro", "python3", "yosys", "iverilog", "verilator", "openroad", "openlane", "PDK_ROOT"],
-          reason: "no_wsl_distros",
-        },
-      }
-      return undefined
-    }
-    // Default distro has * prefix
-    const defaultLine = lines.find((l) => l.includes("*"))
-    distro = defaultLine ? defaultLine.replace(/\*/g, "").trim() : lines[0]
-    if (!distro) {
-      writeLog("agentic-backend", "WSL detection: could not parse distro name", { lines }, "warn")
-      return undefined
-    }
-    writeLog("agentic-backend", "WSL detection: found distro", { distro, allDistros: lines })
-  } catch (err) {
-    writeLog("agentic-backend", "WSL detection: exception getting distros", { error: String(err) }, "warn")
-    backendStatus = {
-      ...backendStatus,
-      degraded: true,
-      message: "WSL is not ready. Install WSL with an Ubuntu distro plus EDA tools for full local flows.",
-      wsl: {
-        available: false,
-        python: false,
-        bootstrapped: false,
-        tools: {},
-        missingTools: ["WSL", "python3", "yosys", "iverilog", "verilator", "openroad", "openlane", "PDK_ROOT"],
-        reason: String(err),
-      },
-    }
-    return undefined
-  }
-
-  // Check python3 exists in WSL
-  try {
-    const result = spawnSync(wslExe, ["-d", distro, "--", "bash", "-c", "command -v python3"], {
-      windowsHide: true,
-      timeout: 5000,
-    })
-    const pythonOut = result.stdout ? (Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf-8") : result.stdout as string) : ""
-    if (result.status !== 0 || !pythonOut.trim()) {
-      writeLog("agentic-backend", "WSL detection: python3 not found in WSL", { distro, status: result.status }, "warn")
-      backendStatus = {
-        ...backendStatus,
-        degraded: true,
-        message: "WSL is installed, but python3 is missing. Install python3, python3-venv, and EDA tools in WSL.",
-        wsl: {
-          available: true,
-          distro,
-          python: false,
-          bootstrapped: false,
-          tools: {},
-          missingTools: ["python3", "yosys", "iverilog", "verilator", "openroad", "openlane", "PDK_ROOT"],
-          reason: "python3_missing",
-        },
-      }
-      return undefined
-    }
-  } catch (err) {
-    writeLog("agentic-backend", "WSL detection: exception checking python3", { error: String(err) }, "warn")
-    backendStatus = {
-      ...backendStatus,
-      degraded: true,
-      message: "WSL is installed, but AgentIC could not check python3 inside the distro.",
-      wsl: {
-        available: true,
-        distro,
-        python: false,
-        bootstrapped: false,
-        tools: {},
-        missingTools: ["python3", "yosys", "iverilog", "verilator", "openroad", "openlane", "PDK_ROOT"],
-        reason: String(err),
-      },
-    }
-    return undefined
-  }
-
-  const toolStatus = inspectWslTools(wslExe, distro)
-
-  let serverDir: string | undefined
-  let python = "python3"
-  let bootstrapped = false
-  if (app.isPackaged) {
-    const runtime = bootstrapPackagedWslBackend(wslExe, distro)
-    if (!runtime) return undefined
-    serverDir = runtime.serverDir
-    python = runtime.python
-    bootstrapped = true
-  } else {
-    // Dev mode only: look for a checked-out repo inside WSL.
-    const serverLocations = [
-      "$HOME/AgentIC-app/server",
-      "$HOME/.agentic/server",
-      "/opt/agentic/server",
-    ]
-    try {
-      const checkScript = serverLocations
-        .map((loc) => `[ -f "${loc}/main.py" ] && echo "${loc}" && exit 0`)
-        .join("; ")
-      const result = spawnSync(wslExe, ["-d", distro, "--", "bash", "-c", checkScript], {
-        windowsHide: true,
-        timeout: 5000,
-      })
-      const serverOut = result.stdout ? (Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf-8") : result.stdout as string) : ""
-      serverDir = serverOut.trim()
-      if (!serverDir) {
-        writeLog("agentic-backend", "WSL detection: server not found in common locations", { distro, searched: serverLocations }, "warn")
-        return undefined
-      }
-    } catch {
-      return undefined
-    }
-  }
-
-  backendStatus = {
-    ...backendStatus,
-    mode: "wsl",
-    degraded: toolStatus.missingTools.length > 0,
-    message:
-      toolStatus.missingTools.length > 0
-        ? `WSL backend is available, but EDA setup is incomplete: missing ${toolStatus.missingTools.join(", ")}.`
-        : "WSL backend and EDA tools are available.",
-    wsl: {
-      available: true,
-      distro,
-      python: true,
-      bootstrapped,
-      pdkRoot: toolStatus.pdkRoot,
-      tools: toolStatus.tools,
-      missingTools: toolStatus.missingTools,
-    },
-  }
-
-  writeLog("agentic-backend", "WSL backend found — running natively inside WSL", {
-    distro,
-    serverDir,
-    bootstrapped,
-    missingTools: toolStatus.missingTools,
-  })
-
-  // Build env exports for the WSL bash command.
-  // Source .bashrc exports so PDK_ROOT, PATH (EDA tools), etc. are available.
-  const envExports = env
-    ? Object.entries(env)
-        .filter(([k]) => k.startsWith("AGENTIC_") || k === "PYTHONUNBUFFERED" || k === "OPENCODE_DEFAULT_AGENT" || k === "OPENCODE_CHANNEL")
-        .map(([k, v]) => `export ${k}='${String(v).replace(/'/g, "'\\''")}'`)
-        .join("; ")
-    : ""
-
-  const cmd = [
-    "for f in ~/.profile ~/.bash_profile ~/.bashrc; do [ -f \"$f\" ] && . \"$f\" >/dev/null 2>&1 || true; done",
-    envExports,
-    `cd ${shellEscape(serverDir)}`,
-    `exec ${shellEscape(python)} main.py`,
-  ]
-    .filter(Boolean)
-    .join("; ")
-
-  return {
-    executable: wslExe,
-    args: ["-d", distro, "--", "bash", "-c", cmd],
-    cwd: ".",
-    shell: false,
-  }
-}
-
-function packagedBackendExecutablePath() {
-  const platformKey = `${process.platform}-${process.arch}`
-  const executable = process.platform === "win32" ? "agentic-backend.exe" : "agentic-backend"
-  return join(process.resourcesPath, "backend", platformKey, executable)
-}
-
-function packagedServerDir() {
-  return join(process.resourcesPath, "server")
-}
-
-function bootstrapPackagedWslBackend(wslExe: string, distro: string): { serverDir: string; python: string } | undefined {
-  const sourceDir = packagedServerDir()
-  if (!existsSync(join(sourceDir, "main.py"))) {
-    writeLog("agentic-backend", "WSL bootstrap: bundled server files are missing", { sourceDir }, "warn")
-    backendStatus = {
-      ...backendStatus,
-      degraded: true,
-      message: "Bundled AgentIC server files are missing. Reinstall AgentIC or use Windows native mode.",
-      wsl: {
-        available: true,
-        distro,
-          python: true,
-          bootstrapped: false,
-          tools: {},
-          missingTools: ["AgentIC server files"],
-          reason: "bundled_server_missing",
-        },
-      }
-    return undefined
-  }
-
-  const version = app.getVersion().replace(/[^A-Za-z0-9._-]/g, "_")
-  const runtimeRoot = `$HOME/.agentic/runtime/${version}`
-  const serverDir = `${runtimeRoot}/server`
-  const venvDir = `${runtimeRoot}/venv`
-  const python = `${venvDir}/bin/python`
-  const sourceLinuxDir = windowsPathToWslPath(sourceDir)
-  const requirementsPath = join(sourceDir, "requirements.txt")
-  const requirementsHash = existsSync(requirementsPath)
-    ? createHash("sha256").update(readFileSync(requirementsPath)).digest("hex")
-    : "no-requirements"
-  const marker = `${runtimeRoot}/requirements.sha256`
-  const script = [
-    "set -e",
-    `mkdir -p ${shellEscape(runtimeRoot)}`,
-    `rm -rf ${shellEscape(serverDir)}`,
-    `mkdir -p ${shellEscape(serverDir)}`,
-    `cp -a ${shellEscape(`${sourceLinuxDir}/.`)} ${shellEscape(`${serverDir}/`)}`,
-    `if [ ! -x ${shellEscape(python)} ]; then python3 -m venv ${shellEscape(venvDir)}; fi`,
-    [
-      `if [ -f ${shellEscape(`${serverDir}/requirements.txt`)} ]; then`,
-      `current="$(cat ${shellEscape(marker)} 2>/dev/null || true)"`,
-      `if [ "$current" != ${shellEscape(requirementsHash)} ]; then`,
-      `${shellEscape(python)} -m pip install --disable-pip-version-check -q -r ${shellEscape(`${serverDir}/requirements.txt`)}`,
-      `printf %s ${shellEscape(requirementsHash)} > ${shellEscape(marker)}`,
-      "fi",
-      "fi",
-    ].join(" "),
-    `test -f ${shellEscape(`${serverDir}/main.py`)}`,
-    `test -x ${shellEscape(python)}`,
-  ].join("; ")
-
-  try {
-    const result = spawnSync(wslExe, ["-d", distro, "--", "bash", "-lc", script], {
-      windowsHide: true,
-      timeout: 120_000,
-    })
-    if (result.status !== 0) {
-      const stderr = decodeOutput(result.stderr)
-      const stdout = decodeOutput(result.stdout)
-      writeLog("agentic-backend", "WSL bootstrap failed", { distro, status: result.status, stderr, stdout }, "warn")
-      backendStatus = {
-        ...backendStatus,
-        degraded: true,
-        message:
-          "WSL is installed, but AgentIC could not prepare its Python runtime. Install python3-venv/pip in WSL, then relaunch.",
-        wsl: {
-          available: true,
-          distro,
-          python: true,
-          bootstrapped: false,
-          tools: {},
-          missingTools: ["python3-venv", "pip"],
-          reason: summarizeProcessOutput(stderr || stdout) || "wsl_bootstrap_failed",
-        },
-      }
-      return undefined
-    }
-    return { serverDir, python }
-  } catch (error) {
-    writeLog("agentic-backend", "WSL bootstrap exception", { distro, error: String(error) }, "warn")
-    backendStatus = {
-      ...backendStatus,
-      degraded: true,
-      message:
-        "WSL is installed, but AgentIC could not prepare its Python runtime. Install python3-venv/pip in WSL, then relaunch.",
-      wsl: {
-        available: true,
-        distro,
-        python: true,
-        bootstrapped: false,
-        tools: {},
-        missingTools: ["python3-venv", "pip"],
-        reason: String(error),
-      },
-    }
-    return undefined
-  }
-}
-
-function inspectWslTools(wslExe: string, distro: string): { tools: Record<string, string | null>; missingTools: string[]; pdkRoot?: string } {
-  const tools = ["yosys", "iverilog", "verilator", "openroad", "openlane", "openlane2"]
-  const script = [
-    "for f in ~/.profile ~/.bash_profile ~/.bashrc; do [ -f \"$f\" ] && . \"$f\" >/dev/null 2>&1 || true; done",
-    ...tools.map((tool) => `printf '${tool}='; command -v ${tool} 2>/dev/null || true`),
-    "printf 'PDK_ROOT='; printf '%s\\n' \"${PDK_ROOT:-${PDKPATH:-${PDK_HOME:-}}}\"",
-  ].join("; ")
-
-  try {
-    const result = spawnSync(wslExe, ["-d", distro, "--", "bash", "-lc", script], {
-      windowsHide: true,
-      timeout: 10_000,
-    })
-    const output = decodeOutput(result.stdout)
-    const inventory: Record<string, string | null> = {}
-    let pdkRoot = ""
-    for (const rawLine of output.split(/\r?\n/g)) {
-      const index = rawLine.indexOf("=")
-      if (index === -1) continue
-      const key = rawLine.slice(0, index)
-      const value = rawLine.slice(index + 1).trim()
-      if (key === "PDK_ROOT") {
-        pdkRoot = value
-      } else if (tools.includes(key)) {
-        inventory[key] = value || null
-      }
-    }
-    for (const tool of tools) inventory[tool] ??= null
-    const hasOpenlane = Boolean(inventory.openlane || inventory.openlane2)
-    const missingTools = [
-      ...["yosys", "iverilog", "verilator", "openroad"].filter((tool) => !inventory[tool]),
-      ...(hasOpenlane ? [] : ["openlane"]),
-      ...(pdkRoot ? [] : ["PDK_ROOT"]),
-    ]
-    return { tools: inventory, missingTools, pdkRoot: pdkRoot || undefined }
-  } catch (error) {
-    writeLog("agentic-backend", "WSL tool inventory failed", { distro, error: String(error) }, "warn")
-    return {
-      tools: Object.fromEntries(tools.map((tool) => [tool, null])),
-      missingTools: ["yosys", "iverilog", "verilator", "openroad", "openlane", "PDK_ROOT"],
-    }
-  }
-}
-
-function findRepoServerDir() {
+function findServerDir() {
   const roots = [
+    join(process.resourcesPath, "server"),
     process.cwd(),
     app.getAppPath(),
     dirname(fileURLToPath(import.meta.url)),
@@ -638,6 +226,7 @@ function findRepoServerDir() {
   for (const root of roots) {
     let current = resolve(root)
     for (let depth = 0; depth < 8; depth += 1) {
+      if (existsSync(join(current, "main.py"))) return current
       const candidate = join(current, "server")
       if (existsSync(join(candidate, "main.py"))) return candidate
       const parent = dirname(current)
@@ -734,18 +323,6 @@ function attachProcessLogging(child: ChildProcess) {
   })
 }
 
-async function waitForBackendReady(baseUrl: string) {
-  for (let attempt = 0; attempt < 80; attempt += 1) {
-    if (!backendProcess) return
-    if (await isBridgeHealthy(baseUrl)) {
-      writeLog("agentic-backend", "AgentIC bridge is ready", { url: baseUrl })
-      return
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500))
-  }
-  writeLog("agentic-backend", "AgentIC bridge did not report ready before timeout", { url: baseUrl }, "warn")
-}
-
 function isHealthy(baseUrl: string) {
   return getJsonHealth(baseUrl, HEALTH_PATH, () => true)
 }
@@ -754,6 +331,7 @@ function isBridgeHealthy(baseUrl: string) {
   return getJsonHealth(baseUrl, BRIDGE_HEALTH_PATH, (body) => body?.bridge === true)
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function getJsonHealth(baseUrl: string, path: string, validate: (body: any) => boolean) {
   return new Promise<boolean>((resolve) => {
     const request = httpGet(`${baseUrl.replace(/\/$/, "")}${path}`, (response) => {
@@ -843,33 +421,4 @@ function findFreeLoopbackPort(start: number) {
     }
     tryPort(start)
   })
-}
-
-function decodeOutput(value: Buffer | string | undefined) {
-  if (!value) return ""
-  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value)
-  if (buffer.length >= 2 && buffer[0] !== 0 && buffer[1] === 0) return buffer.toString("utf-16le")
-  return buffer.toString("utf8")
-}
-
-function summarizeProcessOutput(value: string) {
-  return (
-    value
-      .split(/\r?\n/g)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .slice(0, 3)
-      .join(" ") || undefined
-  )
-}
-
-function shellEscape(value: string) {
-  return `'${value.replace(/'/g, "'\\''")}'`
-}
-
-function windowsPathToWslPath(value: string) {
-  const normalized = value.replace(/\\/g, "/")
-  const driveMatch = normalized.match(/^([A-Za-z]):\/(.*)$/)
-  if (!driveMatch) return normalized
-  return `/mnt/${driveMatch[1].toLowerCase()}/${driveMatch[2]}`
 }

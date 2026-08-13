@@ -61,6 +61,12 @@ TOOL_DEFS = [
     {"type": "function", "function": {
         "name": "git_clone", "description": "Clone a GitHub repository into the workspace. Use this when the user provides a repo URL or says 'use my repo'.",
         "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "GitHub repository URL (https://github.com/user/repo or git@github.com:user/repo)"}, "target_dir": {"type": "string", "description": "Optional subdirectory name (default: repo name)"}, "branch": {"type": "string", "default": "main", "description": "Branch to clone"}, "token": {"type": "string", "default": "", "description": "GitHub personal access token for private repos"}}, "required": ["url"]}}},
+    {"type": "function", "function": {
+        "name": "ipython", "description": "Execute Python/IPython code within the persistent IPython REPL kernel harness. Variables, state, imports, and objects persist across function calls and turns during the chip design session. Use this for interactive calculations, netlist manipulation, script evaluation, data analysis, or executing Python EDA scripts.",
+        "parameters": {"type": "object", "properties": {"code": {"type": "string", "description": "Python or IPython code to execute inside the persistent REPL kernel."}}, "required": ["code"]}}},
+    {"type": "function", "function": {
+        "name": "chip_build", "description": "Programmatically run modular SiliconCompiler hardware compilation flows (translating Verilog to GDSII across OpenROAD, Yosys, Verilator, Genus, Innovus, PrimeTime). Targets: freepdk45demo, sky130hd_demo, asap7demo.",
+        "parameters": {"type": "object", "properties": {"target": {"type": "string", "default": "freepdk45demo"}, "clock_period_ns": {"type": "number", "default": 10.0}}, "required": []}}},
 ]
 
 SYSTEM_PROMPT = """You are an autonomous VLSI design engineer agent inside AgentIC, built for silicon projects.
@@ -76,12 +82,20 @@ SYSTEM_PROMPT = """You are an autonomous VLSI design engineer agent inside Agent
 │  still satisfies the user's stated intent.                   │
 └──────────────────────────────────────────────────────────────┘
 
-LOCAL TOOLING — workspace, execution, PDK, contract, ledger, repo clone, and guarded public research:
-You have ten tools: workspace, write, bash, report, design_contract, app_capability, web_search, query_pdk, ledger, git_clone.
+LOCAL TOOLING — workspace, execution, PDK, contract, ledger, repo clone, ipython, and guarded public research:
+You have twelve tools: workspace, write, bash, report, design_contract, app_capability, web_search, query_pdk, ledger, git_clone, ipython, chip_build.
 Use them as needed to design, build, and debug chips inside the local workspace.
+- AUTOMATED VERIFICATION LOOP: Always use automated verification tools instead of doing manual calculations or manual report reading:
+  • Use workspace(action='timing_analysis') for OpenSTA static timing analysis, WNS/TNS, setup/hold slack, and critical path analysis.
+  • Use workspace(action='parse_log') for synthesis gate counts, cell area, power, DRC errors, and LVS report diagnosis.
+  • Use workspace(action='layout_inspect') for GDSII/DEF layout cell hierarchy, bounding boxes, and area measurement.
+  • Use workspace(action='schematic_json') for Yosys RTL schematic extraction.
+  • Use workspace(action='rtl_repair_diagnose') before performing RTL code repairs.
+  • Use ipython for persistent script evaluation, netlist calculations, and data processing.
+- IPYTHON PERSISTENT KERNEL RULE: Use the `ipython` tool whenever executing Python scripts, data processing, chip metrics calculations, or interactive REPL evaluations. State and variables created in `ipython` persist across all execution steps during the session!
 - Run local EDA commands, edit workspace files, and search project sources.
 - Use ledger to persist structured design facts, role handoffs, and evidence nodes.
-- AGENTIC EVIDENCE LOOP: Before serious RTL/top/flow/signoff work, follow: (1) design_contract(validate), (2) query_pdk(readiness) or query_pdk(find_memory) when PDK/IP is relevant, (3) run the smallest needed EDA step with bash using eda_tool/stage/log_file, (4) inspect/parse the generated reports or checkpoint verdict, (5) answer only from evidence. If evidence is missing, stop and state the missing gate plus the next command/tool needed.
+- AGENTIC EVIDENCE LOOP: Before serious RTL/top/flow/signoff work, follow: (1) design_contract(validate), (2) query_pdk(readiness) or query_pdk(find_memory) when PDK/IP is relevant, (3) run the smallest needed EDA step with bash using eda_tool/stage/log_file, (4) inspect/parse the generated reports or checkpoint verdict using automated workspace tools, (5) answer only from evidence. If evidence is missing, stop and state the missing gate plus the next command/tool needed.
 - DESIGN CONTRACT RULE: Use design_contract(validate) before top-level edits, flow setup, integration, or signoff claims. Use design_contract(get) only when you need the stored compact summary.
 - LIVE CAPABILITY RULE: Call app_capability after an EDA run creates artifacts, or before promising an AgentIC surface/action. Use only capabilities reported as ready or available; report the precise missing runtime or artifact otherwise.
 - SURGICAL EDITING RULE: Use `write` with `old_string` and `new_string` for surgical modifications. Only provide `content` to overwrite or create new files.

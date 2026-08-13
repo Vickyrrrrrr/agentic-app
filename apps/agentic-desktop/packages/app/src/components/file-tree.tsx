@@ -329,9 +329,12 @@ export default function FileTree(props: {
   )
 
   const nodes = createMemo(() => {
-    const nodes = file.tree.children(props.path)
+    const rawNodes = file.tree.children(props.path)
+    // Filter out hidden system dotfiles and python caches from tree view
+    const nodes = rawNodes.filter((node) => !node.name.startsWith(".") && node.name !== "__pycache__")
     const current = filter()
     if (!current) return nodes
+
 
     const parent = (path: string) => {
       const idx = path.lastIndexOf("/")

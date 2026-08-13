@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron"
-import type { ElectronAPI, WslServersEvent } from "./types"
+import type { ElectronAPI } from "./types"
 import type { UpdaterState } from "@opencode-ai/app/updater"
 
 const updaterCallbacks = new Set<(state: UpdaterState) => void>()
@@ -14,29 +14,7 @@ const api: ElectronAPI = {
   killSidecar: () => ipcRenderer.invoke("kill-sidecar"),
   installCli: () => ipcRenderer.invoke("install-cli"),
   awaitInitialization: () => ipcRenderer.invoke("await-initialization"),
-  wslServers: {
-    getState: () => ipcRenderer.invoke("wsl-servers-get-state"),
-    subscribe: (cb) => {
-      const handler = (_: unknown, event: WslServersEvent) => cb(event)
-      ipcRenderer.on("wsl-servers-event", handler)
-      void ipcRenderer.invoke("wsl-servers-subscribe")
-      return () => {
-        ipcRenderer.removeListener("wsl-servers-event", handler)
-        void ipcRenderer.invoke("wsl-servers-unsubscribe")
-      }
-    },
-    probeRuntime: () => ipcRenderer.invoke("wsl-servers-probe-runtime"),
-    refreshDistros: () => ipcRenderer.invoke("wsl-servers-refresh-distros"),
-    installWsl: () => ipcRenderer.invoke("wsl-servers-install-wsl"),
-    installDistro: (name) => ipcRenderer.invoke("wsl-servers-install-distro", name),
-    probeDistro: (name) => ipcRenderer.invoke("wsl-servers-probe-distro", name),
-    probeOpencode: (name) => ipcRenderer.invoke("wsl-servers-probe-opencode", name),
-    installOpencode: (name) => ipcRenderer.invoke("wsl-servers-install-opencode", name),
-    openTerminal: (name) => ipcRenderer.invoke("wsl-servers-open-terminal", name),
-    addServer: (distro) => ipcRenderer.invoke("wsl-servers-add", distro),
-    removeServer: (id) => ipcRenderer.invoke("wsl-servers-remove", id),
-    startServer: (id) => ipcRenderer.invoke("wsl-servers-start", id),
-  },
+
   updater: {
     subscribe: async (cb) => {
       updaterCallbacks.add(cb)
@@ -118,28 +96,20 @@ const api: ElectronAPI = {
   recordFatalRendererError: (error) => ipcRenderer.invoke("record-fatal-renderer-error", error),
   getBackendMode: () => ipcRenderer.invoke("get-backend-mode"),
   getBackendStatus: () => ipcRenderer.invoke("get-backend-status"),
-  installWsl: () => ipcRenderer.invoke("install-wsl"),
-  checkDocker: () => ipcRenderer.invoke("check-docker"),
 }
 
 // Always sync the backend URL to localStorage on every startup.
-// This clears any stale port from a previous session (e.g. old dynamic port no longer listening).
-// AGENTIC_OPENCODE_URL is the Hono sidecar — it serves all /opencode/* routes and proxies to Python.
-// AGENTIC_LOCAL_URL is the Python backend direct URL (fallback only).
 try {
   const sidecaUrl = process.env.AGENTIC_OPENCODE_URL?.replace(/\/+$/, "")
   const backendUrl = process.env.AGENTIC_LOCAL_URL?.replace(/\/+$/, "")
-  // Prefer the sidecar — it has all routes and is always available in Electron.
-  // Fall back to direct Python URL only if sidecar is not configured.
   const resolvedUrl = sidecaUrl || backendUrl
   if (resolvedUrl) {
     localStorage.setItem("agentic_local_api_base", resolvedUrl)
   } else {
-    // No URL from main process — clear stale value so DEFAULT_AGENTIC_URL kicks in
     localStorage.removeItem("agentic_local_api_base")
   }
 } catch {
-  // localStorage may not be available in some contexts (e.g. sandboxed preload)
+  // localStorage may not be available in sandboxed preload
 }
 
 contextBridge.exposeInMainWorld("api", api)

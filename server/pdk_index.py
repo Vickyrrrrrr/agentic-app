@@ -9,9 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Suppress visible console windows on Windows when spawning subprocesses (e.g. wsl.exe).
-# Without this, every WSL call pops a flickering cmd.exe window.
-_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
+
 
 
 PDK_ROOT_ENVS = ("PDK_ROOT", "PDKPATH", "PDK_HOME", "AGENTIC_PDK_SEARCH_PATHS")
@@ -62,16 +60,6 @@ def discover_pdk_roots() -> list[str]:
         if candidate.is_dir():
             roots.append(candidate)
 
-    # When the backend runs on Windows native, also probe WSL distros for PDKs
-    # so the capability graph / PDK panel works without running the backend in WSL.
-    for raw in discover_wsl_pdk_roots():
-        try:
-            candidate = Path(raw)
-            if candidate.is_dir():
-                roots.append(candidate)
-        except Exception:
-            pass
-
     seen: set[str] = set()
     result: list[str] = []
     for root in roots:
@@ -81,86 +69,6 @@ def discover_pdk_roots() -> list[str]:
             result.append(key)
     return result
 
-
-def _wsl_distros() -> list[str]:
-    if platform.system().lower() != "windows":
-        return []
-    if not shutil.which("wsl"):
-        return []
-    try:
-        result = subprocess.run(["wsl", "-l", "-q"], capture_output=True, timeout=8, creationflags=_NO_WINDOW)
-        raw = result.stdout.decode("utf-8", errors="replace")
-        if raw.count("\x00") > 4:
-            try:
-                raw = result.stdout.decode("utf-16-le", errors="replace")
-            except Exception:
-                pass
-        distros = [line.strip("*\x00\r\n ") for line in raw.splitlines() if line.strip("*\x00\r\n ")]
-        return distros
-    except Exception:
-        return []
-
-
-def _linux_to_wsl_unc(linux_path: str, distro: str) -> str:
-    p = linux_path.strip().rstrip("/")
-    if p.startswith("/"):
-        p = p[1:]
-    win_path = p.replace("/", "\\")
-    return "\\\\wsl.localhost\\" + distro + "\\" + win_path
-
-
-def _probe_wsl_pdk_roots(distro: str) -> list[str]:
-    # Source export lines from shell config files so PDK_ROOT etc. are picked up
-    # even though we run non-interactively (bash -c, not bash -ic).
-    script = (
-        'for f in ~/.bashrc ~/.profile ~/.bash_profile ~/.zshrc; do '
-        '[ -f "$f" ] && eval "$(grep "^export " "$f" 2>/dev/null)"; done; '
-        'for v in PDK_ROOT PDKPATH PDK_HOME AGENTIC_PDK_SEARCH_PATHS; do '
-        'val=$(printenv "$v" 2>/dev/null || true); '
-        '[ -n "$val" ] && printf "ENV\\t%s\\t%s\\n" "$v" "$val"; '
-        'done; '
-        'for p in "$HOME/.volare" "$HOME/pdks" "$HOME/pdk" "$HOME/.ciel" '
-        '"$HOME/.skywater" "$HOME/.open_pdks" "/usr/share/pdk" "/usr/local/share/pdk" '
-        '"/opt/pdk" "/opt/pdks" "/usr/share/open-pdks"; do '
-        '[ -d "$p" ] && printf "PATH\\t%s\\n" "$p"; '
-        'done'
-    )
-    try:
-        result = subprocess.run(
-            ["wsl", "-d", distro, "--", "bash", "-c", script],
-            capture_output=True,
-            text=True,
-            timeout=12,
-            creationflags=_NO_WINDOW,
-        )
-    except Exception:
-        return []
-    roots: list[str] = []
-    seen: set[str] = set()
-    for line in (result.stdout or "").splitlines():
-        parts = line.split("\t")
-        if len(parts) == 3 and parts[0] == "ENV":
-            for chunk in parts[2].split(":"):
-                chunk = chunk.strip()
-                if not chunk:
-                    continue
-                unc = _linux_to_wsl_unc(chunk, distro)
-                if unc not in seen:
-                    seen.add(unc)
-                    roots.append(unc)
-        elif len(parts) == 2 and parts[0] == "PATH":
-            unc = _linux_to_wsl_unc(parts[1], distro)
-            if unc not in seen:
-                seen.add(unc)
-                roots.append(unc)
-    return roots
-
-
-def discover_wsl_pdk_roots() -> list[str]:
-    roots: list[str] = []
-    for distro in _wsl_distros():
-        roots.extend(_probe_wsl_pdk_roots(distro))
-    return roots
 
 
 

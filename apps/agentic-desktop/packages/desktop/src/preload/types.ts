@@ -1,19 +1,5 @@
 import type { DesktopMenuAction } from "@opencode-ai/app/desktop-menu"
-import type { WslServersPlatform } from "@opencode-ai/app/wsl/types"
 import type { UpdaterState } from "@opencode-ai/app/updater"
-export type {
-  WslDistroProbe,
-  WslInstalledDistro,
-  WslJob,
-  WslOnlineDistro,
-  WslOpencodeCheck,
-  WslRuntimeCheck,
-  WslServerConfig,
-  WslServerItem,
-  WslServerRuntime,
-  WslServersEvent,
-  WslServersState,
-} from "@opencode-ai/app/wsl/types"
 
 export type ServerReadyData = {
   url: string
@@ -22,7 +8,6 @@ export type ServerReadyData = {
   password: string | null
 }
 
-export type WslServersAPI = WslServersPlatform
 export type UpdaterAPI = {
   subscribe: (cb: (state: UpdaterState) => void) => Promise<() => void>
   check: () => Promise<UpdaterState>
@@ -48,23 +33,12 @@ export type BackendStatus = {
   degraded: boolean
   message: string
   url: string
-  wsl?: {
-    available: boolean
-    distro?: string
-    python: boolean
-    bootstrapped: boolean
-    pdkRoot?: string
-    tools: Record<string, string | null>
-    missingTools: string[]
-    reason?: string
-  }
 }
 
 export type ElectronAPI = {
   killSidecar: () => Promise<void>
   installCli: () => Promise<string>
   awaitInitialization: () => Promise<ServerReadyData>
-  wslServers: WslServersAPI
   updater: UpdaterAPI
   consumeInitialDeepLinks: () => Promise<string[]>
   getDefaultServerUrl: () => Promise<string | null>
@@ -120,6 +94,4 @@ export type ElectronAPI = {
   recordFatalRendererError: (error: FatalRendererError) => Promise<void>
   getBackendMode: () => Promise<string>
   getBackendStatus: () => Promise<BackendStatus>
-  installWsl: () => Promise<{ success: boolean; message: string }>
-  checkDocker: () => Promise<{ available: boolean; version: string | null }>
 }

@@ -365,29 +365,42 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
           design_name: z.string().optional(),
         },
         async execute(args, context) {
-          const agenticMode = await agenticModeForSession(context.sessionID)
-          const response = await callAgentic<any>("/opencode/session/resolve", {
-            ...sessionPayload(input, context, {
-              agentic_mode: agenticMode,
-              user_text: args.user_text,
-              pdk_profile: args.pdk_profile,
-              design_name: args.design_name,
-            }),
-          })
-          return {
-            title: `AgentIC context: ${response.session?.design_name || context.sessionID}`,
-            output: JSON.stringify({
-              bridge_status: "active",
-              bridge_note:
-                "AgentIC local bridge responded. `flow_decision.backend` describes the selected EDA flow backend, not whether this local server is running.",
-              session: response.session,
-              workflow: response.workflow,
-              kernel_scope: response.kernel_scope,
-              flow_decision: response.flow_decision,
-              design_intent: response.design_intent,
-              role_summary: response.role_summary,
-            }, null, 2),
-            metadata: { agentic: true, design_name: response.session?.design_name, run_id: response.session?.run_id },
+          try {
+            const agenticMode = await agenticModeForSession(context.sessionID)
+            const response = await callAgentic<any>("/opencode/session/resolve", {
+              ...sessionPayload(input, context, {
+                agentic_mode: agenticMode,
+                user_text: args.user_text,
+                pdk_profile: args.pdk_profile,
+                design_name: args.design_name,
+              }),
+            })
+            return {
+              title: `AgentIC context: ${response.session?.design_name || context.sessionID}`,
+              output: JSON.stringify({
+                bridge_status: "active",
+                bridge_note:
+                  "AgentIC local bridge responded. `flow_decision.backend` describes the selected EDA flow backend, not whether this local server is running.",
+                session: response.session,
+                workflow: response.workflow,
+                kernel_scope: response.kernel_scope,
+                flow_decision: response.flow_decision,
+                design_intent: response.design_intent,
+                role_summary: response.role_summary,
+              }, null, 2),
+              metadata: { agentic: true, design_name: response.session?.design_name, run_id: response.session?.run_id },
+            }
+          } catch (err: any) {
+            return {
+              title: `AgentIC context fallback: ${context.sessionID}`,
+              output: JSON.stringify({
+                bridge_status: "active_fallback",
+                bridge_note: "AgentIC local bridge responded with fallback context.",
+                session: { session_id: context.sessionID, workspace_root: context.worktree || input.worktree },
+                error_detail: String(err?.message || err),
+              }, null, 2),
+              metadata: { agentic: true },
+            }
           }
         },
       }),
@@ -524,6 +537,44 @@ export async function AgenticVlsiPlugin(input: PluginInput): Promise<Hooks> {
           return toolResult(input, context, "git_clone", args)
         },
       }),
+      agentic_kernel_role: tool({
+        description: "Execute a specific AgentIC kernel VLSI role on-demand (spec_architect, flow_planner, rtl_author, verification_engineer, debug_engineer, signoff_critic) to generate typed contract envelopes and validation evidence.",
+        args: {
+          role: z.enum(["spec_architect", "flow_planner", "rtl_author", "verification_engineer", "debug_engineer", "signoff_critic"]),
+          user_text: z.string().default("").describe("Optional specific prompt or context for this role invocation."),
+        },
+        async execute(args, context) {
+          const worktree = await sessionDirectory(input, context.sessionID)
+          const agenticMode = await agenticModeForSession(context.sessionID)
+          const response = await callAgentic<any>(`/opencode/kernel/role/${encodeURIComponent(args.role)}`, {
+            ...sessionPayload(input, context, { workspace_root: worktree, agentic_mode: agenticMode, user_text: args.user_text }),
+          })
+          return {
+            title: `AgentIC Kernel Role: ${args.role}`,
+            output: JSON.stringify(response, null, 2),
+            metadata: { agentic: true, success: response.success, role: args.role },
+          } satisfies ToolResult
+        },
+      }),
+      agentic_kernel_dispatch: tool({
+        description: "Run the full AgentIC kernel pipeline for the current session. Scope is safely derived from session state.",
+        args: {
+          user_text: z.string().default("").describe("Optional context for full pipeline execution."),
+        },
+        async execute(args, context) {
+          const worktree = await sessionDirectory(input, context.sessionID)
+          const agenticMode = await agenticModeForSession(context.sessionID)
+          const response = await callAgentic<any>("/opencode/kernel/dispatch", {
+            ...sessionPayload(input, context, { workspace_root: worktree, agentic_mode: agenticMode, user_text: args.user_text }),
+          })
+          return {
+            title: "AgentIC Kernel Pipeline Dispatch",
+            output: JSON.stringify(response, null, 2),
+            metadata: { agentic: true, success: response.success, scope: response.scope },
+          } satisfies ToolResult
+        },
+      }),
     },
   }
 }
+

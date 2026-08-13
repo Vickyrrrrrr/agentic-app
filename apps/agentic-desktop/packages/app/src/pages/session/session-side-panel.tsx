@@ -16,6 +16,7 @@ import { useDialog } from "@opencode-ai/ui/context/dialog"
 import FileTree from "@/components/file-tree"
 import { SessionContextUsage } from "@/components/session-context-usage"
 import { SessionContextTab, SortableTab, FileVisual, PDKCatalogDock, DRCLVSDashboard, SchematicExplorer, SchematicTabContent, pathFromSchematicTab, SessionWaveformTab } from "@/components/session"
+
 import { useCommand } from "@/context/command"
 import { useFile, type SelectedLineRange } from "@/context/file"
 import { useLanguage } from "@/context/language"
@@ -38,7 +39,7 @@ function renderDiff(value: SnapshotFileDiff | VcsFileDiff): value is RenderDiff 
 }
 
 /**
- * WaveformPanel — scans the real workspace for .vcd / .fst waveform files.
+ * WaveformPanel — scans the real workspace for VCD waveform files.
  * Shows an honest empty state if none exist. Never shows fake data.
  */
 function WaveformPanel(props: { openTab: (tab: string) => void; file: any }) {
@@ -57,7 +58,9 @@ function WaveformPanel(props: { openTab: (tab: string) => void; file: any }) {
         const files: string[] = res.result
           ? res.result.split("\n").map((f) => f.trim()).filter(Boolean)
           : []
-        return files.filter((f) => f.endsWith(".vcd") || f.endsWith(".fst"))
+        // The embedded renderer consumes textual VCD. FST is still a useful
+        // GTKWave artifact, but it is binary and cannot be parsed here.
+        return files.filter((f) => f.endsWith(".vcd"))
       } catch {
         return []
       }
@@ -337,6 +340,7 @@ export function SessionSidePanel(props: {
                             </div>
                           </Tabs.Trigger>
                         </Show>
+
                         <Show when={contextOpen()}>
                           <Tabs.Trigger
                             value="context"
@@ -396,6 +400,8 @@ export function SessionSidePanel(props: {
                         <Show when={reviewOpen() && activeTab() === "review"}>{props.reviewPanel()}</Show>
                       </Tabs.Content>
                     </Show>
+
+
 
                     <Tabs.Content value="empty" class="flex flex-col h-full overflow-hidden contain-strict">
                       <Show when={activeTab() === "empty"}>

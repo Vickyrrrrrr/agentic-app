@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "design_name": "smoke",
+  "created_at": 1783455553.132,
+  "updated_at": 1783455553.142,
+  "intent": {},
+  "design_contract": {
+    "schema_version": "agentic.design_contract.v1",
+    "generated_at": 1783455553.141,
+    "design_name": "smoke",
+    "top_module": null,
+    "top_file": null,
+    "clock_ports": [],
+    "reset_ports": [],
+    "io_ports": [],
+    "submodules": [],
+    "rtl_files": [],
+    "module_count": 0,
+    "modules": {},
+    "constraints": {
+      "sdc_files": [],
+      "clock_defined": false,
+      "clock_names": []
+    },
+    "policy": {
+      "top_structural_only": true,
+      "one_module_per_file": true,
+      "constraints_required": true,
+      "no_behavioral_large_memory": true
+    },
+    "status": {
+      "contract": "invalid",
+      "top_valid": false,
+      "sdc_clock": "missing",
+      "rtl": "missing",
+      "lint": "missing",
+      "simulation": "missing",
+      "synthesis": "missing",
+      "sta": "missing",
+      "drc": "missing",
+      "lvs": "missing",
+      "signoff": "missing"
+    },
+    "validation_issues": [
+      {
+        "code": "top_missing",
+        "severity": "error",
+        "message": "No top module candidate could be inferred from RTL."
+      },
+      {
+        "code": "top_missing",
+        "severity": "error",
+        "message": "Active top module does not exist in scanned RTL."
+      }
+    ],
+    "next_actions": [
+      "Select or create a top module, then rerun design_contract infer.",
+      "Fix top module structure: keep top as ports, wires, instances, and simple wiring only.",
+      "Create or update SDC with create_clock for the detected top clock.",
+      "Run or create a self-checking simulation checkpoint.",
+      "Run STA or inspect timing evidence before timing claims."
+    ],
+    "compact_for_agent": "Design contract: top=unknown file=unknown clocks=none resets=none submodules=0 sdc_clock=false contract_status=invalid lint=missing sim=missing sta=missing drc=missing lvs=missing.",
+    "validated_at": 1783455553.142
+  },
+  "module_ownership": {},
+  "implementation_policy": {},
+  "mental_model": {
+    "spec": {},
+    "interfaces": {},
+    "constraints": {},
+    "assumptions": {},
+    "decisions": {}
+  },
+  "stage_status": {},
+  "artifacts": {},
+  "artifact_index": {
+    "schema_version": "agentic.artifact_kernel.v1",
+    "current_by_key": {},
+    "entries": {},
+    "superseded": {},
+    "revisions": []
+  },
+  "checkpoints": [],
+  "commands": [],
+  "handoffs": [],
+  "evidence_graph": {
+    "nodes": {},
+    "edges": []
+  },
+  "timeline": [
+    {
+      "time": 1783455553.132,
+      "kind": "contract",
+      "action": "design_contract_updated",
+      "payload": {
+        "top_module": null,
+        "top_file": null,
+        "status": "draft",
+        "issue_count": 1
+      }
+    },
+    {
+      "time": 1783455553.142,
+      "kind": "contract",
+      "action": "design_contract_updated",
+      "payload": {
+        "top_module": null,
+        "top_file": null,
+        "status": "invalid",
+        "issue_count": 2
+      }
+    }
+  ]
+}
