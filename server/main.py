@@ -41,11 +41,7 @@ from chat_agent import converse_stream
 from flow_runtime import recommend_flow
 from local_tools import detect_environment, install_command_for, run_bash
 from vlsi_state import DesignStateStore
-from collab_bus import get_collab_bus
 from ipyt_harness import get_rlm_harness
-from collab_container import get_container_manager
-from chip_pr_engine import get_chip_pr_manager
-from chip_space_engine import get_chip_space_manager
 
 SHUTDOWN_REQUESTED = False
 
@@ -1733,7 +1729,7 @@ def _resolve_opencode_mapping(req: OpenCodeSessionRequest) -> dict:
     os.makedirs(design_root, exist_ok=True)
     run_id = str(existing.get("run_id") or f"oc_{fallback}")
     now = time.time()
-    agentic_mode = _normalize_agentic_mode(_session_modes.get(session_id) or existing.get("agentic_mode") or req.agentic_mode or _stored_agentic_mode(session_id))
+    agentic_mode = _normalize_agentic_mode(_session_modes.get(session_id) or _global_agentic_mode or existing.get("agentic_mode") or req.agentic_mode)
     mapping = {
         "schema_version": "agentic.opencode.session.v1",
         "session_id": session_id,
@@ -2082,27 +2078,37 @@ def _require_active_local_runtime(request: Request) -> dict:
 
 
 _session_modes: dict[str, str] = {}
+_global_agentic_mode: str = os.environ.get("AGENTIC_MODE", "advisor")
 
 @app.get("/opencode/session/mode/{session_id}")
 async def opencode_session_mode_get(session_id: str):
-    return {"success": True, "agentic_mode": _stored_agentic_mode(session_id)}
+    return {"success": True, "agentic_mode": _session_modes.get(session_id) or _global_agentic_mode}
 
 @app.post("/opencode/session/mode")
 async def opencode_session_mode_set(request: Request):
+    global _global_agentic_mode
     body = await request.json()
     session_id = str(body.get("session_id") or "").strip()
     mode = _normalize_agentic_mode(body.get("mode"))
+    _global_agentic_mode = mode
+    
+    # Invalidate fast cache for ALL sessions
+    _fast_cache.clear()
+
     if session_id:
         _session_modes[session_id] = mode
-        _fast_cache_invalidate(session_id)
-        data = _read_agentic_sessions()
 
-        existing = data.get(session_id) if isinstance(data.get(session_id), dict) else None
-        if existing is not None:
-            existing["agentic_mode"] = mode
-            existing["updated_at"] = time.time()
-            data[session_id] = existing
-            _write_agentic_sessions(data)
+    data = _read_agentic_sessions()
+    if session_id and session_id in data and isinstance(data[session_id], dict):
+        data[session_id]["agentic_mode"] = mode
+        data[session_id]["updated_at"] = time.time()
+    
+    for sid, sess in data.items():
+        if isinstance(sess, dict):
+            sess["agentic_mode"] = mode
+            _session_modes[sid] = mode
+
+    _write_agentic_sessions(data)
     return {"success": True, "agentic_mode": mode}
 
 @app.post("/opencode/session/resolve")
@@ -2133,10 +2139,11 @@ async def opencode_session_resolve(req: OpenCodeSessionRequest, request: Request
         messages = [{"role": "user", "content": req.user_text or ""}]
         workflow_decision = classify_session_workflow(req.user_text or "", messages)
         is_design_task = workflow_decision.requires_design_kernel or workflow_decision.intent == "DESIGN_TASK"
+        execution_authorized = (mapping.get("agentic_mode") == "builder") or workflow_decision.execution_authorized
         kernel_scope = scope_for_turn(
             is_design_task=is_design_task,
             is_planning_round=workflow_decision.planning_round if is_design_task else False,
-            execution_authorized=workflow_decision.execution_authorized,
+            execution_authorized=execution_authorized,
             wants_diagram_artifact="diagram" in (req.user_text or "").lower() or "mermaid" in (req.user_text or "").lower(),
             repairs_artifact=workflow_decision.mode == "diagram_repair",
         )
@@ -3108,7 +3115,7 @@ async def chat_converse(req: ChatRequest, request: Request):
                     event_pusher=_push_event,
                     is_cancelled=is_run_cancelled,
                     pdk_profile=req.pdk_profile,
-                    agentic_mode=req.agentic_mode or _stored_agentic_mode(req.session_id or "") or "advisor",
+                    agentic_mode=_session_modes.get(req.session_id or "") or _global_agentic_mode or req.agentic_mode or _stored_agentic_mode(req.session_id or ""),
                 ):
                     loop.call_soon_threadsafe(queue.put_nowait, ("event", event))
                 loop.call_soon_threadsafe(queue.put_nowait, ("done", None))

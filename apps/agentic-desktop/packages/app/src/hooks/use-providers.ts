@@ -16,46 +16,48 @@ export const popularProviders = [
 ]
 const popularProviderSet = new Set(popularProviders)
 
+let lastValidProvider: any | undefined
+
 export function useProviders() {
   const serverSync = useServerSync()
   const params = useParams()
   const dir = createMemo(() => decode64(params.dir) ?? "")
   const providers = () => {
+    let current: any | undefined
     if (dir()) {
       const [projectStore] = serverSync.child(dir())
-      if (projectStore.provider_ready) return projectStore.provider
+      if (projectStore?.provider?.all?.size) current = projectStore.provider
+      else if (projectStore?.provider_ready) current = projectStore.provider
     }
-    return serverSync.data.provider
+    if (!current?.all?.size) {
+      if (serverSync.data.provider?.all?.size) current = serverSync.data.provider
+    }
+    if (current?.all?.size) {
+      lastValidProvider = current
+      return current
+    }
+    return lastValidProvider ?? current ?? serverSync.data.provider
   }
   return {
     all: () => providers().all,
     default: () => providers().default,
-    popular: () =>
-      pipe(
-        providers().all,
-        Iterable.map(([, p]) => p),
-        Iterable.filter((p) => popularProviderSet.has(p.id)),
-        (v) => Array.from(v),
-      ),
+    popular: () => {
+      const all = Array.from(providers().all?.values() ?? [])
+      return all.filter((p: any) => popularProviderSet.has(p.id))
+    },
     connected: () => {
-      const connected = new Set(providers().connected)
-      return pipe(
-        providers().all,
-        Iterable.map(([, p]) => p),
-        Iterable.filter((p) => connected.has(p.id)),
-        (v) => Array.from(v),
-      )
+      const connectedSet = new Set(["opencode", "opencode-go", ...(providers().connected ?? [])])
+      const all = Array.from(providers().all?.values() ?? [])
+      return all.filter((p: any) => connectedSet.has(p.id))
     },
     paid: () => {
-      const connected = new Set(providers().connected)
-      return [
-        ...Iterable.filter(
-          providers().all,
-          ([id]) =>
-            connected.has(id) &&
-            (id !== "opencode" || Object.values(providers().all.get(id)?.models ?? {}).some((m) => m.cost?.input)),
-        ),
-      ]
+      const connectedSet = new Set(providers().connected ?? [])
+      const all = (Array.from(providers().all?.entries() ?? []) as [string, any][])
+      return all.filter(
+        ([id, provider]) =>
+          connectedSet.has(id) &&
+          (id !== "opencode" || Object.values(provider?.models ?? {}).some((m: any) => m.cost?.input)),
+      )
     },
   }
 }

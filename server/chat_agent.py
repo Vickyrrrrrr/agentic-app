@@ -1472,9 +1472,11 @@ def converse_stream(messages: list[dict], api_key: str, workspace_root: str, des
 
     is_design_task = workflow_decision.requires_design_kernel or (intent == "DESIGN_TASK")
     execution_authorized = workflow_decision.execution_authorized or _execution_is_authorized(user_text, messages)
-    # Builder mode = execution is authorized. Don't ask the user to "switch to builder mode" — they already did.
+    # Builder mode = execution is authorized & design task kernel is enabled.
+    # Don't ask the user to "switch to builder mode" — they already did.
     if agentic_mode == "builder":
         execution_authorized = True
+        is_design_task = True
     is_planning_round = workflow_decision.planning_round if is_design_task else False
     needs_spec_clarification = not execution_authorized and _needs_spec_clarification(user_text)
 

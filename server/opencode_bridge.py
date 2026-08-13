@@ -39,13 +39,16 @@ def run_tool(payload):
     return {"success": True, "result": result}
 
 def run_get_mode(payload):
+    import main
     session_id = payload.get("session_id")
-    mode = _stored_agentic_mode(session_id)
+    mode = _session_modes.get(session_id) or getattr(main, "_global_agentic_mode", "advisor")
     return {"success": True, "agentic_mode": mode}
 
 def run_set_mode(payload):
+    import main
     session_id = payload.get("session_id")
     mode = _normalize_agentic_mode(payload.get("mode"))
+    main._global_agentic_mode = mode
     if session_id:
         _session_modes[session_id] = mode
         data = _read_agentic_sessions()
@@ -143,11 +146,14 @@ def run_auth_logout(payload):
     return {"ok": True}
 
 def run_pipeline(payload):
+    import main
     user_text = payload.get("user_text", "")
+    session_id = payload.get("session_id", "")
+    mode = payload.get("agentic_mode") or _session_modes.get(session_id) or getattr(main, "_global_agentic_mode", "advisor")
     req = OpenCodeSessionRequest(
-        session_id=payload.get("session_id", ""),
+        session_id=session_id,
         agent="agentic-vlsi",
-        agentic_mode=payload.get("agentic_mode", "advisor"),
+        agentic_mode=mode,
         workspace_root=payload.get("workspace_root", ""),
         design_name=payload.get("design_name", ""),
         user_text=user_text

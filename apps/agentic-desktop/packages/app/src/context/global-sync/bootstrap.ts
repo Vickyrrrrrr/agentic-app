@@ -183,7 +183,12 @@ function warmSessions(input: {
 export const loadProvidersQuery = (scope: ServerScope, directory: string | null, sdk: OpencodeClient) =>
   queryOptions({
     queryKey: [scope, directory, "providers"],
-    queryFn: () => retry(() => sdk.provider.list().then((x) => normalizeProviderList(x.data!))),
+    queryFn: () =>
+      retry(() =>
+        sdk.provider.list().then((x) =>
+          x?.data ? normalizeProviderList(x.data) : normalizeProviderList({ all: [], connected: [], default: {} } as any),
+        ),
+      ),
   })
 
 export const loadAgentsQuery = (scope: ServerScope, directory: string | null, sdk: OpencodeClient) =>
@@ -312,6 +317,7 @@ export async function bootstrapDirectory(input: {
       input.mcp && (() => input.queryClient.fetchQuery(loadMcpQuery(input.scope, input.directory, input.sdk))),
       () =>
         input.queryClient.fetchQuery(loadProvidersQuery(input.scope, input.directory, input.sdk)).catch((err) => {
+          if (String(err).includes("499") || String(err).includes("empty response body")) return
           const project = getFilename(input.directory)
           showToast({
             variant: "error",

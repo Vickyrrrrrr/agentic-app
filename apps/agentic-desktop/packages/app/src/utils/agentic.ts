@@ -21,9 +21,9 @@ async function agenticModeForSession(base: string, session: AgenticSessionPayloa
       if (data?.success && data.agentic_mode) return data.agentic_mode
     }
   } catch {
-    // Fall back to advisor when the bridge is not ready yet.
+    // Fall back to localStorage or advisor when bridge is not ready yet
   }
-  return "advisor"
+  return localStorage.getItem("agentic_global_mode") || "advisor"
 }
 
 type AgenticToolResponse = {

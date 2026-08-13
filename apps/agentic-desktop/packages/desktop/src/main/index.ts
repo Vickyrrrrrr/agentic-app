@@ -240,12 +240,15 @@ const main = Effect.gen(function* () {
   useEnvProxy()
   app.commandLine.appendSwitch("proxy-bypass-list", "<-loopback>")
 
-  // Linux performance optimizations: GPU hardware acceleration
+  // Linux performance optimizations: hardware GPU acceleration on bare-metal, software rendering on WSL
   if (process.platform === "linux") {
     const isWsl = Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)
-    app.commandLine.appendSwitch("ignore-gpu-blocklist")
-    app.commandLine.appendSwitch("enable-gpu-rasterization")
-    if (!isWsl) {
+    if (isWsl) {
+      app.commandLine.appendSwitch("disable-gpu")
+      app.commandLine.appendSwitch("disable-gpu-compositing")
+    } else {
+      app.commandLine.appendSwitch("ignore-gpu-blocklist")
+      app.commandLine.appendSwitch("enable-gpu-rasterization")
       app.commandLine.appendSwitch("enable-zero-copy")
       app.commandLine.appendSwitch("enable-native-gpu-memory-buffers")
     }
