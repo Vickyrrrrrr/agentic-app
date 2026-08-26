@@ -1,25 +1,4 @@
-import { existsSync } from "node:fs"
-import path from "node:path"
-import { fileURLToPath } from "node:url"
-
 import type { Configuration } from "electron-builder"
-
-const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
-const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)))
-const slangRuntimeDir = path.join(desktopDir, "resources", "tools", "slang")
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function verifyAgenticBackendRuntime(context: any) {
-  const platform = context.electronPlatformName || process.platform
-  const arch = process.arch
-
-  const slangPath = path.join(slangRuntimeDir, `${platform}-${arch}`, "slang-server")
-  if (channel !== "dev" && !existsSync(slangPath)) {
-    throw new Error(
-      `Missing bundled Slang runtime: ${slangPath}. Build the exact platform/arch binary before beta/production packaging.`,
-    )
-  }
-}
 
 const channel = (() => {
   const raw = process.env.OPENCODE_CHANNEL
@@ -34,7 +13,6 @@ const getBase = (): Configuration => ({
     buildResources: "resources",
   },
   files: ["out/**/*", "resources/**/*"],
-  beforePack: verifyAgenticBackendRuntime,
   extraResources: [
     {
       from: "native/",
@@ -46,15 +24,6 @@ const getBase = (): Configuration => ({
       to: "backend/",
       filter: ["**/*"],
     },
-    ...(existsSync(slangRuntimeDir)
-      ? [{
-          // Platform-specific Slang binaries remain outside asar so the Hono
-          // sidecar can execute them directly.
-          from: "resources/tools/slang/",
-          to: "tools/slang/",
-          filter: ["**/*"],
-        }]
-      : []),
     {
       from: "resources/license.json",
       to: "license.json",

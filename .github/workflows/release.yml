@@ -5,12 +5,6 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-env:
-  # Pin the actual SystemVerilog language server, not the unrelated shader
-  # project also named "slang". Update deliberately after validation.
-  SLANG_SERVER_REPOSITORY: hudson-trading/slang-server
-  SLANG_SERVER_REF: v0.2.8
-
 jobs:
   prepare-release:
     name: Prepare buildstack release
@@ -117,72 +111,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libarchive-tools ninja-build g++-12
-
-      - name: Install macOS Slang build dependencies
-        if: runner.os == 'macOS'
-        run: brew install cmake ninja
-
-      - name: Build bundled Slang language server
-        shell: bash
-        env:
-          RUNTIME_PLATFORM: ${{ matrix.runtime_platform }}
-          RUNTIME_ARCH: ${{ matrix.runtime_arch }}
-        run: |
-          # GCC 11 on ubuntu-22.04 has a std::variant bug that fails to compile
-          # slang-server (default member initializer required before end of class).
-          # Use GCC 12 on Linux only; macOS runners keep their default Clang.
-          if [[ "${RUNTIME_PLATFORM}" == "linux" ]]; then
-            export CC=/usr/bin/gcc-12
-            export CXX=/usr/bin/g++-12
-          fi
-          git clone --depth 1 --branch "$SLANG_SERVER_REF" --recurse-submodules \
-            "https://github.com/${SLANG_SERVER_REPOSITORY}.git" "$RUNNER_TEMP/slang-server"
-          cmake -S "$RUNNER_TEMP/slang-server" -B "$RUNNER_TEMP/slang-server/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/slang-server/build" --target slang_server --parallel
-
-          slang_binary="$RUNNER_TEMP/slang-server/build/bin/slang-server"
-          if [[ ! -x "$slang_binary" ]]; then
-            echo "Expected Slang language server was not produced: $slang_binary"
-            exit 1
-          fi
-
-          destination="apps/agentic-desktop/packages/desktop/resources/tools/slang/${RUNTIME_PLATFORM}-${RUNTIME_ARCH}"
-          mkdir -p "$destination"
-          cp "$slang_binary" "$destination/slang-server"
-          export SLANG_BINARY="$destination/slang-server"
-          python - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
-
-          binary = Path(os.environ["SLANG_BINARY"])
-          digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-          binary.with_name("slang-server.sha256").write_text(f"{digest}  {binary.name}\n", encoding="utf-8")
-          PY
-
-      - name: Verify bundled Slang runtime
-        shell: bash
-        env:
-          RUNTIME_PLATFORM: ${{ matrix.runtime_platform }}
-          RUNTIME_ARCH: ${{ matrix.runtime_arch }}
-        run: |
-          binary="apps/agentic-desktop/packages/desktop/resources/tools/slang/${RUNTIME_PLATFORM}-${RUNTIME_ARCH}/slang-server"
-          test -f "$binary"
-          test -f "$(dirname "$binary")/slang-server.sha256"
-          export SLANG_BINARY="$binary"
-          python - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
-
-          binary = Path(os.environ["SLANG_BINARY"])
-          expected = binary.with_name("slang-server.sha256").read_text(encoding="utf-8").split()[0]
-          actual = hashlib.sha256(binary.read_bytes()).hexdigest()
-          if actual != expected:
-              raise SystemExit(f"Slang runtime checksum mismatch: {binary}")
-          PY
-          "$binary" --version
+          sudo apt-get install -y build-essential libarchive-tools
 
       - name: Install desktop dependencies
         working-directory: apps/agentic-desktop
