@@ -76,12 +76,6 @@ jobs:
             runtime_platform: linux
             runtime_arch: x64
             package_flag: --linux AppImage
-          # macOS Intel
-          - os: macos-13
-            platform: macos-intel
-            runtime_platform: darwin
-            runtime_arch: x64
-            package_flag: --mac dmg zip --x64
           # macOS Apple Silicon
           - os: macos-14
             platform: macos-apple-silicon
@@ -102,10 +96,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: |
-            server/requirements-build.txt
-            server/requirements.txt
 
       - name: Install Linux packaging dependencies
         if: runner.os == 'Linux'
