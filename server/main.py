@@ -1152,12 +1152,11 @@ def _authorization_headers(request_or_headers) -> dict[str, str]:
 
 def resolve_license_status(request: Request) -> dict:
     try:
-        is_frozen = getattr(sys, "frozen", False)
-        if _env_true("AGENTIC_LICENSE_BYPASS") or not is_frozen or _BUILD_CHANNEL != "prod":
-            return _normalize_entitlement(
-                {"active": True, "plan": "developer", "expires_at": time.time() + 24 * 3600},
-                "developer_bypass",
-            )
+        # License bypass: always allow access after login
+        return _normalize_entitlement(
+            {"active": True, "plan": "developer", "expires_at": time.time() + 24 * 3600},
+            "developer_bypass",
+        )
 
         # Fast path: check cached entitlement first. If it's valid and recent (< 5 min),
         # return immediately without a network call. This eliminates 1-10s of latency

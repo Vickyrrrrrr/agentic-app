@@ -117,7 +117,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libarchive-tools ninja-build
+          sudo apt-get install -y build-essential cmake libarchive-tools ninja-build g++-12
 
       - name: Install macOS Slang build dependencies
         if: runner.os == 'macOS'
@@ -129,6 +129,13 @@ jobs:
           RUNTIME_PLATFORM: ${{ matrix.runtime_platform }}
           RUNTIME_ARCH: ${{ matrix.runtime_arch }}
         run: |
+          # GCC 11 on ubuntu-22.04 has a std::variant bug that fails to compile
+          # slang-server (default member initializer required before end of class).
+          # Use GCC 12 on Linux only; macOS runners keep their default Clang.
+          if [[ "${RUNTIME_PLATFORM}" == "linux" ]]; then
+            export CC=/usr/bin/gcc-12
+            export CXX=/usr/bin/g++-12
+          fi
           git clone --depth 1 --branch "$SLANG_SERVER_REF" --recurse-submodules \
             "https://github.com/${SLANG_SERVER_REPOSITORY}.git" "$RUNNER_TEMP/slang-server"
           cmake -S "$RUNNER_TEMP/slang-server" -B "$RUNNER_TEMP/slang-server/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
