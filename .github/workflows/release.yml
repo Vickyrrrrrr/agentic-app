@@ -124,6 +124,7 @@ jobs:
           AGENTIC_MODE: advisor
           OPENCODE_DEFAULT_AGENT: agentic-vlsi
           OPENCODE_CHANNEL: prod
+          NODE_OPTIONS: --max-old-space-size=4096
         run: bun run build
 
       - name: Publish to GitHub Releases
