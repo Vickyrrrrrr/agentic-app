@@ -6,6 +6,7 @@ import { ProviderIcon } from "@opencode-ai/ui/provider-icon"
 import { Tag } from "@opencode-ai/ui/tag"
 import { Tooltip } from "@opencode-ai/ui/tooltip"
 import { type Component, Show } from "solid-js"
+import { showLazyDialog } from "@/utils/lazy-dialog"
 import { useLocal } from "@/context/local"
 import { popularProviders, useProviders } from "@/hooks/use-providers"
 import { ModelTooltip } from "./model-tooltip"
@@ -20,13 +21,13 @@ export const DialogSelectModelUnpaid: Component<{ model?: ModelState }> = (props
   const language = useLanguage()
 
   const connect = (provider: string) => {
-    void import("./dialog-connect-provider").then((x) => {
+    showLazyDialog(() => import("./dialog-connect-provider"), (x) => {
       dialog.show(() => <x.DialogConnectProvider provider={provider} />)
     })
   }
 
   const all = () => {
-    void import("./dialog-select-provider").then((x) => {
+    showLazyDialog(() => import("./dialog-select-provider"), (x) => {
       dialog.show(() => <x.DialogSelectProvider />)
     })
   }

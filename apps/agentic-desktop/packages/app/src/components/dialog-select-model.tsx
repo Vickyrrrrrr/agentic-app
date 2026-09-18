@@ -12,6 +12,7 @@ import { List } from "@opencode-ai/ui/list"
 import { Tooltip } from "@opencode-ai/ui/tooltip"
 import { ModelTooltip } from "./model-tooltip"
 import { useLanguage } from "@/context/language"
+import { showLazyDialog } from "@/utils/lazy-dialog"
 
 const isFree = (provider: string, cost: { input: number } | undefined) =>
   provider === "opencode" && (!cost || cost.input === 0)
@@ -112,14 +113,14 @@ export function ModelSelectorPopover(props: {
 
   const handleManage = () => {
     close("manage")
-    void import("./dialog-manage-models").then((x) => {
+    showLazyDialog(() => import("./dialog-manage-models"), (x) => {
       dialog.show(() => <x.DialogManageModels />)
     })
   }
 
   const handleConnectProvider = () => {
     close("provider")
-    void import("./dialog-select-provider").then((x) => {
+    showLazyDialog(() => import("./dialog-select-provider"), (x) => {
       dialog.show(() => <x.DialogSelectProvider />)
     })
   }
@@ -201,13 +202,13 @@ export const DialogSelectModel: Component<{ provider?: string; model?: ModelStat
   const language = useLanguage()
 
   const provider = () => {
-    void import("./dialog-select-provider").then((x) => {
+    showLazyDialog(() => import("./dialog-select-provider"), (x) => {
       dialog.show(() => <x.DialogSelectProvider />)
     })
   }
 
   const manage = () => {
-    void import("./dialog-manage-models").then((x) => {
+    showLazyDialog(() => import("./dialog-manage-models"), (x) => {
       dialog.show(() => <x.DialogManageModels />)
     })
   }

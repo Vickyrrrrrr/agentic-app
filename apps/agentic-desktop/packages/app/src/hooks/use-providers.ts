@@ -18,6 +18,10 @@ const popularProviderSet = new Set(popularProviders)
 
 let lastValidProvider: any | undefined
 
+// Same shape as the server-sync EMPTY fallback: consumers can always read
+// .all/.connected/.default, and an empty set renders an empty picker.
+const EMPTY_PROVIDERS = { all: new Map(), connected: [], default: {} }
+
 export function useProviders() {
   const serverSync = useServerSync()
   const params = useParams()
@@ -36,7 +40,7 @@ export function useProviders() {
       lastValidProvider = current
       return current
     }
-    return lastValidProvider ?? current ?? serverSync.data.provider
+    return lastValidProvider ?? current ?? serverSync.data.provider ?? EMPTY_PROVIDERS
   }
   return {
     all: () => providers().all,

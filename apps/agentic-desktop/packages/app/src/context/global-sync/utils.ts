@@ -29,7 +29,7 @@ export function normalizeProviderList(input: ProviderListResponse): NormalizedPr
             {
               ...provider,
               models: Object.fromEntries(
-                Object.entries(provider.models).filter(([, info]) => info.status !== "deprecated"),
+                Object.entries(provider.models ?? {}).filter(([, info]) => info.status !== "deprecated"),
               ),
             },
           ] as const,

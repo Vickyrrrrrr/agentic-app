@@ -6,6 +6,7 @@ import { Icon } from "@opencode-ai/ui/icon"
 import { IconButton } from "@opencode-ai/ui/icon-button"
 import { List, type ListRef } from "@opencode-ai/ui/list"
 import { ProviderIcon } from "@opencode-ai/ui/provider-icon"
+import { showLazyDialog } from "@/utils/lazy-dialog"
 import { Spinner } from "@opencode-ai/ui/spinner"
 import { TextField } from "@opencode-ai/ui/text-field"
 import { showToast } from "@/utils/toast"
@@ -25,7 +26,7 @@ export function DialogConnectProvider(props: { provider: string }) {
   const providers = useProviders()
 
   const all = () => {
-    void import("./dialog-select-provider").then((x) => {
+    showLazyDialog(() => import("./dialog-select-provider"), (x) => {
       dialog.show(() => <x.DialogSelectProvider />)
     })
   }

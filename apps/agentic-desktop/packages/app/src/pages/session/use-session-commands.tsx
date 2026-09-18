@@ -6,6 +6,7 @@ import { useFile, selectionFromLines, type FileSelection, type SelectedLineRange
 import { useLanguage } from "@/context/language"
 import { useLayout } from "@/context/layout"
 import { useLocal } from "@/context/local"
+import { showLazyDialog } from "@/utils/lazy-dialog"
 import { usePermission } from "@/context/permission"
 import { usePlatform } from "@/context/platform"
 import { usePrompt } from "@/context/prompt"
@@ -253,7 +254,7 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
   }
 
   const chooseModel = () => {
-    void import("@/components/dialog-select-model").then((x) => {
+    showLazyDialog(() => import("@/components/dialog-select-model"), (x) => {
       dialog.show(() => <x.DialogSelectModel model={local.model} />)
     })
   }

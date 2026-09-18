@@ -39,7 +39,9 @@ export const { use: useModels, provider: ModelsProvider } = createSimpleContext(
 
     const available = createMemo(() =>
       providers.connected().flatMap((p) =>
-        Object.values(p.models).map((m) => ({
+        // A provider without a models map (misconfigured/disabled) must
+        // vanish from the picker, never crash it.
+        Object.values(p.models ?? {}).map((m) => ({
           ...m,
           provider: p,
         })),
@@ -94,11 +96,14 @@ export const { use: useModels, provider: ModelsProvider } = createSimpleContext(
     })
 
     const list = createMemo(() =>
-      available().map((m) => ({
-        ...m,
-        name: m.name.replace("(latest)", "").trim(),
-        latest: m.name.includes("(latest)"),
-      })),
+      available().map((m) => {
+        const name = m.name ?? m.id
+        return {
+          ...m,
+          name: name.replace("(latest)", "").trim(),
+          latest: name.includes("(latest)"),
+        }
+      }),
     )
 
     const find = (key: ModelKey) => list().find((m) => m.id === key.modelID && m.provider.id === key.providerID)
