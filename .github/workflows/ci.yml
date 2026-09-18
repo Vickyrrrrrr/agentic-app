@@ -37,6 +37,11 @@ jobs:
       - name: Run engine tests
         run: python -m pytest tests/ -q
 
+      - name: Verify OpenAPI contract is fresh
+        run: |
+          python scripts/export_openapi.py --out /tmp/engine.json
+          python -c "import json; a=json.load(open('/tmp/engine.json')); b=json.load(open('../docs/openapi/engine.json')); assert a==b, 'docs/openapi/engine.json is stale — run scripts/export_openapi.py and commit it'"
+
   backend-boot-smoke:
     name: Engine boot smoke (linux)
     runs-on: ubuntu-latest
@@ -91,6 +96,69 @@ jobs:
 
       - name: Lint
         run: bun run lint
+
+  app-unit-tests:
+    name: Desktop unit tests (bun)
+    # Observe-only for now: file-tree.test.ts has a pre-existing
+    # bun/happydom ESM interop failure. Gate it once that is fixed.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install desktop dependencies
+        working-directory: apps/agentic-desktop
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+        run: bun install
+
+      - name: Run app unit tests
+        working-directory: apps/agentic-desktop/packages/app
+        run: bun test --preload ./happydom.ts ./src
+
+  typecheck-ratchet:
+    name: Typecheck no-growth ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install desktop dependencies
+        working-directory: apps/agentic-desktop
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+        run: bun install
+
+      # 67 pre-existing errors in forked UI code (see commit history).
+      # This gate fails only when the count grows: fix old ones and
+      # lower .github/typecheck-budget.txt with the same PR.
+      - name: Count type errors and enforce budget
+        working-directory: apps/agentic-desktop
+        run: |
+          ./node_modules/.bin/tsgo -b packages/app > /tmp/typecheck.log 2>&1
+          tsgo_exit=$?
+          if [ "$tsgo_exit" -ne 0 ] && [ "$tsgo_exit" -ne 2 ]; then
+            echo "tsgo crashed (exit $tsgo_exit):"; tail -20 /tmp/typecheck.log; exit 1
+          fi
+          errors=$(grep -c 'error TS' /tmp/typecheck.log || true)
+          budget=$(cat ../../.github/typecheck-budget.txt)
+          echo "type errors: $errors (budget $budget)"
+          if [ "$errors" -gt "$budget" ]; then
+            echo "NEW TYPE ERRORS INTRODUCED"; grep 'error TS' /tmp/typecheck.log | head -20; exit 1
+          fi
 
   prepare-release:
     name: Prepare buildstack release
