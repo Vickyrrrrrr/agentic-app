@@ -1,5 +1,8 @@
 # AgentIC: local VLSI design agent
 
+[![CI](https://github.com/Vickyrrrrrr/agentic-app/actions/workflows/ci.yml/badge.svg)](https://github.com/Vickyrrrrrr/agentic-app/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 AgentIC runs an AI chip-design loop on your own machine: it writes Verilog,
 drives your installed EDA tools (Yosys, OpenROAD, Verilator, …), reads your
 PDKs, and parses the resulting logs into structured results. No accounts,

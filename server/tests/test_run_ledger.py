@@ -12,15 +12,12 @@ def test_append_read_roundtrip(tmp_path):
     assert all("timestamp" in e for e in events)
 
 
-def test_null_keys_dropped_like_jsonl_envelope():
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as d:
-        db = run_ledger.db_path_for(d)
-        run_ledger.append_event(db, {"type": "progress"})
-        (event,) = run_ledger.read_events(db)
-        assert "run_id" not in event
-        assert event["type"] == "progress"
+def test_null_keys_dropped_like_jsonl_envelope(tmp_path):
+    db = run_ledger.db_path_for(tmp_path)
+    run_ledger.append_event(db, {"type": "progress"})
+    (event,) = run_ledger.read_events(db)
+    assert "run_id" not in event
+    assert event["type"] == "progress"
 
 
 def test_run_id_filter_and_limit(tmp_path):

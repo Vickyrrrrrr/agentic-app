@@ -157,6 +157,26 @@ def test_capability_matrix_and_pdk_select_empty():
     assert select_pdk({"pdks": []}, "") is None
 
 
+def test_index_pdk_dir_empty_dir_shape(tmp_path):
+    from agentic_server.pdk_index import index_pdk_dir
+
+    idx = index_pdk_dir(tmp_path)
+    assert idx["path"] == str(tmp_path)
+    for key in ("class", "family", "readiness", "libraries"):
+        assert key in idx
+
+
+def test_dispatch_unknown_tool_is_clean_error(tmp_path):
+    from agentic_server.agent_tools import dispatch_tool, workspace_tool
+
+    assert dispatch_tool("nope_nonexistent", {}, str(tmp_path)).startswith(
+        "Error: unknown tool"
+    )
+    assert workspace_tool("list", str(tmp_path), ".", "*.v", "").startswith(
+        "No files matching"
+    )
+
+
 def test_parse_module_signature_and_ports(tmp_path):
     # Regression: workspace_tool passed (path, root, module) while the
     # definition took 2 args -> every parse_module call raised TypeError.
