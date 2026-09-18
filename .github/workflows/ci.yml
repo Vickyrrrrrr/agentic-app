@@ -99,9 +99,6 @@ jobs:
 
   app-unit-tests:
     name: Desktop unit tests (bun)
-    # Observe-only for now: file-tree.test.ts has a pre-existing
-    # bun/happydom ESM interop failure. Gate it once that is fixed.
-    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -152,12 +149,12 @@ jobs:
           ls ./node_modules/.bin/tsgo
           ./node_modules/.bin/tsgo -b packages/app > /tmp/typecheck.log 2>&1 || tsgo_exit=$?
           tsgo_exit="${tsgo_exit:-0}"
-          echo "tsgo exit: $tsgo_exit"
+          echo "tsgo exit: $tsgo_exit (0/1/2 all mean 'ran'; anything else is a crash)"
           errors=$(grep -c 'error TS' /tmp/typecheck.log || true)
           echo "type errors counted: $errors"
           budget=$(cat ../../.github/typecheck-budget.txt)
           echo "budget: $budget"
-          if [ "$tsgo_exit" -ne 0 ] && [ "$tsgo_exit" -ne 2 ]; then
+          if [ "$tsgo_exit" -ne 0 ] && [ "$tsgo_exit" -ne 1 ] && [ "$tsgo_exit" -ne 2 ]; then
             echo "tsgo crashed:"; tail -20 /tmp/typecheck.log; exit 1
           fi
           if [ "$errors" -gt "$budget" ]; then

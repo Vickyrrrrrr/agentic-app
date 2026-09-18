@@ -10,6 +10,12 @@ beforeAll(async () => {
     useParams: () => ({}),
     useLocation: () => ({ pathname: "/" }),
   }))
+  // Cut the transitive chain (session-layout -> ... -> router) entirely:
+  // file-tree only uses sessionLayout?.tabs(), and the real chain pulls
+  // the router's default-condition bundle, which bun cannot named-import.
+  mock.module("@/pages/session/session-layout", () => ({
+    useSessionLayout: () => undefined,
+  }))
   mock.module("@/context/file", () => ({
     useFile: () => ({
       tree: {
@@ -30,6 +36,18 @@ beforeAll(async () => {
   mock.module("@opencode-ai/ui/file-icon", () => ({ FileIcon: () => null }))
   mock.module("@opencode-ai/ui/icon", () => ({ Icon: () => null }))
   mock.module("@opencode-ai/ui/tooltip", () => ({ Tooltip: (props: { children?: unknown }) => props.children }))
+  mock.module("@opencode-ai/ui/context-menu", () => ({
+    ContextMenu: {
+      Trigger: (props: { children?: unknown }) => props.children,
+      Portal: (props: { children?: unknown }) => props.children,
+      Content: (props: { children?: unknown }) => props.children,
+      Item: (props: { children?: unknown }) => props.children,
+      ItemLabel: (props: { children?: unknown }) => props.children,
+    },
+  }))
+  mock.module("@/components/session/schematic-viewer", () => ({
+    schematicTab: () => ({}),
+  }))
   const mod = await import("./file-tree")
   shouldListRoot = mod.shouldListRoot
   shouldListExpanded = mod.shouldListExpanded
