@@ -148,17 +148,22 @@ jobs:
       - name: Count type errors and enforce budget
         working-directory: apps/agentic-desktop
         run: |
-          ./node_modules/.bin/tsgo -b packages/app > /tmp/typecheck.log 2>&1
-          tsgo_exit=$?
-          if [ "$tsgo_exit" -ne 0 ] && [ "$tsgo_exit" -ne 2 ]; then
-            echo "tsgo crashed (exit $tsgo_exit):"; tail -20 /tmp/typecheck.log; exit 1
-          fi
+          set -x
+          ls ./node_modules/.bin/tsgo
+          ./node_modules/.bin/tsgo -b packages/app > /tmp/typecheck.log 2>&1 || tsgo_exit=$?
+          tsgo_exit="${tsgo_exit:-0}"
+          echo "tsgo exit: $tsgo_exit"
           errors=$(grep -c 'error TS' /tmp/typecheck.log || true)
+          echo "type errors counted: $errors"
           budget=$(cat ../../.github/typecheck-budget.txt)
-          echo "type errors: $errors (budget $budget)"
+          echo "budget: $budget"
+          if [ "$tsgo_exit" -ne 0 ] && [ "$tsgo_exit" -ne 2 ]; then
+            echo "tsgo crashed:"; tail -20 /tmp/typecheck.log; exit 1
+          fi
           if [ "$errors" -gt "$budget" ]; then
             echo "NEW TYPE ERRORS INTRODUCED"; grep 'error TS' /tmp/typecheck.log | head -20; exit 1
           fi
+          echo "ratchet OK: $errors <= $budget"
 
   prepare-release:
     name: Prepare buildstack release

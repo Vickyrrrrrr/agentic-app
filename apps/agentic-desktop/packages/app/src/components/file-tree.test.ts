@@ -8,6 +8,7 @@ beforeAll(async () => {
   mock.module("@solidjs/router", () => ({
     useNavigate: () => () => undefined,
     useParams: () => ({}),
+    useLocation: () => ({ pathname: "/" }),
   }))
   mock.module("@/context/file", () => ({
     useFile: () => ({

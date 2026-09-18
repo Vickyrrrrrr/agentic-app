@@ -171,7 +171,7 @@
     },
     "packages/desktop": {
       "name": "@agentic-ai/desktop",
-      "version": "1.0.35",
+      "version": "1.0.36",
       "dependencies": {
         "@zip.js/zip.js": "2.7.62",
         "effect": "catalog:",

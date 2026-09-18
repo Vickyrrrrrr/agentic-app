@@ -31,6 +31,10 @@ AGENTIC_LOCAL_URL=http://127.0.0.1:7860 bun run dev:agentic
 - Keep it terse: no marketing copy in code or docs, no ASCII banners,
   no commented-out code.
 - CI (`ci.yml`) must stay green: pytest, boot smoke, oxlint.
+- API changes require regenerating `docs/openapi/engine.json` in a
+  pinned env (`pip install -r server/requirements.txt`, then
+  `server/scripts/export_openapi.py`) — the freshness gate compares
+  byte-for-byte, and unpinned FastAPI/Pydantic render different schemas.
 
 ## PRs
 
