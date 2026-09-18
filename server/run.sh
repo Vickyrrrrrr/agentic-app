@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-# ─────────────────────────────────────────────────────────────────────────────
-# AgentIC server launcher — Linux (bare metal + WSL) & macOS
-#
-# Usage:
-#   ./run.sh          — run in foreground (logs visible in terminal)
-#   ./run.sh &        — run in background (standard Cadence-style)
-# ─────────────────────────────────────────────────────────────────────────────
+# AgentIC server launcher (Linux + WSL; macOS works).
+# ./run.sh    foreground | ./run.sh &   background
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,8 +74,6 @@ _open_browser() {
 if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ] || [ "$(uname)" = "Darwin" ]; then
   _open_browser &
 fi
-
-export AGENTIC_LICENSE_STATUS_URL="${AGENTIC_LICENSE_STATUS_URL:-https://api.buildstack.live/license/status}"
 
 cd "$SCRIPT_DIR"
 exec python3 main.py

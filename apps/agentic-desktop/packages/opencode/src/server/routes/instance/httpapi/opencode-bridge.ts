@@ -594,30 +594,6 @@ export const opencodeBridgeRoute = HttpRouter.use((router) =>
       }),
     )
 
-    // 6. POST /auth/desktop-session
-    yield* router.add("POST", "/auth/desktop-session", () =>
-      Effect.gen(function* () {
-        return HttpServerResponse.jsonUnsafe({ success: true })
-      }),
-    )
-
-    // 7. GET /license/status
-    yield* router.add("GET", "/license/status", (request) =>
-      Effect.gen(function* () {
-        const authHeader = request.headers["authorization"]
-        const headers = authHeader ? { authorization: authHeader } : {}
-        const res = yield* runPythonBridge({ action: "license_status", headers }).pipe(
-          Effect.map((data) => HttpServerResponse.jsonUnsafe(data)),
-          Effect.catch((err) =>
-            Effect.succeed(
-              HttpServerResponse.jsonUnsafe({ success: false, error: String(err) }, { status: 500 })
-            )
-          )
-        )
-        return res
-      }),
-    )
-
     // 8. GET /build/signoff/session/*
     yield* router.add("GET", "/build/signoff/session/*", (request) =>
       Effect.gen(function* () {
@@ -688,36 +664,5 @@ export const opencodeBridgeRoute = HttpRouter.use((router) =>
       }),
     )
 
-    // 12. GET /auth/profile
-    yield* router.add("GET", "/auth/profile", (request) =>
-      Effect.gen(function* () {
-        const authHeader = request.headers["authorization"]
-        const headers = authHeader ? { authorization: authHeader } : {}
-        const res = yield* runPythonBridge({ action: "auth_profile", headers }).pipe(
-          Effect.map((data) => HttpServerResponse.jsonUnsafe(data)),
-          Effect.catch((err) =>
-            Effect.succeed(
-              HttpServerResponse.jsonUnsafe({ success: false, error: String(err) }, { status: 500 })
-            )
-          )
-        )
-        return res
-      }),
-    )
-
-    // 13. POST /auth/logout
-    yield* router.add("POST", "/auth/logout", () =>
-      Effect.gen(function* () {
-        const res = yield* runPythonBridge({ action: "auth_logout" }).pipe(
-          Effect.map((data) => HttpServerResponse.jsonUnsafe(data)),
-          Effect.catch((err) =>
-            Effect.succeed(
-              HttpServerResponse.jsonUnsafe({ success: false, error: String(err) }, { status: 500 })
-            )
-          )
-        )
-        return res
-      }),
-    )
   }),
 )

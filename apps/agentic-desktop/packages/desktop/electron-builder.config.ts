@@ -25,10 +25,6 @@ const getBase = (): Configuration => ({
       filter: ["**/*"],
     },
     {
-      from: "resources/license.json",
-      to: "license.json",
-    },
-    {
       // Bundle the Python backend scripts so the packaged app can invoke them
       // directly on Linux/macOS where EDA tools and PDKs live on PATH.
       from: "../../../../server/",

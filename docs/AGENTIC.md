@@ -39,9 +39,7 @@ tedious, repetitive, and error-prone.
   right order and reads the output of each one.
 - **Get unstuck on errors faster.** When synthesis or P&R fails
   with a cryptic cell-name or layer-rule error, the agent reads the
-  PDK files on your disk, finds the real cause, and proposes a fix.
-  This is the loop that takes a human hours; AgentIC does it in
-  seconds.
+  PDK files on your disk, finds the cause, and proposes a fix.
 - **Try ideas quickly.** Spinning up a new variant of a block is
   as cheap as typing a new sentence. The agent can fork a design,
   swap a parameter, re-run the flow, and show you the new area /
@@ -51,8 +49,7 @@ tedious, repetitive, and error-prone.
   and explains what it did. Every tool call, every PDK read, every
   flow step is logged and visible.
 - **Bring your own models.** AgentIC works with any OpenAI-compatible
-  model provider. Use the hosted one for quick experiments, or plug
-  in your own key for the model you trust with your IP.
+  model provider via your own key.
 
 ---
 
@@ -63,9 +60,9 @@ willing to upload your source. AgentIC takes the opposite bet.
 
 - **Your chip never leaves your machine.** The agent runs the
   EDA flow locally. Source code, testbenches, waveforms, the GDS —
-  all on your disk, all under your control. The cloud is only used
-  to verify that your license is valid and to count how many builds
-  you ran this month. It never sees prompts, source, or PDKs.
+  all on your disk, all under your control. There is no account,
+  no license server, no usage counting. The only network traffic
+  is your own model API calls, if you configure a model key.
 - **It works with the tools you already have.** Whether you are
   using the open-source EDA stack (Yosys, Verilator, OpenROAD,
   OpenLane, Magic, Klayout) or commercial EDA tools from leading
@@ -78,15 +75,10 @@ willing to upload your source. AgentIC takes the opposite bet.
   real `.lib`/`.lef`/`.tcl` files in your PDK. This makes its
   output usable in a real flow instead of something that looks
   right but breaks at signoff.
-- **It is a desktop app, not a web IDE.** You do not need to
-  upload a project to "the cloud workspace". You open the app, you
-  point it at your local workspace, and it works on the files
-  already on your machine. It feels like VS Code for chips, not
-  like Colab for chips.
-- **It is autonomous, not chatty.** You do not have to babysit
-  every step. Send a prompt, walk away, and come back to a finished
-  layout. The agent iterates on its own: explore, write, run,
-  read errors, fix, repeat — up to 20 rounds per request.
+- **It is a desktop app, not a web IDE.** No project upload.
+  Point it at a local workspace and it works on the files there.
+- **It iterates on its own.** Explore, write, run, read errors,
+  fix, repeat — up to 20 rounds per request without babysitting.
 - **It is open about what it ran.** Every tool invocation, every
   PDK read, every command line is logged. There is no hidden
   remote execution. If you want to reproduce a build, you can.
@@ -104,8 +96,9 @@ willing to upload your source. AgentIC takes the opposite bet.
   results.
 - Use it as a teaching tool: watch a real flow run, see what
   each step does, inspect the artifacts.
-- Use your own model key, or the hosted one, depending on what
-  you trust with your work.
+- Bring your own model key for the agent loop. Deterministic
+  stages (lint, PDK indexing, report parsing, flow routing) need
+  no model at all.
 - Auto-update to new releases over GitHub without reinstalling.
 
 ---
@@ -116,35 +109,9 @@ willing to upload your source. AgentIC takes the opposite bet.
   RTL → GDSII only.
 - **Replace your tapeout review.** The agent scaffolds and
   iterates; a human signs off before fabrication.
-- **Run without a license.** Even with your own model key, you
-  need an active AgentIC subscription.
 - **Touch third-party IP you have not loaded.** AgentIC works on
   files inside your workspace. If you have not given it access to
   a piece of IP, it does not see it.
-
----
-
-## This is the first release. More is coming.
-
-AgentIC v1.0 is the starting line, not the finish line. The first
-public release ships with the core agent loop, the local backend,
-the desktop app, the design studio, the workspace, the model
-integration, and the license / billing / deep-link plumbing.
-
-Things on the near-term roadmap (subject to change, but real):
-
-- Better PDK auto-detection and "first-run" flow for new
-  workspaces.
-- More visualization: layout viewers, waveform inspectors,
-  flow-stage progress.
-- Multi-design project support.
-- More model providers and routing presets.
-- Tighter integration with leading commercial EDA tools.
-- A friendlier setup experience for users who have never
-  installed a flow before.
-
-If you have a feature you want to see, file an issue or send a
-note. The roadmap is shaped by what real chip designers ask for.
 
 ---
 
@@ -158,5 +125,5 @@ note. The roadmap is shaped by what real chip designers ask for.
 - Student? Use the open-source EDA stack and a free PDK to follow
   the full RTL → GDSII path on your laptop.
 
-Whatever path you take, AgentIC's job is the same: handle the
-repetitive plumbing so you can spend more time on the design.
+Whatever path you take, AgentIC handles the repetitive flow
+plumbing.

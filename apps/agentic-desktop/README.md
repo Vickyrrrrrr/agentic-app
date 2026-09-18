@@ -38,14 +38,14 @@ AGENTIC_MODE=builder bun run dev:agentic
 
 AgentIC Desktop owns the IDE surface and agent-runtime bridge.
 
-AgentIC backend owns:
+AgentIC backend (`server/src/agentic_server/`) owns:
 
-- license checks
 - VLSI capability graph
 - tool and PDK adapters
-- design-state ledger
-- report parsers
-- repair policies
+- run ledger (sqlite) + design-state ledger
+- report parsers (STA/DRC/LVS/lint/synthesis)
+- RTL quality gates + repair policies
 - workspace write policy
+- single execution funnel (timeouts, cwd jail, output caps)
 
 That boundary keeps the product from becoming a thin prompt wrapper while still reusing a mature agent harness.

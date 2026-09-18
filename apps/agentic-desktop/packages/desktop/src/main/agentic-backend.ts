@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { spawn, type ChildProcess } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { chmodSync, existsSync } from "node:fs"
 import { get as httpGet } from "node:http"
 import { createServer } from "node:net"
 import { homedir } from "node:os"
@@ -195,6 +195,17 @@ function resolveBackendCommand(env?: NodeJS.ProcessEnv):
       shell?: boolean
     }
   | undefined {
+  // 1. Frozen production binary (Linux AppImage / packaged builds).
+  //    No system python, no pip, no network needed at first launch.
+  const bundled = findBundledBackend()
+  if (bundled) {
+    backendMode = process.platform === "linux" ? "linux" : process.platform === "darwin" ? "macos" : "dev"
+    writeLog("agentic-backend", "Using bundled backend binary", { executable: bundled.executable })
+    return { executable: bundled.executable, args: [], cwd: bundled.cwd }
+  }
+
+  // 2. Dev launcher / system python fallback (also the rescue path when the
+  //    frozen binary cannot start, e.g. older glibc than it was built for).
   const serverDir = findServerDir()
   if (!serverDir) return
 
@@ -212,6 +223,25 @@ function resolveBackendCommand(env?: NodeJS.ProcessEnv):
     writeLog("agentic-backend", "Using python3 main.py directly", { mainScript, serverDir })
     return { executable: "python3", args: [mainScript], cwd: serverDir }
   }
+}
+
+function findBundledBackend(): { executable: string; cwd: string } | undefined {
+  const binaryName = process.platform === "win32" ? "agentic-backend.exe" : "agentic-backend"
+  const candidates = app.isPackaged
+    ? [join(process.resourcesPath, "backend", "agentic-backend", binaryName)]
+    : [join(app.getAppPath(), "resources", "backend", "agentic-backend", binaryName)]
+
+  for (const executable of candidates) {
+    if (!existsSync(executable)) continue
+    try {
+      // Transports (zips/tarballs) can strip the exec bit; restore it.
+      chmodSync(executable, 0o755)
+    } catch {
+      // Best effort — spawn will surface real permission errors.
+    }
+    return { executable, cwd: dirname(executable) }
+  }
+  return undefined
 }
 
 function findServerDir() {
@@ -237,81 +267,19 @@ function findServerDir() {
 }
 
 function backendEnvironment(): NodeJS.ProcessEnv {
-  const licenseConfig = readLicenseConfig()
+  // Local mode: the Python backend needs no license server or billing
+  // configuration. Only workspace + port are forwarded.
   const localUrl = process.env.AGENTIC_LOCAL_URL || DEFAULT_AGENTIC_URL
   const localPort = portFromLocalUrl(localUrl)
-  const licenseServerUrl = (
-    process.env.AGENTIC_LICENSE_SERVER_URL ||
-    process.env.VITE_AGENTIC_LICENSE_SERVER_URL ||
-    licenseConfig.license_server_url ||
-    "https://api.buildstack.live"
-  ).replace(/\/$/, "")
-
-  const entitlementPublicKey =
-    process.env.AGENTIC_ENTITLEMENT_PUBLIC_KEY || licenseConfig.entitlement_public_key || ""
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PYTHONUNBUFFERED: "1",
     AGENTIC_WORKSPACE: process.env.AGENTIC_WORKSPACE || join(homedir(), "AgentIC-workspace"),
-    AGENTIC_LICENSE_SERVER_URL: licenseServerUrl,
-    AGENTIC_LICENSE_STATUS_URL: process.env.AGENTIC_LICENSE_STATUS_URL || `${licenseServerUrl}/license/status`,
-    AGENTIC_CHECKOUT_URL: process.env.AGENTIC_CHECKOUT_URL || `${licenseServerUrl}/checkout/create`,
-    AGENTIC_USAGE_URL: process.env.AGENTIC_USAGE_URL || `${licenseServerUrl}/usage/build`,
     AGENTIC_PORT: localPort || process.env.AGENTIC_PORT || "7860",
-    AGENTIC_ENTITLEMENT_PUBLIC_KEY: entitlementPublicKey,
-    AGENTIC_REQUIRE_SIGNED_ENTITLEMENT:
-      process.env.AGENTIC_REQUIRE_SIGNED_ENTITLEMENT || (entitlementPublicKey ? "true" : "false"),
-  }
-
-  stripCloudOnlySecrets(env)
-  if (app.isPackaged) {
-    delete env.AGENTIC_LICENSE_BYPASS
-    delete env.AGENTIC_ALLOW_HS256_ENTITLEMENTS
-    delete env.AGENTIC_ENTITLEMENT_SECRET
   }
 
   return env
-}
-
-function readLicenseConfig(): { license_server_url?: string; entitlement_public_key?: string } {
-  const candidates = app.isPackaged
-    ? [join(process.resourcesPath, "license.json")]
-    : [join(app.getAppPath(), "resources", "license.json")]
-
-  for (const filePath of candidates) {
-    try {
-      const parsed = JSON.parse(readFileSync(filePath, "utf8"))
-      return {
-        license_server_url: typeof parsed.license_server_url === "string" ? parsed.license_server_url : undefined,
-        entitlement_public_key:
-          typeof parsed.entitlement_public_key === "string" ? parsed.entitlement_public_key : undefined,
-      }
-    } catch {
-      // Environment config is enough in development.
-    }
-  }
-  return {}
-}
-
-function stripCloudOnlySecrets(env: NodeJS.ProcessEnv) {
-  for (const key of Object.keys(env)) {
-    const upper = key.toUpperCase()
-    if (
-      upper.startsWith("LEMON_SQUEEZY_") ||
-      upper === "SUPABASE_SERVICE_ROLE_KEY" ||
-      upper === "SUPABASE_JWT_SECRET" ||
-      upper === "DATABASE_URL" ||
-      upper === "POSTGRES_URL" ||
-      upper === "POSTGRES_PRISMA_URL" ||
-      upper === "POSTGRES_URL_NON_POOLING" ||
-      upper === "ENTITLEMENT_JWT_PRIVATE_KEY" ||
-      upper === "ENTITLEMENT_JWT_PRIVATE_KEY_FILE" ||
-      upper === "ENTITLEMENT_JWT_SECRET"
-    ) {
-      delete env[key]
-    }
-  }
 }
 
 function attachProcessLogging(child: ChildProcess) {

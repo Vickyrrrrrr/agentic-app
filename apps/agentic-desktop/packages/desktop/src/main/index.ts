@@ -7,13 +7,12 @@ import { join } from "node:path"
 import { getCACertificates, setDefaultCACertificates } from "node:tls"
 import type { Event } from "electron"
 import { app, BrowserWindow } from "electron"
-import { request as httpRequest } from "node:http"
 
 import { Deferred, Effect, Fiber } from "effect"
 import contextMenu from "electron-context-menu"
 
 import type { ServerReadyData } from "../preload/types"
-import { configureAgenticBackendUrl, getAgenticBackendUrl, startAgenticBackend, stopAgenticBackend } from "./agentic-backend"
+import { configureAgenticBackendUrl, startAgenticBackend, stopAgenticBackend } from "./agentic-backend"
 import { checkAppExists, resolveAppPath } from "./apps"
 import { CHANNEL } from "./constants"
 import { registerIpcHandlers, sendDeepLinks, sendMenuCommand } from "./ipc"
@@ -68,77 +67,8 @@ function useEnvProxy() {
 
 function emitDeepLinks(urls: string[]) {
   if (urls.length === 0) return
-  // Handle agentic://auth-callback — save session to local backend, then notify renderer
-  for (const url of urls) {
-    if (url.startsWith("agentic://auth-callback")) {
-      handleAuthCallback(url)
-    }
-  }
   pendingDeepLinks.push(...urls)
   if (mainWindow) sendDeepLinks(mainWindow, urls)
-}
-
-/**
- * Called when the license server redirects back via:
- *   agentic://auth-callback#access_token=...&refresh_token=...&expires_at=...
- * Saves the Supabase session to the local backend so license checks pass.
- */
-function handleAuthCallback(url: string): void {
-  try {
-    // Tokens arrive in the URL hash (fragment) as URLSearchParams
-    const hashIndex = url.indexOf("#")
-    const fragment = hashIndex !== -1 ? url.slice(hashIndex + 1) : ""
-    const params = new URLSearchParams(fragment)
-    const accessToken = params.get("access_token")
-    const refreshToken = params.get("refresh_token")
-    const expiresAt = params.get("expires_at")
-    const expiresIn = params.get("expires_in")
-
-    if (!accessToken) {
-      logger.warn("auth-callback: no access_token in deep link")
-      return
-    }
-
-    const session = {
-      access_token: accessToken,
-      refresh_token: refreshToken ?? undefined,
-      expires_at: expiresAt ? Number(expiresAt) : undefined,
-      expires_in: expiresIn ? Number(expiresIn) : undefined,
-      token_type: "bearer",
-    }
-
-    const body = JSON.stringify(session)
-    const backendUrl = new URL(getAgenticBackendUrl())
-    const req = httpRequest(
-      {
-        hostname: backendUrl.hostname,
-        port: backendUrl.port || (backendUrl.protocol === "https:" ? 443 : 80),
-        path: "/auth/desktop-session",
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(body),
-        },
-      },
-      (res) => {
-        res.resume()
-        if (res.statusCode && res.statusCode < 300) {
-          logger.log("auth-callback: session saved to local backend")
-          // Notify renderer so the paywall auto-dismisses
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("license-activated")
-          }
-        } else {
-          logger.warn("auth-callback: backend returned status", { status: res.statusCode })
-        }
-      },
-    )
-    req.on("error", (err) => logger.warn("auth-callback: failed to save session", { err: String(err) }))
-    req.write(body)
-    req.end()
-  } catch (err) {
-    logger.warn("auth-callback: unexpected error", { err: String(err) })
-  }
 }
 
 async function killSidecar() {

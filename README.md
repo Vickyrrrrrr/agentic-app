@@ -20,7 +20,7 @@ While a `SKILL.md` file tells a model *how* to run a hardware design tool, a raw
 
 | Capability | Standard Agent + `SKILL.md` | AgentIC Workspace |
 | :--- | :--- | :--- |
-| **Log Management** | Standard agents dump raw terminal logs into the LLM context. A single compilation or DRC run can output **hundreds of megabytes** of logs, quickly exhausting context windows and causing hallucinations. | The AgentIC backend runs local python parsers (`report_parsers.py`, `sta_reports.py`) to compress gigabytes of log output, extracting and presenting only the precise timing violations or physical coordinates to the model. |
+| **Log Management** | Standard agents dump raw terminal logs into the LLM context. A single compilation or DRC run can output **hundreds of megabytes** of logs, quickly exhausting context windows and causing hallucinations. | The AgentIC backend runs local python parsers (`agentic_server.report_parsers`, `agentic_server.sta_reports`) to compress gigabytes of log output, extracting and presenting only the precise timing violations or physical coordinates to the model. |
 | **State Recovery** | If aPlace-and-Route (PnR) run fails after 30 minutes, the workspace is left in an unstable state. Standard agents cannot easily undo partial tool steps. | The backend maintains a **durable Checkpoint Engine**. If a design stage fails, the agent can immediately rollback the workspace filesystem and DB state to a previous successful stage and try a different strategy. |
 | **PDK Integration** | A raw LLM does not know which physical cells or macros (e.g. SRAM, IO buffers) actually exist on your local machine, leading it to invent non-existent hardware. | The local runtime actively **indexes your PDK libraries** (LEF/LIB files). The agent queries this capability graph to verify cell availability before writing RTL or configuring synthesis. |
 | **Domain-Specific Logic** | Generic agents treat all terminal outputs as plain text. They have no understanding of VLSI-specific logic constraints. | AgentIC has built-in **validation schemas** and **contract checking** to enforce hardware budgets (e.g., negative slack, clock constraints) and verify compliance at each step of the flow. |
@@ -41,3 +41,25 @@ While a `SKILL.md` file tells a model *how* to run a hardware design tool, a raw
 *   **Digital IC Design Engineers:** Looking to automate repetitive linting, constraint tuning, and debug loops in RTL-to-GDSII flows.
 *   **Hardware Prototypers:** Who want rapid, closed-loop compiler and simulation feedback when developing synthesizable hardware.
 *   **EDA & CAD Developers:** Seeking to test, benchmark, and optimize tool flow configurations autonomously.
+
+---
+
+## Quickstart (no accounts, no license server)
+
+```bash
+# Engine only
+cd server && ./run.sh            # serves http://localhost:7860
+
+# Desktop (Linux AppImage via CI releases, or dev below)
+cd apps/agentic-desktop
+AGENTIC_LOCAL_URL=http://127.0.0.1:7860 bun run dev:agentic
+```
+
+```bash
+# Tests (engine contract + deterministic-core goldens)
+cd server && python -m pytest tests/ -q
+```
+
+Docs: `docs/AGENTIC.md` (product), `docs/architecture.md`
+(design record + layer rules), `server/README.md` (engine),
+`docs/openapi/engine.json` (generated API contract).

@@ -27,9 +27,6 @@ import { Persist, persisted } from "@/utils/persist"
 import { StatusPopover, StatusPopoverV2 } from "../status-popover"
 import { IconButtonV2 } from "@opencode-ai/ui/v2/icon-button-v2"
 import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
-import { useDialog } from "@opencode-ai/ui/context/dialog"
-import { Dialog } from "@opencode-ai/ui/dialog"
-import { BackgroundTasksPanel } from "./background-tasks-panel"
 import { STASlackWidget } from "../sta-slack-widget"
 import { RlmIpythonConsole } from "../rlm-ipython-console"
 
@@ -202,17 +199,6 @@ export function SessionHeader() {
       setExists(Object.fromEntries(entries) as Partial<Record<OpenApp, boolean>>)
     })
   })
-
-  const dialog = useDialog()
-
-  const openTasksPanel = () => {
-    dialog.show(() => (
-      <Dialog size="large" fit class="w-[min(calc(100vw-60px),860px)] h-[min(calc(100vh-60px),640px)] p-0 overflow-hidden border border-[var(--v2-border-weaker-base,#1e293b)] rounded-xl">
-        <BackgroundTasksPanel onClose={() => dialog.close()} />
-      </Dialog>
-    ))
-  }
-
 
   const activeSessionId = () => {
     if (params.id) return params.id
@@ -557,17 +543,6 @@ export function SessionHeader() {
                         </Tooltip>
                       </Show>
                     </Show>
-                    <Tooltip placement="bottom" value="Tasks Panel — Monitor all background running & completed processes with live logs and summaries.">
-                      <Button
-                        variant="secondary"
-                        class="h-6 px-2 text-[11px] font-medium flex items-center gap-1 border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 shrink-0 rounded"
-                        onClick={openTasksPanel}
-                      >
-                        <span class="text-xs">⚡</span>
-                        <span>Tasks</span>
-                      </Button>
-                    </Tooltip>
-
                     <Show when={status()}>
                       <Tooltip placement="bottom" value={language.t("status.popover.trigger")}>
                         <StatusPopover />
