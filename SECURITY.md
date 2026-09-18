@@ -16,5 +16,5 @@ leaves the machine except the user's own model API calls.
 ## Reporting
 
 Do not open public issues for vulnerabilities. Email
-vickynishad110@gmail.com with steps to reproduce. Expect a fix or a
+agent.ic@buildstack.live with steps to reproduce. Expect a fix or a
 response within 7 days; coordinated disclosure after a patch release.
