@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto"
 import { spawn, type ChildProcess } from "node:child_process"
 import { chmodSync, existsSync } from "node:fs"
 import { get as httpGet } from "node:http"
@@ -94,10 +93,12 @@ export async function startAgenticBackend() {
     writeLog("agentic-backend", "Preferred port was occupied; auto-assigned free port", { freePort, url: baseUrl })
   }
 
-  // Resolve the backend command: bundled binary → dev run.sh → dev python3
+  // Resolve backend candidates in order: bundled binary → run.sh → main.py.
+  // Each is tried until one becomes healthy (the binary can fail to start
+  // on hosts it wasn't built for — older glibc, missing loader deps).
   const env = backendEnvironment()
-  const command = resolveBackendCommand(env)
-  if (!command) {
+  const commands = resolveBackendCommands()
+  if (commands.length === 0) {
     writeLog("agentic-backend", "No backend command found. Start the backend manually.", {}, "warn")
     backendStatus = {
       ...backendStatus,
@@ -110,40 +111,62 @@ export async function startAgenticBackend() {
     return
   }
 
+  for (const command of commands) {
+    if (await tryStartBackend(command, baseUrl, env)) return
+    writeLog("agentic-backend", "Backend candidate failed, trying next", { executable: command.executable }, "warn")
+  }
+
+  writeLog("agentic-backend", "No backend candidate became ready", { url: baseUrl, mode: backendMode }, "warn")
+  backendStatus = {
+    ...backendStatus,
+    mode: backendMode,
+    started,
+    ready: false,
+    degraded: true,
+    message: "AgentIC backend started but did not become ready. Check backend logs for startup errors.",
+  }
+}
+
+async function tryStartBackend(
+  command: BackendCommand,
+  baseUrl: string,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean> {
   writeLog("agentic-backend", "Spawning backend", { mode: backendMode, executable: command.executable, args: command.args.join(" ") })
 
+  let child: ChildProcess
   try {
-    const child = spawn(command.executable, command.args, {
+    child = spawn(command.executable, command.args, {
       env,
       cwd: command.cwd,
       shell: command.shell,
       stdio: ["ignore", "pipe", "pipe"],
     })
-    backendProcess = child
-    started = true
-    backendStatus = {
-      ...backendStatus,
-      mode: backendMode,
-      started: true,
-      ready: false,
-      degraded: false,
-    }
-    attachProcessLogging(child)
   } catch (error) {
     writeLog("agentic-backend", "Failed to spawn backend", { error: String(error) }, "error")
-    backendStatus = {
-      ...backendStatus,
-      started: false,
-      ready: false,
-      degraded: true,
-      message: `Failed to start AgentIC backend: ${String(error)}`,
-    }
-    return
+    return false
   }
+  backendProcess = child
+  started = true
+  backendStatus = {
+    ...backendStatus,
+    mode: backendMode,
+    started: true,
+    ready: false,
+    degraded: false,
+  }
+  attachProcessLogging(child)
+
+  // A binary that cannot run here (missing loader deps, bad arch) exits
+  // almost immediately — fail fast instead of burning the full timeout.
+  let exitedEarly = false
+  child.once("exit", () => {
+    exitedEarly = true
+  })
 
   // Wait up to ~40s for the backend to become ready
   for (let attempt = 0; attempt < 80; attempt += 1) {
-    if (!backendProcess) return
+    if (exitedEarly || backendProcess !== child) return false
     if (await isBridgeHealthy(baseUrl)) {
       writeLog("agentic-backend", "Backend ready", { url: baseUrl, mode: backendMode })
       backendStatus = {
@@ -154,7 +177,7 @@ export async function startAgenticBackend() {
         degraded: false,
         message: "AgentIC backend is running.",
       }
-      return
+      return true
     }
     if (await isHealthy(baseUrl)) {
       writeLog("agentic-backend", "Backend HTTP ready (waiting for bridge)", { url: baseUrl })
@@ -162,15 +185,12 @@ export async function startAgenticBackend() {
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
 
-  writeLog("agentic-backend", "Backend did not become ready within timeout", { url: baseUrl, mode: backendMode }, "warn")
-  backendStatus = {
-    ...backendStatus,
-    mode: backendMode,
-    started,
-    ready: false,
-    degraded: true,
-    message: "AgentIC backend started but did not become ready. Check backend logs for startup errors.",
-  }
+  writeLog("agentic-backend", "Backend candidate did not become ready within timeout", { url: baseUrl, mode: backendMode }, "warn")
+  try {
+    child.kill("SIGKILL")
+  } catch {}
+  if (backendProcess === child) backendProcess = null
+  return false
 }
 
 
@@ -187,27 +207,30 @@ export function stopAgenticBackend() {
 }
 
 
-function resolveBackendCommand(env?: NodeJS.ProcessEnv):
-  | {
-      executable: string
-      args: string[]
-      cwd: string
-      shell?: boolean
-    }
-  | undefined {
+type BackendCommand = {
+  executable: string
+  args: string[]
+  cwd: string
+  shell?: boolean
+}
+
+function resolveBackendCommands(): BackendCommand[] {
+  const commands: BackendCommand[] = []
   // 1. Frozen production binary (Linux AppImage / packaged builds).
   //    No system python, no pip, no network needed at first launch.
   const bundled = findBundledBackend()
   if (bundled) {
     backendMode = process.platform === "linux" ? "linux" : process.platform === "darwin" ? "macos" : "dev"
     writeLog("agentic-backend", "Using bundled backend binary", { executable: bundled.executable })
-    return { executable: bundled.executable, args: [], cwd: bundled.cwd }
+    commands.push({ executable: bundled.executable, args: [], cwd: bundled.cwd })
   }
 
-  // 2. Dev launcher / system python fallback (also the rescue path when the
-  //    frozen binary cannot start, e.g. older glibc than it was built for).
+  // 2-3. System python launcher, then bare main.py. These double as the
+  // rescue path when the frozen binary cannot start on the host
+  // (older glibc, missing loader deps) — startAgenticBackend tries each
+  // candidate in order until one becomes healthy.
   const serverDir = findServerDir()
-  if (!serverDir) return
+  if (!serverDir) return commands
 
   const runScript = join(serverDir, "run.sh")
   const mainScript = join(serverDir, "main.py")
@@ -215,14 +238,15 @@ function resolveBackendCommand(env?: NodeJS.ProcessEnv):
   if (existsSync(runScript)) {
     backendMode = process.platform === "linux" ? "linux" : process.platform === "darwin" ? "macos" : "dev"
     writeLog("agentic-backend", "Using system python backend launcher", { runScript, serverDir })
-    return { executable: "bash", args: [runScript], cwd: serverDir }
+    commands.push({ executable: "bash", args: [runScript], cwd: serverDir })
   }
 
   if (existsSync(mainScript)) {
     backendMode = "dev"
     writeLog("agentic-backend", "Using python3 main.py directly", { mainScript, serverDir })
-    return { executable: "python3", args: [mainScript], cwd: serverDir }
+    commands.push({ executable: "python3", args: [mainScript], cwd: serverDir })
   }
+  return commands
 }
 
 function findBundledBackend(): { executable: string; cwd: string } | undefined {
@@ -285,6 +309,12 @@ function backendEnvironment(): NodeJS.ProcessEnv {
 function attachProcessLogging(child: ChildProcess) {
   child.stdout?.on("data", (data: Buffer) => writeLog("agentic-backend", data.toString().trimEnd()))
   child.stderr?.on("data", (data: Buffer) => writeLog("agentic-backend", data.toString().trimEnd(), {}, "warn"))
+  // Without this, a spawn failure (bad path, permissions) throws an
+  // uncaught 'error' event and takes down the main process.
+  child.on("error", (error) => {
+    writeLog("agentic-backend", "AgentIC backend process error", { error: String(error) }, "error")
+    if (backendProcess === child) backendProcess = null
+  })
   child.on("exit", (code, signal) => {
     writeLog("agentic-backend", "AgentIC backend exited", { code, signal }, code === 0 ? "info" : "warn")
     if (backendProcess === child) backendProcess = null

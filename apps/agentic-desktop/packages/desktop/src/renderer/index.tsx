@@ -17,11 +17,11 @@ import type { UpdaterState } from "@opencode-ai/app/updater"
 import * as Sentry from "@sentry/solid"
 import type { AsyncStorage } from "@solid-primitives/storage"
 import { MemoryRouter } from "@solidjs/router"
-import { createEffect, createMemo, createResource, createSignal, onCleanup, onMount, Show } from "solid-js"
+import { createEffect, createMemo, createResource, createSignal, ErrorBoundary, onCleanup, onMount, Show } from "solid-js"
 import { render } from "solid-js/web"
 import pkg from "../../package.json"
 import { initI18n, t } from "./i18n"
-import { initializationData, initializationReady } from "./initialization"
+import { initializationData } from "./initialization"
 import { resetZoom, setPinchZoomEnabled, webviewZoom, zoomIn, zoomOut } from "./webview-zoom"
 import "./styles.css"
 import { GLOBAL_STORE } from "./store-keys"
@@ -345,20 +345,82 @@ render(() => {
       ServerConnection.Key.make(defaultServer.latest ?? "sidecar"),
     )
 
+    // A failed boot (dead sidecar, bad init data) must show an error
+    // screen with logs — never an unpainted window.
     return (
-      <Show when={ready()} fallback={splash}>
-        <Show when={initializationData(sidecar)} keyed>
-          {() => (
-            <Show when={effectiveDefaultServer()} keyed>
-              {(key) => (
-                <AppInterface defaultServer={key} servers={servers()} router={MemoryRouter}>
-                  <Inner />
-                </AppInterface>
-              )}
-            </Show>
-          )}
+      <ErrorBoundary fallback={(err) => <BootError error={err} />}>
+        <Show when={ready()} fallback={splash}>
+          <Show when={initializationData(sidecar)} keyed>
+            {() => (
+              <Show when={effectiveDefaultServer()} keyed>
+                {(key) => (
+                  <AppInterface defaultServer={key} servers={servers()} router={MemoryRouter}>
+                    <Inner />
+                  </AppInterface>
+                )}
+              </Show>
+            )}
+          </Show>
         </Show>
-      </Show>
+      </ErrorBoundary>
+    )
+  }
+
+  function BootError(props: { error: unknown }) {
+    const [logsPath, setLogsPath] = createSignal<string | null>(null)
+    const [busy, setBusy] = createSignal(false)
+    const message = props.error instanceof Error ? props.error.message : String(props.error)
+    const exportLogs = async () => {
+      setBusy(true)
+      try {
+        const path = await window.api.exportDebugLogs()
+        if (typeof path === "string") setLogsPath(path)
+      } catch {
+        // Stay on the error screen; the failure message is already shown.
+      } finally {
+        setBusy(false)
+      }
+    }
+
+    return (
+      <main class="min-h-dvh w-screen bg-background-base text-text-base flex items-center justify-center px-6 py-10">
+        <section class="w-full max-w-[520px] rounded-lg border border-border-subtle bg-surface-base p-8">
+          <div class="mb-5 flex items-center gap-3 text-text-strong">
+            <Splash class="w-9 h-11" />
+            <span class="text-18-bold">AgentIC</span>
+          </div>
+          <h1 class="text-28-bold text-text-strong mb-2">AgentIC couldn't start</h1>
+          <p class="text-14-regular text-text-base leading-6 mb-5">
+            The local runtime failed to start. Your designs are untouched.
+          </p>
+          <div class="rounded-md border border-border-subtle bg-background-base px-4 py-3 text-13-regular text-text-base mb-5 break-words">
+            {message}
+          </div>
+          <Show when={logsPath()}>
+            <div class="rounded-md border border-border-subtle bg-surface-raised px-4 py-3 text-13-regular text-text-base mb-5 break-words">
+              Logs saved to {logsPath()}
+            </div>
+          </Show>
+          <div class="flex flex-col sm:flex-row gap-3">
+            <button
+              type="button"
+              disabled={busy()}
+              class="h-10 rounded-md bg-text-strong text-background-base px-4 text-14-medium disabled:opacity-50"
+              onClick={() => window.location.reload()}
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              disabled={busy()}
+              class="h-10 rounded-md border border-border-subtle bg-background-base px-4 text-14-medium text-text-strong disabled:opacity-50"
+              onClick={() => void exportLogs()}
+            >
+              {busy() ? "Working..." : "Export debug logs"}
+            </button>
+          </div>
+        </section>
+      </main>
     )
   }
 
